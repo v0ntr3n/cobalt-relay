@@ -1,5 +1,7 @@
 # GServer (`vnsg2`) — Pure-Rust Private Server (`gserver`)
 
+[![GServer Rust CI](https://github.com/v0ntr3n/gserver/actions/workflows/ci.yml/badge.svg)](https://github.com/v0ntr3n/gserver/actions/workflows/ci.yml)
+
 A zero-external-dependency, `#![forbid(unsafe_code)]` multi-crate Rust private server engineered for the **GServer (`vnsg2` / BabelTime Sanguo 2)** Cocos2d-x C++ / Lua client ([`v0ntr3n/gclient`](https://github.com/v0ntr3n/gclient)).
 
 Every wire frame, cryptographic hash, AMF3 reference table, HTTP MAPI signature, `0xFEFEFEFE` SQLite cell decryptor, and Lua `parseData` schema invariant was reverse-engineered and verified directly against the real C++ client (`LCPacket.cpp`, `CConnection.cpp`, `Amf3Module.cpp`, `BtPlatformWin32.cpp`, `AccountAuthProvider.cpp`, `CConfigManager.cpp`) and decrypted Lua scripts (`Network.lua`, `NetConst.lua`, `LoginProxy.lua`, `UserData.lua`, `BagData.lua`, `HeroFormationData.lua`, `MainTown.lua`, `FightProxy.lua`).
@@ -44,7 +46,6 @@ Or use `./start_server.sh` (Linux/macOS) or `start_server.bat` (Windows).
 ### 2. Connect the Win32 Client
 Copy `client_launcher/connect_local_win32.bat` next to `GCLIENT.exe` (built from [`v0ntr3n/gclient`](https://github.com/v0ntr3n/gclient)) and launch it, or set:
 ```bat
-set GCLIENT_AUTH_URL=http://127.0.0.1:8080
 set GCLIENT_AUTH_URL=http://127.0.0.1:8080
 GCLIENT.exe
 ```
