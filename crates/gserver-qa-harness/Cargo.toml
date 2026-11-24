@@ -1,0 +1,12 @@
+[package]
+name = "gserver-qa-harness"
+version = "0.1.0"
+edition = "2021"
+description = "Zero-dependency pure-Rust adversarial QA, fuzzing, concurrency, and Win32 client-simulation harness for GServer (vnsg2)"
+license = "MIT"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+# Strictly zero external crate dependencies (100% pure Rust std, offline-first).

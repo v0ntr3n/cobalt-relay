@@ -1,0 +1,8 @@
+/target/
+/data/
+/exported_db/
+*.log
+*.tmp
+__pycache__/
+*.pyc
+.DS_Store

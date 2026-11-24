@@ -1,0 +1,18 @@
+[package]
+name = "gserver"
+version = "0.1.0"
+edition = "2021"
+description = "Unified dual-protocol (HTTP MAPI + TCP AMF3/LCPacket) private server daemon for GServer (vnsg2)"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "gserver"
+path = "src/main.rs"
+
+[dependencies]
+gserver-protocol = { path = "../gserver-protocol" }
+gserver-http = { path = "../gserver-http" }
+gserver-rpc-catalog = { path = "../gserver-rpc-catalog" }
+gserver-data = { path = "../gserver-data" }
+gserver-player = { path = "../gserver-player" }
+gserver-gameplay = { path = "../gserver-gameplay" }

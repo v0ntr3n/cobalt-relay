@@ -1,0 +1,9 @@
+[package]
+name = "gserver-player"
+version = "0.1.0"
+edition = "2021"
+description = "Zero-dependency pure-Rust player state, Lua wire-schema projection, progression mutations, and crash-safe WAL/atomic-file persistence crate for GServer (vnsg2)."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Zero external dependencies: 100% pure Rust standard library with #![forbid(unsafe_code)].

@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gserver-protocol",
+    "crates/gserver-http",
+    "crates/gserver-rpc-catalog",
+    "crates/gserver-data",
+    "crates/gserver-player",
+    "crates/gserver-gameplay",
+    "crates/gserver-qa-harness",
+    "crates/gserver",
+]
+default-members = ["crates/gserver"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = "symbols"

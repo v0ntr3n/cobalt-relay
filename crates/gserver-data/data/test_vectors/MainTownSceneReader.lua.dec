@@ -1,0 +1,66 @@
+---
+--@module MainTownSceneReader
+--@extends scripts.game.dbReader.BaseDBReader#BaseDBReader
+module( ... , seeall("game.dbReader.BaseDBReader") , package.seeall)
+
+function initTimeTable( self )
+  self.timeTb = {}
+  for i=1, 2 do
+  	local info = self:getRowById(i)
+    table.insert(self.timeTb,g.timeUtil:getSecondByStr(info.start_time))
+  end
+end
+
+---
+-- @function [parent=#MainTownSceneReader] getNowConfig
+-- @param self
+-- @param #number id
+-- @return #table {columnName = value}
+function getNowConfig(self,time)
+	if not self.timeTb then
+		self:initTimeTable()
+	end
+	local passTime = time - g.timeUtil:getToday0AmTimeStamp(time)
+	local nowId = 2
+	if self.timeTb[1] > passTime and passTime < self.timeTb[2] then
+	   nowId = 1
+	end
+	
+	return self:getRowById(nowId)
+end
+
+
+function initTimeTable_TM( self )
+  self.timeTb_TM = {}
+  for i=3, 4 do
+    local info = self:getRowById(i)
+    table.insert(self.timeTb_TM,g.timeUtil:getSecondByStr(info.start_time))
+  end
+end
+
+---
+-- @function [parent=#MainTownSceneReader] getNowConfig_TM
+-- @param self
+-- @param #number id
+-- @return #table {columnName = value}
+function getNowConfig_TM(self,time)
+  if not self.timeTb_TM then
+    self:initTimeTable_TM()
+  end
+  local passTime = time - g.timeUtil:getToday0AmTimeStamp(time)
+  local nowId = 4
+  if self.timeTb_TM[1] > passTime and passTime < self.timeTb_TM[2] then
+     nowId = 3
+  end
+  
+  return self:getRowById(nowId)
+end
+
+---
+-- 竞技场中的商城配置
+-- @function [parent=#MainTownSceneReader] getDBNameConfig
+-- @param self
+-- @return #object {databaseName = 资源名称, tableName = 表名}
+function getDBNameConfig(self)
+  return {databaseName = "common", tableName = "mainTown_scene"}
+end

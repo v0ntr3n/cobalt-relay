@@ -1,0 +1,20 @@
+# GServer (vnsg2) Rust Private Server Configuration
+http_bind = "127.0.0.1:8080"
+tcp_bind = "127.0.0.1:8160"
+public_host = "127.0.0.1"
+data_dir = "./data"
+
+# Security & Session Controls
+strict_session = true
+verify_tickets = true
+compress_s2c_threshold = 512
+
+# New Character Starter Gift Pack
+starter_level = 10
+starter_vip = 8
+starter_gold = 88888
+starter_gold_bind = 50000
+starter_copper = 10000000
+starter_execution = 300
+starter_energy = 150
+server_open_time = "20261124080000"

@@ -1,0 +1,9 @@
+{
+  "host": "http://127.0.0.1:18080",
+  "host_debug": "http://127.0.0.1:18080",
+  "log_host": "http://127.0.0.1:18080",
+  "log_host_debug": "http://127.0.0.1:18080",
+  "pushurl": "http://127.0.0.1:18080/push",
+  "gn": "vnsg2",
+  "language": "vi_VN"
+}

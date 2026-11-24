@@ -1,0 +1,10 @@
+[package]
+name = "gserver-protocol"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Pure-Rust safe AMF3, RFC 1950/1951 Zlib, BabelTime LCPacket, and TCP framing protocol crate for GServer (vnsg2)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Zero external dependencies (100% std-only pure Safe Rust for offline builds)
