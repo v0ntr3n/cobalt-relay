@@ -1,0 +1,39 @@
+name: GServer Rust CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  check-and-test:
+    name: Build, Clippy & Full E2E Suite (self-hosted)
+    runs-on: [self-hosted, linux, x64]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify Rust toolchain
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal --component clippy,rustfmt
+          fi
+          rustc --version
+          cargo --version
+
+      - name: Build, Clippy & Full E2E Test Suite
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          mkdir -p ci_logs
+          set -o pipefail
+          cargo build --workspace --release --offline 2>&1 | tee ci_logs/build.log
+          cargo clippy --workspace --all-targets --offline -- -D warnings 2>&1 | tee -a ci_logs/build.log
+          cargo test --workspace --offline 2>&1 | tee -a ci_logs/build.log
