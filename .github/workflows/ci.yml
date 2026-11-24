@@ -10,6 +10,7 @@ on:
 permissions:
   contents: read
   issues: write
+  pull-requests: write
 
 jobs:
   check-and-test:
@@ -26,6 +27,9 @@ jobs:
             bin_path: target/release/gserver.exe
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Preserve LF line endings on Windows checkout
+        run: git config --global core.autocrlf false
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -35,13 +39,23 @@ jobs:
           components: clippy, rustfmt
 
       - name: Build workspace (Release, offline)
-        run: cargo build --workspace --release --offline
+        shell: bash
+        run: |
+          mkdir -p ci_logs
+          set -o pipefail
+          cargo build --workspace --release --offline 2>&1 | tee ci_logs/build.log
 
       - name: Lint workspace with Clippy (-D warnings)
-        run: cargo clippy --workspace --all-targets --offline -- -D warnings
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --workspace --all-targets --offline -- -D warnings 2>&1 | tee -a ci_logs/build.log
 
       - name: Run all unit, fuzz & full-stack E2E tests
-        run: cargo test --workspace --offline
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace --offline 2>&1 | tee -a ci_logs/build.log
 
       - name: Upload release server binary
         uses: actions/upload-artifact@v4
@@ -52,3 +66,21 @@ jobs:
             server.toml
             tools/export_db_to_json.py
           if-no-files-found: error
+
+      - name: Post failure log on PR if failed
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let tail = 'No log captured.';
+            if (fs.existsSync('ci_logs/build.log')) {
+              const lines = fs.readFileSync('ci_logs/build.log', 'utf8').split(/\r?\n/);
+              tail = lines.slice(-100).join('\n').slice(-20000);
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `### CI Failure on \`${{ matrix.os }}\`\n\`\`\`text\n${tail}\n\`\`\``
+            });
