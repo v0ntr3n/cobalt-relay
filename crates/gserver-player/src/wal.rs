@@ -175,7 +175,7 @@ impl WalRecord {
 /// Append-only Write-Ahead Log writer + crash-recovery scanner.
 pub struct WriteAheadLog {
     path: PathBuf,
-    file: File,
+    file: Option<File>,
     next_seq: u64,
 }
 
@@ -271,7 +271,7 @@ impl WriteAheadLog {
         Ok((
             Self {
                 path,
-                file,
+                file: Some(file),
                 next_seq,
             },
             outcome,
@@ -287,8 +287,11 @@ impl WriteAheadLog {
         let seq = self.next_seq;
         let record = WalRecord::new(seq, timestamp, op);
         let line = record.to_jsonl_line();
-        self.file.write_all(line.as_bytes())?;
-        self.file.sync_data()?;
+        let fh = self.file.as_mut().ok_or_else(|| {
+            PlayerError::Io(std::io::Error::other("WAL file handle closed"))
+        })?;
+        fh.write_all(line.as_bytes())?;
+        fh.sync_data()?;
         self.next_seq += 1;
         Ok(record)
     }
@@ -309,6 +312,8 @@ impl WriteAheadLog {
             tmp.write_all(line.as_bytes())?;
             tmp.sync_all()?;
         }
+        // Close open WAL handle before renaming so Windows NTFS MoveFileExW succeeds.
+        let _ = self.file.take();
         fs::rename(&tmp_path, &self.path)?;
         if let Some(parent) = self.path.parent() {
             if let Ok(dir) = File::open(parent) {
@@ -316,12 +321,13 @@ impl WriteAheadLog {
             }
         }
 
-        self.file = OpenOptions::new()
+        let mut reopened = OpenOptions::new()
             .create(true)
             .read(true)
             .append(true)
             .open(&self.path)?;
-        self.file.seek(SeekFrom::End(0))?;
+        reopened.seek(SeekFrom::End(0))?;
+        self.file = Some(reopened);
         self.next_seq = cp_seq + 1;
         Ok(cp_seq)
     }

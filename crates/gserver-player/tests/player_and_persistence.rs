@@ -1307,8 +1307,10 @@ fn test_34_user_login_ok_and_banned_account_response_format() {
         entry.insert("banned_until".into(), JsonValue::from(1_800_000_000u64));
         entry.insert("ban_reason".into(), JsonValue::from("speedhack"));
     }
-    fs::write(store.accounts_path(), acc_json.to_json_pretty()).unwrap();
-    // Clear WAL so snapshot ban takes effect directly on fresh open
+    let accounts_path = store.accounts_path().to_path_buf();
+    drop(store);
+    fs::write(&accounts_path, acc_json.to_json_pretty()).unwrap();
+    // Clear WAL after dropping open store handle so Windows DeleteFileW succeeds
     fs::remove_file(data_dir.join("wal").join("operations.wal")).unwrap();
 
     let mut reopened = PlayerStore::open(&data_dir, StarterPackConfig::default()).unwrap();
