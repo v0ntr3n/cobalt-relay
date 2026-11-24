@@ -10,30 +10,45 @@ on:
 permissions:
   contents: read
   issues: write
-  pull-requests: write
 
 jobs:
   check-and-test:
-    name: Build, Clippy & Full E2E Suite (self-hosted)
-    runs-on: [self-hosted, linux, x64]
+    name: Build, Clippy & E2E Suite (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: gserver-linux-x64
+            bin_path: target/release/gserver
+          - os: windows-latest
+            artifact_name: gserver-windows-x64
+            bin_path: target/release/gserver.exe
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify Rust toolchain
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          if ! command -v cargo >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal --component clippy,rustfmt
-          fi
-          rustc --version
-          cargo --version
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
-      - name: Build, Clippy & Full E2E Test Suite
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          mkdir -p ci_logs
-          set -o pipefail
-          cargo build --workspace --release --offline 2>&1 | tee ci_logs/build.log
-          cargo clippy --workspace --all-targets --offline -- -D warnings 2>&1 | tee -a ci_logs/build.log
-          cargo test --workspace --offline 2>&1 | tee -a ci_logs/build.log
+      - name: Build workspace (Release, offline)
+        run: cargo build --workspace --release --offline
+
+      - name: Lint workspace with Clippy (-D warnings)
+        run: cargo clippy --workspace --all-targets --offline -- -D warnings
+
+      - name: Run all unit, fuzz & full-stack E2E tests
+        run: cargo test --workspace --offline
+
+      - name: Upload release server binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            ${{ matrix.bin_path }}
+            server.toml
+            tools/export_db_to_json.py
+          if-no-files-found: error
