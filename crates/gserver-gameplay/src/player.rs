@@ -375,8 +375,8 @@ impl HeroInstance {
             pdef,
             mdef,
             speed,
-            normal_skill_id: 1000 + (htid % 1000),
-            rage_skill_id: 2000 + (htid % 1000),
+            normal_skill_id: 1001,
+            rage_skill_id: 2001,
         }
     }
 
@@ -415,6 +415,11 @@ impl HeroInstance {
             ("gold_rank", DtoValue::from(0u32)),
             ("gold_level", DtoValue::from(0u32)),
             ("lock", DtoValue::from(0u32)),
+            ("va_fail_reward", DtoValue::Map(BTreeMap::new())),
+            ("va_use_wash", DtoValue::Map(BTreeMap::new())),
+            ("va_last_wash", DtoValue::Map(BTreeMap::new())),
+            ("va_wash_count", DtoValue::Map(BTreeMap::new())),
+            ("va_inlay", DtoValue::Map(BTreeMap::new())),
         ])
     }
 }

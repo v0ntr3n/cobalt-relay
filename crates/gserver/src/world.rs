@@ -541,11 +541,16 @@ impl ServerWorld {
             }
 
             "switchfunc.getSwitch" => {
+                // All function_node IDs with require_lv <= 10 plus starter activity/UI switches
                 let unlocked = Value::dense_array(
-                    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 18, 20, 163, 246]
-                        .into_iter()
-                        .map(Value::Int)
-                        .collect(),
+                    [
+                        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 18, 20, 24, 25, 30, 31,
+                        32, 35, 36, 44, 48, 49, 51, 56, 57, 58, 62, 67, 129, 163, 168, 186, 200,
+                        203, 220, 237, 239, 242, 244, 246,
+                    ]
+                    .into_iter()
+                    .map(Value::Int)
+                    .collect(),
                 );
                 Self::ok_reply(req, session, unlocked, now_i64)
             }
@@ -944,6 +949,22 @@ impl ServerWorld {
 
             "firstGift.getRechargeGold" => {
                 Self::ok_reply(req, session, Value::Int(0), now_i64)
+            }
+
+            "dressBrightBook.getInfo" => {
+                let ret_val = Value::map([
+                    ("attr_list", Value::empty_array()),
+                    (
+                        "book_list",
+                        Value::map((1..=12).map(|id| (id.to_string(), Value::empty_array()))),
+                    ),
+                ]);
+                Self::ok_reply(req, session, ret_val, now_i64)
+            }
+
+            "activityDailyRecharge2.getInfo" => {
+                let ret_val = Value::map([("buyInfo", Value::empty_array())]);
+                Self::ok_reply(req, session, ret_val, now_i64)
             }
 
             "top.get" => {
