@@ -494,15 +494,11 @@ impl ServerWorld {
                         "fight_force_max".to_string(),
                         PlayerJson::UInt(profile.fight_force_max),
                     );
-                    let unlock_levels = [1u32, 1, 10, 18, 26, 32];
-                    let mut pos_map = BTreeMap::new();
-                    for (i, &req_lv) in unlock_levels.iter().enumerate() {
-                        pos_map.insert(
-                            (i + 1).to_string(),
-                            PlayerJson::Bool(profile.level >= req_lv),
-                        );
-                    }
-                    map.insert("hero_position_map".to_string(), PlayerJson::Object(pos_map));
+                    // `hero_position_map` and `hero_partner_map` are client-side config tables
+                    // built by `UserData:initConfig()` with integer keys `1..6` from
+                    // `current_config.db` and must not be sent/clobbered by the server.
+                    map.remove("hero_position_map");
+                    map.remove("hero_partner_map");
                 }
                 let ret_val = player_json_to_amf3(&user_json);
                 Self::ok_reply(req, session, ret_val, now_i64)
@@ -862,5 +858,119 @@ fn amf3_to_player_json(val: &Value) -> PlayerJson {
             }
             PlayerJson::Object(m)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gserver_http::ServerConfig as HttpMapiConfig;
+    use gserver_protocol::RpcRequest;
+
+    #[test]
+    fn user_get_user_excludes_hero_position_map_and_hero_partner_map() {
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "gserver_world_get_user_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).expect("create temp test dir");
+
+        let cfg = DaemonConfig {
+            data_dir: tmp_dir.clone(),
+            verify_tickets: false,
+            ..DaemonConfig::default()
+        };
+        let mapi = Arc::new(MapiService::new(HttpMapiConfig::default()));
+        let world = ServerWorld::open(cfg, mapi).expect("open ServerWorld");
+
+        let mut session = ConnectionSession::default();
+        let login = world.handle_rpc(
+            &mut session,
+            &RpcRequest::with_seq_id(
+                "user.login",
+                2,
+                vec![Value::map([
+                    ("pid", Value::String("pid_userdata_932".into())),
+                    ("serverID", Value::String("game2900161".into())),
+                ])],
+                "0",
+            ),
+        );
+        assert_eq!(login.caller_envelopes[0].err, "ok");
+
+        let tok = session.session_token.clone();
+        let create = world.handle_rpc(
+            &mut session,
+            &RpcRequest::with_seq_id(
+                "user.createUser",
+                3,
+                vec![Value::Int(1), Value::String("UserDataGuard".into())],
+                tok.as_str(),
+            ),
+        );
+        assert_eq!(create.caller_envelopes[0].err, "ok");
+
+        let before = world.handle_rpc(
+            &mut session,
+            &RpcRequest::with_seq_id("user.getUserBeforLogin", 4, vec![], tok.as_str()),
+        );
+        let uid = before.caller_envelopes[0]
+            .ret
+            .get_field("uid")
+            .and_then(Value::as_i64)
+            .expect("created uid");
+
+        let ulogin = world.handle_rpc(
+            &mut session,
+            &RpcRequest::with_seq_id(
+                "user.userLogin",
+                5,
+                vec![Value::Int(uid as i32)],
+                tok.as_str(),
+            ),
+        );
+        assert_eq!(ulogin.caller_envelopes[0].ret.as_str(), Some("ok"));
+
+        let get_user = world.handle_rpc(
+            &mut session,
+            &RpcRequest::with_seq_id("user.getUser", 6, vec![], tok.as_str()),
+        );
+        assert_eq!(get_user.caller_envelopes[0].err, "ok");
+        let ret = &get_user.caller_envelopes[0].ret;
+        assert_eq!(ret.get_field("uid").and_then(Value::as_i64), Some(uid));
+        assert!(
+            ret.get_field("hero_position_map").is_none(),
+            "user.getUser must not contain hero_position_map (clobbers UserData:initConfig integer keys at UserData.lua:931-932)"
+        );
+        assert!(
+            ret.get_field("hero_partner_map").is_none(),
+            "user.getUser must not contain hero_partner_map (client-side UserData:initConfig table)"
+        );
+
+        let gm_lv = world.handle_rpc(
+            &mut session,
+            &RpcRequest::with_seq_id(
+                "chat.sendWorld",
+                7,
+                vec![Value::Int(1), Value::String("/level 55".into())],
+                tok.as_str(),
+            ),
+        );
+        for env in &gm_lv.caller_envelopes {
+            assert!(
+                env.ret.get_field("hero_position_map").is_none(),
+                "push {:?} must not contain hero_position_map",
+                env.callback_name
+            );
+            assert!(
+                env.ret.get_field("hero_partner_map").is_none(),
+                "push {:?} must not contain hero_partner_map",
+                env.callback_name
+            );
+        }
+
+        drop(world);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

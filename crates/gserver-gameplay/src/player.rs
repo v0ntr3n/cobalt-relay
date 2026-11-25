@@ -616,7 +616,9 @@ impl PlayerState {
         self.roster.total_fight_force()
     }
 
-    /// Computes unlocked formation positions (`1..=6`) from player `level` (`MainTown:initLineUp`).
+    /// Server-side helper computing unlocked formation positions (`1..=6`) from player `level`.
+    /// Note: never emitted over the wire in `user.getUser` or `user.updateUser`, because
+    /// `UserData:initConfig()` populates `self.hero_position_map` with integer keys `1..6`.
     pub fn hero_position_map(&self) -> BTreeMap<String, DtoValue> {
         let unlock_levels = [1u32, 1, 10, 18, 26, 32];
         let mut map = BTreeMap::new();
@@ -662,7 +664,6 @@ impl PlayerState {
             ("title_id", DtoValue::from(self.title_id)),
             ("server_id", DtoValue::from(self.server_id.as_str())),
             ("server_open_time", DtoValue::from(self.server_open_time.as_str())),
-            ("hero_position_map", DtoValue::Map(self.hero_position_map())),
             ("dress_info", DtoValue::Map(BTreeMap::new())),
             ("dress_expire", DtoValue::Map(BTreeMap::new())),
             ("va_user", DtoValue::Map(BTreeMap::new())),

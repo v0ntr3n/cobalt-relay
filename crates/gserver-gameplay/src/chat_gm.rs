@@ -221,13 +221,11 @@ pub fn execute_gm_command(
                 main_hero.recalculate_stats();
             }
             let ff = player.fight_force();
-            let pos_map = player.hero_position_map();
             client_pushes.push(PlayerState::build_user_update_push(
                 [
                     ("level", DtoValue::from(player.level)),
                     ("exp", DtoValue::from(player.exp)),
                     ("fight_force", DtoValue::from(ff)),
-                    ("hero_position_map", DtoValue::Map(pos_map)),
                 ],
                 now_ts,
             ));
