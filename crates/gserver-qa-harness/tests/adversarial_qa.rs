@@ -5,11 +5,11 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{Shutdown, TcpStream};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gserver_qa_harness::amf3::{
     audit_lua_client_hazards, encode_buggy_truncated_u29_integer, write_u29, Amf3Decoder,
@@ -36,6 +36,16 @@ use gserver_qa_harness::server::{GameServerConfig, GameTcpServer};
 use gserver_qa_harness::zlib::{
     adler32, craft_zlib_zero_bomb, zlib_compress, zlib_decompress_bounded, ZlibError,
 };
+
+fn wait_until<F: Fn() -> bool>(timeout: Duration, cond: F) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if cond() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
 
 // ============================================================================
 // 1. AMF3 U29 Signed Boundaries, Negative 4-Byte Encoding & Timestamp Promotion
@@ -607,7 +617,7 @@ fn test_1byte_chunked_tcp_pipelined_bursts_and_truncated_frames() {
     {
         let mut stream = TcpStream::connect(addr).unwrap();
         stream.set_nodelay(true).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
 
         let mut sim = Win32ClientSimulator::new();
         sim.reg_push_callback("push.reward.update");
@@ -677,7 +687,8 @@ fn test_1byte_chunked_tcp_pipelined_bursts_and_truncated_frames() {
     for &cut in &[1usize, 10, 24, sample_pkt.len() - 2] {
         let mut s = TcpStream::connect(addr).unwrap();
         s.write_all(&sample_pkt[..cut]).unwrap();
-        drop(s);
+        s.flush().unwrap();
+        let _ = s.shutdown(Shutdown::Write);
     }
     {
         let mut dos_sock = TcpStream::connect(addr).unwrap();
@@ -685,10 +696,15 @@ fn test_1byte_chunked_tcp_pipelined_bursts_and_truncated_frames() {
         fake_hdr[0..4].copy_from_slice(&((MAX_SERVER_FRAME_BODY_LEN as u32) + 42).to_be_bytes());
         fake_hdr[4..8].copy_from_slice(&[1, 1, 1, 1]);
         let _ = dos_sock.write_all(&fake_hdr);
+        let _ = dos_sock.flush();
+        let _ = dos_sock.shutdown(Shutdown::Write);
     }
 
-    thread::sleep(Duration::from_millis(80));
     let tel = server.telemetry();
+    wait_until(Duration::from_secs(5), || {
+        tel.clean_truncated_disconnects.load(Ordering::Relaxed) >= 4
+            && tel.rejected_oversized_frames.load(Ordering::Relaxed) >= 1
+    });
     assert!(tel.clean_truncated_disconnects.load(Ordering::Relaxed) >= 4);
     assert!(tel.rejected_oversized_frames.load(Ordering::Relaxed) >= 1);
     assert_eq!(tel.lua_hazard_violations.load(Ordering::Relaxed), 0);
@@ -801,6 +817,8 @@ fn test_32_thread_concurrent_client_and_hostile_neighbor_stress() {
                     let mut corrupt = pkt_login.clone();
                     corrupt[12] ^= 0xAA;
                     let _ = bad.write_all(&corrupt);
+                    let _ = bad.flush();
+                    let _ = bad.shutdown(Shutdown::Write);
                 }
                 if let Ok(mut bad2) = TcpStream::connect(game_addr) {
                     let mut depth_bomb = Vec::with_capacity(80 * 3 + 2);
@@ -810,6 +828,8 @@ fn test_32_thread_concurrent_client_and_hostile_neighbor_stress() {
                     depth_bomb.extend_from_slice(&[MARKER_INTEGER, 0x01]);
                     let framed_depth = encode_client_lc_packet(&depth_bomb, true);
                     let _ = bad2.write_all(&framed_depth);
+                    let _ = bad2.flush();
+                    let _ = bad2.shutdown(Shutdown::Write);
                 }
             }
         }));
@@ -819,8 +839,12 @@ fn test_32_thread_concurrent_client_and_hostile_neighbor_stress() {
         h.join().expect("concurrent client worker must not panic");
     }
 
-    thread::sleep(Duration::from_millis(50));
     let tel = game_server.telemetry();
+    wait_until(Duration::from_secs(5), || {
+        tel.accepted_connections.load(Ordering::Relaxed) >= 32 + 16
+            && tel.rejected_md5_frames.load(Ordering::Relaxed) == 8
+            && tel.rejected_amf3_depth_bombs.load(Ordering::Relaxed) == 8
+    });
     assert!(tel.accepted_connections.load(Ordering::Relaxed) >= 32 + 16);
     assert_eq!(tel.valid_rpcs_handled.load(Ordering::Relaxed), (32 * 3) as u64);
     assert_eq!(tel.stat_msgs_ignored_cleanly.load(Ordering::Relaxed), 32);

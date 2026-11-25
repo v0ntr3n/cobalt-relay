@@ -217,7 +217,14 @@ fn handle_game_client(
                 }
                 continue;
             }
-            Err(_) => break,
+            Err(_) => {
+                if decoder.buffered_len() > 0 {
+                    telemetry
+                        .clean_truncated_disconnects
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                break;
+            }
         }
     }
 }

@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
   issues: write
   pull-requests: write
 
@@ -33,6 +34,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Initialize CI log capture
+        shell: bash
+        run: |
+          mkdir -p ci_logs
+          echo "Install Rust stable toolchain" > ci_logs/last_step.txt
+          : > ci_logs/build.log
+
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -41,19 +49,21 @@ jobs:
       - name: Build workspace (Release, offline)
         shell: bash
         run: |
-          mkdir -p ci_logs
+          echo "Build workspace (Release, offline)" > ci_logs/last_step.txt
           set -o pipefail
-          cargo build --workspace --release --offline 2>&1 | tee ci_logs/build.log
+          cargo build --workspace --release --offline 2>&1 | tee -a ci_logs/build.log
 
       - name: Lint workspace with Clippy (-D warnings)
         shell: bash
         run: |
+          echo "Lint workspace with Clippy (-D warnings)" > ci_logs/last_step.txt
           set -o pipefail
           cargo clippy --workspace --all-targets --offline -- -D warnings 2>&1 | tee -a ci_logs/build.log
 
       - name: Run all unit, fuzz & full-stack E2E tests
         shell: bash
         run: |
+          echo "Run all unit, fuzz & full-stack E2E tests" > ci_logs/last_step.txt
           set -o pipefail
           cargo test --workspace --offline 2>&1 | tee -a ci_logs/build.log
 
@@ -67,6 +77,15 @@ jobs:
             tools/export_db_to_json.py
           if-no-files-found: error
 
+      - name: Upload CI failure log (${{ matrix.os }})
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-error-logs-${{ matrix.os }}
+          path: ci_logs/*
+          if-no-files-found: ignore
+          retention-days: 3
+
       - name: Post failure log on PR if failed
         if: failure() && github.event_name == 'pull_request'
         uses: actions/github-script@v7
@@ -76,7 +95,7 @@ jobs:
             let tail = 'No log captured.';
             if (fs.existsSync('ci_logs/build.log')) {
               const lines = fs.readFileSync('ci_logs/build.log', 'utf8').split(/\r?\n/);
-              tail = lines.slice(-100).join('\n').slice(-20000);
+              tail = lines.slice(-120).join('\n').slice(-20000);
             }
             await github.rest.issues.createComment({
               owner: context.repo.owner,
@@ -84,3 +103,211 @@ jobs:
               issue_number: context.issue.number,
               body: `### CI Failure on \`${{ matrix.os }}\`\n\`\`\`text\n${tail}\n\`\`\``
             });
+
+  ci-issue-sync:
+    name: Synchronize CI error issues
+    needs: [check-and-test]
+    if: ${{ always() && !cancelled() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - name: Download captured CI error logs
+        if: needs.check-and-test.result == 'failure'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ci-error-logs-*
+          path: downloaded_ci_logs
+
+      - name: Create, update or close CI error issues
+        uses: actions/github-script@v7
+        env:
+          CHECK_RESULT: ${{ needs.check-and-test.result }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const { owner, repo } = context.repo;
+            const label = 'ci-error';
+            const aliases = [label, 'ci error', 'ci-failure'];
+            const failed = process.env.CHECK_RESULT === 'failure';
+            const passed = process.env.CHECK_RESULT === 'success';
+            if (!failed && !passed) {
+              core.info('No definitive CI result; leaving issues unchanged.');
+              return;
+            }
+
+            const { data: branch } = await github.rest.repos.getBranch({
+              owner, repo, branch: 'main'
+            });
+            if (branch.commit.sha !== context.sha) {
+              core.info('Superseded main commit; leaving issues unchanged.');
+              return;
+            }
+
+            const runUrl = context.serverUrl + '/' + owner + '/' + repo + '/actions/runs/' + context.runId;
+            const attempt = process.env.GITHUB_RUN_ATTEMPT || '1';
+            const marker = '<!-- ci-run:' + context.runId + ':' + attempt + ' -->';
+            const sha = context.sha.slice(0, 8);
+
+            async function ensureLabel() {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name: label });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                try {
+                  await github.rest.issues.createLabel({
+                    owner, repo, name: label, color: 'd73a4a',
+                    description: 'Automated CI failure report'
+                  });
+                } catch (createError) {
+                  if (createError.status !== 422) throw createError;
+                  await github.rest.issues.getLabel({ owner, repo, name: label });
+                }
+              }
+            }
+
+            function formatLogLines(rawText, heading) {
+              const clean = rawText
+                .replace(/\u001b\[[0-9;]*m/g, '')
+                .split(/\r?\n/)
+                .map(l => l.replace(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s?/, ''));
+              const errRe = /(##\[error\]|^error(\[[A-Z0-9]+\])?:|panicked at|\bFAILED\b|^failures:|fatal:)/i;
+              const matched = clean.filter(l => errRe.test(l)).slice(-80);
+              const tail = clean.slice(-120);
+              return [
+                '<details open><summary>' + heading + '</summary>',
+                '',
+                '```text',
+                '=== Matched Rust / Cargo Error Lines ===',
+                ...(matched.length ? matched : ['(no explicit error regex match)']),
+                '',
+                '=== Log Tail (last 120 lines) ===',
+                ...tail,
+                '```',
+                '</details>'
+              ].join('\n').slice(0, 26000);
+            }
+
+            const byNumber = new Map();
+            for (const name of aliases) {
+              const issues = await github.paginate(github.rest.issues.listForRepo, {
+                owner, repo, state: 'open', labels: name, per_page: 100
+              });
+              for (const issue of issues) {
+                if (!issue.pull_request) byNumber.set(issue.number, issue);
+              }
+            }
+            const open = [...byNumber.values()].sort((a, b) => b.number - a.number);
+
+            if (passed) {
+              for (const issue of open) {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: issue.number,
+                  body: 'All Ubuntu & Windows build, Clippy, and E2E suites passed on commit `' + sha +
+                    '` ([CI run](' + runUrl + ')). Automatically closing this CI error.'
+                });
+                await github.rest.issues.update({
+                  owner, repo, issue_number: issue.number,
+                  state: 'closed', state_reason: 'completed'
+                });
+              }
+              core.info('Closed ' + open.length + ' CI error issue(s).');
+              return;
+            }
+
+            await ensureLabel();
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              owner, repo, run_id: context.runId, filter: 'latest', per_page: 100
+            });
+            const failedJobs = jobs.filter(job => job.conclusion === 'failure' &&
+              job.name !== 'Synchronize CI error issues');
+            const details = failedJobs.flatMap(job => [
+              '- **Job:** [' + job.name + '](' + job.html_url + ')',
+              ...((job.steps || []).filter(step => step.conclusion === 'failure')
+                .map(step => '  - Failed step: ' + step.name))
+            ]);
+
+            const logSections = [];
+            function collectArtifactLogs(dir, artifactName) {
+              if (!fs.existsSync(dir)) return;
+              const directErr = path.join(dir, 'build.log');
+              const directStep = path.join(dir, 'last_step.txt');
+              if (fs.existsSync(directErr) && fs.statSync(directErr).isFile()) {
+                const content = fs.readFileSync(directErr, 'utf8').trim();
+                const stepLabel = fs.existsSync(directStep)
+                  ? fs.readFileSync(directStep, 'utf8').trim()
+                  : 'Cargo build/clippy/test';
+                if (content) {
+                  const osTag = artifactName.replace(/^ci-error-logs-/, '');
+                  logSections.push(formatLogLines(content, osTag + ' — ' + stepLabel));
+                }
+                return;
+              }
+              for (const entry of fs.readdirSync(dir).sort()) {
+                const sub = path.join(dir, entry);
+                if (fs.statSync(sub).isDirectory()) collectArtifactLogs(sub, entry);
+              }
+            }
+            collectArtifactLogs('downloaded_ci_logs', 'CI step');
+
+            if (!logSections.length) {
+              for (const job of failedJobs.slice(0, 2)) {
+                try {
+                  const res = await github.rest.actions.downloadJobLogsForWorkflowRun({
+                    owner, repo, job_id: job.id
+                  });
+                  const raw = typeof res.data === 'string'
+                    ? res.data
+                    : Buffer.from(res.data).toString('utf8');
+                  if (raw.trim()) {
+                    logSections.push(formatLogLines(raw, 'Job Log Excerpt: ' + job.name));
+                  }
+                } catch (err) {
+                  core.info('Could not download job log for ' + job.name + ': ' + (err.message || err));
+                }
+              }
+            }
+
+            const first = failedJobs[0];
+            const step = first?.steps?.find(step => step.conclusion === 'failure');
+            const reason = step?.name || first?.name || 'Rust build, Clippy, or E2E test';
+            const title = ('[CI Error] ' + reason + ' (' + sha + ')').slice(0, 240);
+            const body = [
+              marker,
+              '### CI failed on main',
+              '- Commit: `' + context.sha + '`',
+              '- Workflow: [Run ' + context.runId + ', attempt ' + attempt + '](' + runUrl + ')',
+              '- Result: ' + process.env.CHECK_RESULT,
+              '',
+              '### Failed jobs and steps',
+              ...(details.length ? details : ['See the workflow run for failure details.']),
+              '',
+              ...(logSections.length ? ['### Captured Error Logs', ...logSections, ''] : []),
+              'Full logs are available through the linked jobs. This issue closes automatically after successful CI on main.'
+            ].join('\n').slice(0, 62000);
+
+            if (!open.length) {
+              await github.rest.issues.create({ owner, repo, title, body, labels: [label] });
+              core.info('Created CI error issue.');
+              return;
+            }
+
+            const issue = open[0];
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: issue.number, per_page: 100
+            });
+            if (!(issue.body || '').includes(marker) &&
+                !comments.some(comment => (comment.body || '').includes(marker))) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: issue.number, body
+              });
+            }
+            await github.rest.issues.addLabels({
+              owner, repo, issue_number: issue.number, labels: [label]
+            });
+            await github.rest.issues.update({ owner, repo, issue_number: issue.number, title });
+            core.info('Updated CI error issue #' + issue.number);

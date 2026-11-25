@@ -16,7 +16,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gserver_http::{parse_json, sign_mapi_url, JsonValue, VNSG2_MAPI_APP_KEY};
 use gserver_protocol::{
@@ -120,7 +120,7 @@ impl SimulatedGameClient {
         let stream = TcpStream::connect(addr).expect("connect TCP game server");
         stream.set_nodelay(true).unwrap();
         stream
-            .set_read_timeout(Some(Duration::from_millis(800)))
+            .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         Self {
             stream,
@@ -174,7 +174,7 @@ impl SimulatedGameClient {
     fn drain_pushes(&mut self) -> Vec<S2cEnvelope> {
         let _ = self
             .stream
-            .set_read_timeout(Some(Duration::from_millis(80)));
+            .set_read_timeout(Some(Duration::from_millis(50)));
         let mut buf = [0u8; 8192];
         loop {
             match self.stream.read(&mut buf) {
@@ -191,7 +191,48 @@ impl SimulatedGameClient {
         }
         let _ = self
             .stream
-            .set_read_timeout(Some(Duration::from_millis(800)));
+            .set_read_timeout(Some(Duration::from_secs(5)));
+        std::mem::take(&mut self.queued_pushes)
+    }
+
+    fn wait_for_push(&mut self, expected_cb: &str) -> Vec<S2cEnvelope> {
+        if self
+            .queued_pushes
+            .iter()
+            .any(|p| p.callback_name.as_deref() == Some(expected_cb))
+        {
+            return std::mem::take(&mut self.queued_pushes);
+        }
+        let _ = self
+            .stream
+            .set_read_timeout(Some(Duration::from_millis(50)));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut buf = [0u8; 8192];
+        while Instant::now() < deadline {
+            match self.stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    self.rx.feed(&buf[..n]);
+                    while let Some(frame) = self.rx.next_frame().expect("decode S2C push frame") {
+                        let batch = decode_s2c_frame_batch(&frame).expect("decode push batch");
+                        self.queued_pushes.extend(batch.items);
+                    }
+                    if self
+                        .queued_pushes
+                        .iter()
+                        .any(|p| p.callback_name.as_deref() == Some(expected_cb))
+                    {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+        let _ = self
+            .stream
+            .set_read_timeout(Some(Duration::from_secs(5)));
         std::mem::take(&mut self.queued_pushes)
     }
 }
@@ -437,7 +478,7 @@ fn full_stack_bootstrap_multiplayer_gm_gameplay_and_restart_recovery() {
     let enter_b = client_b.call_rpc("city.enter", vec![Value::Int(1)], false);
     assert_eq!(enter_b.err, "ok");
 
-    let pushes_a = client_a.drain_pushes();
+    let pushes_a = client_a.wait_for_push("town.addPlayer");
     assert!(
         pushes_a.iter().any(|p| p.callback_name.as_deref() == Some("town.addPlayer")),
         "Client A must receive live `town.addPlayer` push when Client B enters town"
@@ -446,7 +487,7 @@ fn full_stack_bootstrap_multiplayer_gm_gameplay_and_restart_recovery() {
     // Client B moves in town -> Client A receives `town.move`!
     let mv_b = client_b.call_rpc("town.move", vec![Value::Int(680), Value::Int(180)], false);
     assert_eq!(mv_b.err, "ok");
-    let pushes_a_mv = client_a.drain_pushes();
+    let pushes_a_mv = client_a.wait_for_push("town.move");
     assert!(
         pushes_a_mv.iter().any(|p| p.callback_name.as_deref() == Some("town.move")),
         "Client A must receive live `town.move` push"
@@ -467,7 +508,7 @@ fn full_stack_bootstrap_multiplayer_gm_gameplay_and_restart_recovery() {
         );
         assert_eq!(gm_resp.err, "ok");
     }
-    let pushes_b_town = client_b.drain_pushes();
+    let pushes_b_town = client_b.wait_for_push("town.update");
     assert!(
         pushes_b_town.iter().any(|p| p.callback_name.as_deref() == Some("town.update")),
         "Client B must receive `town.update` when Client A upgrades level/VIP"
@@ -481,7 +522,7 @@ fn full_stack_bootstrap_multiplayer_gm_gameplay_and_restart_recovery() {
         true,
     );
     assert_eq!(chat_send.err, "ok");
-    let pushes_b_chat = client_b.drain_pushes();
+    let pushes_b_chat = client_b.wait_for_push("re.chat.getMsg");
     assert!(
         pushes_b_chat.iter().any(|p| p.callback_name.as_deref() == Some("re.chat.getMsg")),
         "Client B must receive live `re.chat.getMsg` broadcast"
@@ -586,7 +627,7 @@ fn full_stack_bootstrap_multiplayer_gm_gameplay_and_restart_recovery() {
     );
     assert_eq!(ch.err, "ok");
     assert_eq!(ch.ret.get_field("position").and_then(Value::as_i64), Some(16));
-    let def_pushes = client_b.drain_pushes();
+    let def_pushes = client_b.wait_for_push("re.arena.dataRefresh");
     assert!(
         def_pushes
             .iter()
