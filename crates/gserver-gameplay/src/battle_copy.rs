@@ -1233,6 +1233,8 @@ impl SignAndOnlineService {
             ("va_recharge_sign", DtoValue::Map(BTreeMap::new())),
             ("recharge_sign_num", DtoValue::from(0u32)),
             ("sign_time", DtoValue::from(0u64)),
+            ("last_sign_time", DtoValue::from(0u64)),
+            ("vip_sign_time", DtoValue::from(0u64)),
             ("level_recharge", DtoValue::from(1u32)),
         ])
     }

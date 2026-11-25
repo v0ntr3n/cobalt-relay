@@ -542,7 +542,7 @@ impl ServerWorld {
 
             "switchfunc.getSwitch" => {
                 let unlocked = Value::dense_array(
-                    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 18, 20, 246]
+                    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 18, 20, 163, 246]
                         .into_iter()
                         .map(Value::Int)
                         .collect(),
@@ -704,8 +704,12 @@ impl ServerWorld {
                 Self::ok_reply(req, session, ret_val, now_i64)
             }
 
-            "allActivity.getActivityInfo"
-            | "opencarnival.getOpenAchieve"
+            "allActivity.getActivityInfo" => {
+                let ret_val = Value::map([("activity_groupon", Value::empty_array())]);
+                Self::ok_reply(req, session, ret_val, now_i64)
+            }
+
+            "opencarnival.getOpenAchieve"
             | "lordwar.getTempleInfo"
             | "crossClanBattle.getTempleInfo"
             | "crossClanBattle.getPromotionInfo"
@@ -896,6 +900,50 @@ impl ServerWorld {
                     ("todayReceiveTimes", Value::Int(0)),
                 ]);
                 Self::ok_reply(req, session, ret_val, now_i64)
+            }
+
+            "growth.getInfo" => {
+                let ret_val = Value::map([
+                    ("userNum", Value::Int(0)),
+                    ("is_buy", Value::Int(0)),
+                    ("va_gold", Value::empty_array()),
+                    ("va_benefit", Value::empty_array()),
+                ]);
+                Self::ok_reply(req, session, ret_val, now_i64)
+            }
+
+            "growth.getNum" => Self::ok_reply(req, session, Value::Int(0), now_i64),
+
+            "envelopRain.getInfo" => {
+                Self::ok_reply(req, session, Value::Bool(false), now_i64)
+            }
+
+            "activityStarPlaySignOpen.getInfo" => {
+                let ret_val = Value::map([("maked", Value::empty_array())]);
+                Self::ok_reply(req, session, ret_val, now_i64)
+            }
+
+            "job.getInfo" => {
+                let ret_val = Value::map([
+                    ("job", Value::Int(1)),
+                    ("level", Value::Int(1)),
+                    ("name", Value::Int(1)),
+                    ("va_skill", Value::empty_array()),
+                    ("va_equip", Value::empty_array()),
+                ]);
+                Self::ok_reply(req, session, ret_val, now_i64)
+            }
+
+            "recruitment.getInfo" => {
+                let ret_val = Value::map([
+                    ("reward", Value::empty_array()),
+                    ("num", Value::Int(0)),
+                ]);
+                Self::ok_reply(req, session, ret_val, now_i64)
+            }
+
+            "firstGift.getRechargeGold" => {
+                Self::ok_reply(req, session, Value::Int(0), now_i64)
             }
 
             "top.get" => {
