@@ -506,7 +506,7 @@ impl ServerWorld {
 
             "switchfunc.getSwitch" => {
                 let unlocked = Value::dense_array(
-                    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 18, 20]
+                    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 18, 20, 246]
                         .into_iter()
                         .map(Value::Int)
                         .collect(),
@@ -551,27 +551,38 @@ impl ServerWorld {
                 let Some(profile) = guard.store.get_player(uid) else {
                     return Self::err_reply(req, "player_missing", now_i64);
                 };
-                // `FormationData:parseData` requires a 6-slot 1-based numeric array `ret.formation`
-                // plus `grid_formation` (`1..=9 -> hid`) for the 3x3 battle matrix!
-                let slots: Vec<Value> = (1..=6u8)
-                    .map(|slot| {
-                        let hid = profile.formation.position.get(&slot).copied().unwrap_or(0);
-                        u64_to_amf3(hid)
-                    })
-                    .collect();
-                let grid_entries: Vec<(String, Value)> = profile
+                // `FormationData:parseData` iterates `pairs(toarray(data["formation"]))` and
+                // `FormationItem:addArmature` requires every hid in `formation` to exist in `allHeros` (no `0`s!).
+                // Battle grid cells follow `attack_sep_list = {3, 6, 9, 2, 5, 8}`.
+                const DEFAULT_CELLS: [u8; 6] = [3, 6, 9, 2, 5, 8];
+                let mut grid_entries: Vec<(String, Value)> = profile
                     .formation
                     .grid_formation
                     .iter()
+                    .filter(|(_, &hid)| hid > 0 && profile.heroes.contains_key(&hid))
                     .map(|(cell, &hid)| (cell.to_string(), u64_to_amf3(hid)))
                     .collect();
+                if grid_entries.is_empty() {
+                    for (idx, slot) in (1..=6u8).enumerate() {
+                        if let Some(&hid) = profile.formation.position.get(&slot) {
+                            if hid > 0 && profile.heroes.contains_key(&hid) {
+                                grid_entries.push((DEFAULT_CELLS[idx].to_string(), u64_to_amf3(hid)));
+                            }
+                        }
+                    }
+                }
+                let formation_val = if grid_entries.is_empty() {
+                    Value::empty_array()
+                } else {
+                    Value::map(grid_entries.clone())
+                };
                 let grid_val = if grid_entries.is_empty() {
                     Value::empty_array()
                 } else {
                     Value::map(grid_entries)
                 };
                 let ret_val = Value::map([
-                    ("formation", Value::dense_array(slots)),
+                    ("formation", formation_val),
                     ("grid_formation", grid_val),
                 ]);
                 Self::ok_reply(req, session, ret_val, now_i64)
@@ -582,21 +593,10 @@ impl ServerWorld {
                     return Self::err_reply(req, "player_missing", now_i64);
                 };
                 let mut pos_json = profile.formation.to_vnsg2_position_info(&profile.heroes);
-                // Ensure `position` is a 6-slot 1-based numeric array `[hid1, hid2, hid3, hid4, hid5, hid6]`
-                // AND `allHeros` contains every hero in `profile.heroes`!
+                // Keep `position` occupied-only (no 0 entries, because HeroFormationData.lua:185-188
+                // iterates `pairs(self["position"])` without skipping hid == 0)
+                // AND ensure `allHeros` contains every hero in `profile.heroes`!
                 if let PlayerJson::Object(ref mut map) = pos_json {
-                    let slots: Vec<PlayerJson> = (1..=6u8)
-                        .map(|slot| {
-                            let hid = profile.formation.position.get(&slot).copied().unwrap_or(0);
-                            PlayerJson::UInt(if profile.heroes.contains_key(&hid) {
-                                hid
-                            } else {
-                                0
-                            })
-                        })
-                        .collect();
-                    map.insert("position".to_string(), PlayerJson::Array(slots));
-
                     let mut heros_map = BTreeMap::new();
                     for (&hid, hero) in &profile.heroes {
                         heros_map.insert(hid.to_string(), hero.to_vnsg2_hero_info());
@@ -660,8 +660,15 @@ impl ServerWorld {
                 Self::ok_reply(req, session, ret_val, now_i64)
             }
 
+            "halidom.getInfo" => {
+                let ret_val = Value::map([
+                    ("current", Value::Int(1)),
+                    ("halidomInfo", Value::empty_array()),
+                ]);
+                Self::ok_reply(req, session, ret_val, now_i64)
+            }
+
             "allActivity.getActivityInfo"
-            | "halidom.getInfo"
             | "opencarnival.getOpenAchieve"
             | "lordwar.getTempleInfo"
             | "crossClanBattle.getTempleInfo"
@@ -684,6 +691,175 @@ impl ServerWorld {
 
             "barrage.getBarrageRecord" => {
                 Self::ok_reply(req, session, Value::empty_array(), now_i64)
+            }
+
+            "dota.getInfo" => {
+                let ret_val = Value::map([
+                    ("normal_layer", Value::Int(0)),
+                    ("normal_max_layer", Value::Int(0)),
+                    ("is_open", Value::Int(0)),
+                    ("defeat_num", Value::Int(0)),
+                    ("normal_reset_num", Value::Int(0)),
+                    ("normal_buy_attack_num", Value::Int(0)),
+                    ("normal_buy_attack_num_used", Value::Int(0)),
+                    ("normal_max_attack_layer", Value::Int(0)),
+                    ("elite_attack_num", Value::Int(3)),
+                    ("elite_max_layer", Value::Int(0)),
+                    ("elite_buy_attack_num", Value::Int(0)),
+                    ("elite_cur_layer", Value::Int(0)),
+                    ("purgatory_max_layer", Value::Int(0)),
+                    ("purgatory_buy_time", Value::Int(0)),
+                    ("purgatory_attack_time", Value::Int(0)),
+                    ("purgatory_last_layer", Value::Int(1)),
+                ]);
+                Self::ok_reply(req, session, ret_val, now_i64)
+            }
+
+            "achievements.getShowAchievements" => {
+                let ret_val = Value::map([
+                    ("point", Value::Int(0)),
+                    ("achievements", Value::empty_array()),
+                ]);
+                Self::ok_reply(req, session, ret_val, now_i64)
+            }
+
+            "discover.getRewardCity" => {
+                let ret_val = Value::map([
+                    ("reward", Value::empty_array()),
+                    ("pass_city", Value::empty_array()),
+                    ("kill_num", Value::empty_array()),
+                    ("elite_max_layer", Value::Int(0)),
+                    ("elite_cur_layer", Value::Int(0)),
+                    ("elite_attack_num", Value::Int(3)),
+                    ("elite_buy_attack_num", Value::Int(0)),
+                ]);
+                Self::ok_reply(req, session, ret_val, now_i64)
+            }
+
+            "praise.getPraiseInfo" => {
+                let ret_val = Value::map([
+                    ("praise_num", Value::Int(0)),
+                    ("va_praise", Value::empty_array()),
+                ]);
+                Self::ok_reply(req, session, ret_val, now_i64)
+            }
+
+            "lordwar.getPromotionInfo" => {
+                let ret_val = Value::map([
+                    ("round", Value::Int(0)),
+                    ("winSubround", Value::Int(0)),
+                    ("loseSubround", Value::Int(0)),
+                    ("status", Value::Int(0)),
+                    ("loseLord", Value::empty_array()),
+                    ("winLord", Value::empty_array()),
+                ]);
+                Self::ok_reply(req, session, ret_val, now_i64)
+            }
+
+            "awakeCopy.getAwakeCopyInfo" => {
+                let ret_val = Value::map([
+                    ("pass_str", Value::empty_array()),
+                    ("last_attack_num", Value::Int(3)),
+                    ("last_help_num", Value::Int(3)),
+                    ("buy_num", Value::Int(0)),
+                ]);
+                Self::ok_reply(req, session, ret_val, now_i64)
+            }
+
+            "activityRechargeRebate.getInfo" => {
+                Self::ok_reply(req, session, Value::String("activity_close".to_string()), now_i64)
+            }
+
+            "brochureStrategy.getInfo" => {
+                let ret_val = Value::map([
+                    ("brochure_strategy_level", Value::Int(0)),
+                    ("va_brochure_strategy", Value::empty_array()),
+                    ("va_get_brochure_strategy", Value::empty_array()),
+                ]);
+                Self::ok_reply(req, session, ret_val, now_i64)
+            }
+
+            "collection.getInfo" => {
+                let score_reward_status = Value::map([
+                    ("page_1", Value::empty_array()),
+                    ("page_2", Value::empty_array()),
+                    ("page_3", Value::empty_array()),
+                    ("page_4", Value::empty_array()),
+                    ("page_5", Value::empty_array()),
+                ]);
+                let ret_val = Value::map([
+                    ("1", Value::empty_array()),
+                    ("2", Value::empty_array()),
+                    ("3", Value::empty_array()),
+                    ("4", Value::empty_array()),
+                    ("5", Value::empty_array()),
+                    ("6", Value::empty_array()),
+                    ("7", Value::empty_array()),
+                    ("8", Value::empty_array()),
+                    ("9", Value::empty_array()),
+                    ("10", Value::empty_array()),
+                    ("scoreRewardStatus", score_reward_status),
+                    ("likedRewardStatus", Value::empty_array()),
+                    ("likedNum", Value::Int(0)),
+                    ("todayLikeNum", Value::Int(0)),
+                ]);
+                Self::ok_reply(req, session, ret_val, now_i64)
+            }
+
+            "dailyDiscount.getInfo" => {
+                let ret_val = Value::map([
+                    ("productBuy", Value::empty_array()),
+                    ("canRecDayPreBuy", Value::empty_array()),
+                    ("redeem", Value::empty_array()),
+                    ("canDayPreBuy", Value::Bool(false)),
+                    ("dayRecNum", Value::Int(0)),
+                    ("dayPreBuyTomorrow", Value::Bool(false)),
+                    ("rechargeSum", Value::Int(0)),
+                    ("rechargePointRec", Value::empty_array()),
+                ]);
+                Self::ok_reply(req, session, ret_val, now_i64)
+            }
+
+            "generalBook.getInfo" => {
+                let book_entry = || {
+                    Value::map([
+                        ("level", Value::Int(1)),
+                        ("total_exp", Value::Int(0)),
+                        ("star_exp", Value::empty_array()),
+                    ])
+                };
+                let ret_val = Value::map([
+                    ("1", book_entry()),
+                    ("2", book_entry()),
+                    ("3", book_entry()),
+                ]);
+                Self::ok_reply(req, session, ret_val, now_i64)
+            }
+
+            "dailytask.getInfo" => {
+                let level = guard
+                    .store
+                    .get_player(uid)
+                    .map(|p| p.level as i32)
+                    .unwrap_or(1);
+                let ret_val = Value::map([
+                    ("super_checkin_score", Value::Int(0)),
+                    ("active_point", Value::Int(0)),
+                    ("level", Value::Int(level)),
+                    ("va_receive_point", Value::empty_array()),
+                    ("dailytask", Value::empty_array()),
+                ]);
+                Self::ok_reply(req, session, ret_val, now_i64)
+            }
+
+            "friend.getFriendInfo" => {
+                let ret_val = Value::map([
+                    ("friendList", Value::empty_array()),
+                    ("blackList", Value::empty_array()),
+                    ("todayPresentUids", Value::empty_array()),
+                    ("todayReceiveTimes", Value::Int(0)),
+                ]);
+                Self::ok_reply(req, session, ret_val, now_i64)
             }
 
             _ => {

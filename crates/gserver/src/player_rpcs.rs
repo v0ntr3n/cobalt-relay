@@ -183,7 +183,7 @@ fn infer_item_effect(tid: u32) -> UseItemEffect {
                     count: 2,
                 },
                 StarterItemSeed {
-                    item_template_id: 10_001,
+                    item_template_id: 10_010,
                     count: 5,
                 },
             ],

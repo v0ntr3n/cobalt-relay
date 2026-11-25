@@ -66,11 +66,11 @@ impl Default for DaemonConfig {
                     count: 20,
                 },
                 StarterItemSeed {
-                    item_template_id: 101_101,
+                    item_template_id: 112_001,
                     count: 1,
                 },
                 StarterItemSeed {
-                    item_template_id: 180_101,
+                    item_template_id: 182_001,
                     count: 1,
                 },
                 StarterItemSeed {
@@ -78,7 +78,7 @@ impl Default for DaemonConfig {
                     count: 30,
                 },
                 StarterItemSeed {
-                    item_template_id: 3_100_101,
+                    item_template_id: 3_113_001,
                     count: 20,
                 },
             ],

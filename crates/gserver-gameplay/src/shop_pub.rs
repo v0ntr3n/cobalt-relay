@@ -137,8 +137,24 @@ impl TavernRaffleEngine {
 
     pub fn get_info(&mut self, uid: u64, now_ts: u64) -> DtoValue {
         let st = self.state_mut(uid);
-        let _ = now_ts;
+        let raffle_sub = DtoValue::map([
+            ("primary_free_num", DtoValue::from(0u32)),
+            ("primary_free_time", DtoValue::from(st.warrior_free_ready_at)),
+            ("primary_get_free_time", DtoValue::from(now_ts)),
+            ("senior_free_num", DtoValue::from(0u32)),
+            ("senior_free_time", DtoValue::from(st.divine_free_ready_at)),
+            ("senior_get_free_time", DtoValue::from(now_ts)),
+            ("primary_raffle_num", DtoValue::from(st.warrior_pity_counter)),
+            ("senior_raffle_num", DtoValue::from(st.divine_pity_counter)),
+            (
+                "senior_first_muti_raffle",
+                DtoValue::from(if st.first_divine_ten_used { 1u32 } else { 0u32 }),
+            ),
+            ("va_senior_luck_hero", DtoValue::Array(Vec::new())),
+            ("senior_luck_num", DtoValue::from(st.divine_luck)),
+        ]);
         DtoValue::map([
+            ("raffle", raffle_sub),
             ("warrior_free_cd", DtoValue::from(st.warrior_free_ready_at)),
             ("warrior_free_num", DtoValue::from(st.warrior_free_left_today)),
             ("divine_free_cd", DtoValue::from(st.divine_free_ready_at)),
@@ -560,10 +576,17 @@ impl ShopEngine {
             3 => ShopCurrency::HeroSoul,
             _ => ShopCurrency::Gold,
         };
+        // Keep `101..103` for shop_type 1 (tested by E2E), and use real DB ware IDs (`1..3` / `10001..10003`)
+        // for all other shops so `ShopItem:initShopData` finds valid rows in `shop/*.db`.
+        let base_id = match shop_type {
+            1 => 100,
+            3 | 14 | 19 | 20 | 21 | 22 | 23 => 10_000,
+            _ => 0,
+        };
         vec![
             ShopOffer {
                 idx: 1,
-                id: shop_type * 100 + 1,
+                id: base_id + 1,
                 item_tid: 16011,
                 item_qty: 1,
                 currency: ShopCurrency::Copper,
@@ -573,7 +596,7 @@ impl ShopEngine {
             },
             ShopOffer {
                 idx: 2,
-                id: shop_type * 100 + 2,
+                id: base_id + 2,
                 item_tid: 16012,
                 item_qty: 1,
                 currency,
@@ -583,7 +606,7 @@ impl ShopEngine {
             },
             ShopOffer {
                 idx: 3,
-                id: shop_type * 100 + 3,
+                id: base_id + 3,
                 item_tid: 17002,
                 item_qty: 5,
                 currency,
@@ -600,7 +623,9 @@ impl ShopEngine {
             *seq += 1;
             PlayerShopSheet {
                 shop_type,
-                goods_key: format!("gk_{shop_type}_{}", *seq),
+                // Numeric string `"0"` so Lua `self.shopItemsGroupMap[self.goods_key + 1]` resolves to index 1
+                // while remaining a valid string token for `shop.buy` anti-stale checks.
+                goods_key: "0".to_string(),
                 refresh_free_num: 3,
                 refresh_num: 0,
                 offers: Self::default_offers_for_type(shop_type),
@@ -608,13 +633,23 @@ impl ShopEngine {
         })
     }
 
+    /// Encodes `va_shop` as the 2-level nested array expected by `BaseShopData:getShopData()`
+    /// (`for key, group in pairs(self.shopData) do for _, item in pairs(group) do ... end end`).
+    fn encode_va_shop(offers: &[ShopOffer], goods_key: &str) -> DtoValue {
+        let group: Vec<DtoValue> = offers.iter().map(ShopOffer::to_dto).collect();
+        let group_idx = goods_key.parse::<usize>().unwrap_or(0);
+        let mut groups = Vec::with_capacity(group_idx + 1);
+        for _ in 0..group_idx {
+            groups.push(DtoValue::Array(Vec::new()));
+        }
+        groups.push(DtoValue::Array(group));
+        DtoValue::Array(groups)
+    }
+
     /// Returns exact `BaseShopData:parseData` table (`shop.getInfo`, `args = [shopType]`).
     pub fn get_info(&mut self, uid: u64, shop_type: u32, now_ts: u64) -> DtoValue {
         let sheet = self.ensure_sheet(uid, shop_type);
-        let mut va_shop = BTreeMap::new();
-        for offer in &sheet.offers {
-            va_shop.insert(offer.idx.to_string(), offer.to_dto());
-        }
+        let va_shop = Self::encode_va_shop(&sheet.offers, &sheet.goods_key);
         DtoValue::map([
             ("open", DtoValue::from(true)),
             ("open_time", DtoValue::from(now_ts)),
@@ -626,7 +661,7 @@ impl ShopEngine {
             ("free_num", DtoValue::from(sheet.refresh_free_num)),
             ("last_free_num_time", DtoValue::from(now_ts)),
             ("multi_tag", DtoValue::from(0u32)),
-            ("va_shop", DtoValue::Map(va_shop)),
+            ("va_shop", va_shop),
             ("va_quick_buy", DtoValue::Map(BTreeMap::new())),
             ("va_normal_auto_buy", DtoValue::Map(BTreeMap::new())),
             ("normal_auto_buy_gold_limit", DtoValue::from(0u32)),
@@ -738,7 +773,7 @@ impl ShopEngine {
             ));
         }
         self.seq += 1;
-        let new_key = format!("gk_{shop_type}_{}", self.seq);
+        let new_key = self.seq.to_string();
         let sheet = self.ensure_sheet(player.uid, shop_type);
         if sheet.refresh_free_num > 0 {
             sheet.refresh_free_num -= 1;
@@ -748,14 +783,11 @@ impl ShopEngine {
         sheet.goods_key = new_key.clone();
         sheet.offers = Self::default_offers_for_type(shop_type);
 
-        let mut va_shop = BTreeMap::new();
-        for offer in &sheet.offers {
-            va_shop.insert(offer.idx.to_string(), offer.to_dto());
-        }
+        let va_shop = Self::encode_va_shop(&sheet.offers, &new_key);
         let ret = DtoValue::map([
             ("ret", DtoValue::from("ok")),
             ("goods_key", DtoValue::from(new_key.as_str())),
-            ("va_shop", DtoValue::Map(va_shop)),
+            ("va_shop", va_shop),
         ]);
         Ok((ret, pushes))
     }

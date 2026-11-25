@@ -280,27 +280,27 @@ impl Default for StarterPackConfig {
                 },
             ],
             starter_items: vec![
-                // Normal consumable prop (10001..20000 -> bag "item")
+                // Normal consumable prop (item_normal: 10010 = Tiến Cấp Đơn -> bag "item")
                 StarterItemSeed {
-                    item_template_id: 10_001,
+                    item_template_id: 10_010,
                     count: 20,
                 },
-                // Direct-use stamina/energy pill (20001..30000 -> bag "item")
+                // Direct-use stamina pill (item_direct: 22102 = Thể Lực Đơn -> bag "item")
                 StarterItemSeed {
-                    item_template_id: 20_001,
+                    item_template_id: 22_102,
                     count: 10,
                 },
-                // Starter weapon equipment (100001..180000 -> bag "arm")
+                // Starter weapon equipment (item_arm: 112001 = Bách Luyện Kiếm, quality=2 -> bag "arm")
                 StarterItemSeed {
-                    item_template_id: 101_101,
+                    item_template_id: 112_001,
                     count: 1,
                 },
-                // Starter accessory / treasure (180001..200000 -> bag "treasure")
+                // Starter accessory / treasure (item_treasure: 182001 = Đại Uyển -> bag "treasure")
                 StarterItemSeed {
-                    item_template_id: 180_101,
+                    item_template_id: 182_001,
                     count: 1,
                 },
-                // Starter hero soul fragments (50001..60000 -> bag "soul")
+                // Starter hero soul fragments (item_soul: 50101 = Mảnh Trương Liêu -> bag "soul")
                 StarterItemSeed {
                     item_template_id: 50_101,
                     count: 30,
@@ -1055,6 +1055,10 @@ impl PlayerProfile {
             JsonValue::from(self.online_accum_time),
         );
         m.insert("ban_chat_time".into(), JsonValue::from(self.ban_chat_time));
+        m.insert(
+            "activity_login_give_gold_open_time".into(),
+            JsonValue::from(0u64),
+        );
 
         // CRITICAL 14-char string: string.sub(self.server_open_time, 3, 14)
         m.insert(
@@ -1225,6 +1229,10 @@ impl PlayerProfile {
             JsonValue::from(self.online_accum_time),
         );
         m.insert("ban_chat_time".into(), JsonValue::from(self.ban_chat_time));
+        m.insert(
+            "activity_login_give_gold_open_time".into(),
+            JsonValue::from(0u64),
+        );
         m.insert(
             "server_open_time".into(),
             JsonValue::from(self.server_open_time.clone()),

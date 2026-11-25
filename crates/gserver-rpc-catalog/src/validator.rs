@@ -204,12 +204,16 @@ pub fn validate_response_for_method(
             }
         }
         net_const::CS_FORMATION_GET => {
-            match ret.get_field("formation").and_then(Amf3Value::as_array) {
-                Some(arr) if arr.len() == 6 && arr.iter().all(|v| v.as_i64().is_some()) => {}
+            match ret.get_field("formation") {
+                Some(Amf3Value::Map(m))
+                    if !m.is_empty()
+                        && m.values().all(|v| v.as_i64().is_some_and(|hid| hid > 0)) => {}
+                Some(Amf3Value::Array(arr))
+                    if !arr.is_empty() && arr.len() <= 6 && arr.iter().all(|v| v.as_i64().is_some()) => {}
                 _ => errs.push(LuaSchemaViolation::new(
                     method,
                     "ret.formation",
-                    "FormationData:parseData requires 6-slot 1-based numeric array `ret.formation`",
+                    "FormationData:parseData requires non-empty occupied `ret.formation` map or array",
                 )),
             }
         }
@@ -551,15 +555,25 @@ fn validate_position_info(method: &str, ret: &Amf3Value, errs: &mut Vec<LuaSchem
         return;
     };
 
-    let major_hid = match map.get("position").and_then(Amf3Value::as_array) {
-        Some(pos) if pos.len() == 6 && pos.iter().all(|v| v.as_i64().is_some()) => {
+    let major_hid = match map.get("position") {
+        Some(Amf3Value::Map(pos_map))
+            if !pos_map.is_empty()
+                && pos_map
+                    .values()
+                    .all(|v| v.as_i64().is_some_and(|hid| hid > 0)) =>
+        {
+            pos_map.get("1").and_then(Amf3Value::as_i64).unwrap_or(0)
+        }
+        Some(Amf3Value::Array(pos))
+            if !pos.is_empty() && pos.len() <= 6 && pos.iter().all(|v| v.as_i64().is_some()) =>
+        {
             pos[0].as_i64().unwrap_or(0)
         }
         _ => {
             errs.push(LuaSchemaViolation::new(
                 method,
                 "ret.position",
-                "HeroFormationData requires 6-element numeric `position` array",
+                "HeroFormationData requires non-empty occupied `position` map or array",
             ));
             0
         }

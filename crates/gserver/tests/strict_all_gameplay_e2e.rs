@@ -831,10 +831,10 @@ fn strict_all_12_domains_gameplay_security_and_wal_recovery() {
         "insufficient_item_count"
     );
 
-    // Compose equipment from `3_100_101` x 20 arm fragments -> crafts `101_102`
+    // Compose equipment from `3_113_001` x 20 arm fragments
     let compose_arm = client_a.call_rpc(
         "exchange.composeArm",
-        vec![Value::Int(3_100_101), Value::Int(1)],
+        vec![Value::Int(3_113_001), Value::Int(1)],
         false,
     );
     assert_eq!(compose_arm.err, "ok");
@@ -1109,27 +1109,27 @@ fn strict_all_12_domains_gameplay_security_and_wal_recovery() {
         "ok"
     );
 
-    // Equipment (`arming`) + Forge: locate starter weapon `101_101` (`20001`) and treasure `180_101` (`10001`)
+    // Equipment (`arming`) + Forge: locate starter weapon `112_001` (`20001`) and treasure `182_001` (`10001`)
     let bag_now = client_a.call_rpc("bag.bagInfo", vec![], false).ret;
     let mut starter_wpn_gid = 0i32;
     let mut starter_trs_gid = 0i32;
     if let Some(Value::Object(am)) = bag_now.get_field("arm") {
         for (k, v) in am.iter() {
-            if v.get_field("item_template_id").and_then(Value::as_i64) == Some(101_101) {
+            if v.get_field("item_template_id").and_then(Value::as_i64) == Some(112_001) {
                 starter_wpn_gid = k.parse().unwrap();
             }
         }
     }
     if let Some(Value::Object(tm)) = bag_now.get_field("treasure") {
         for (k, v) in tm.iter() {
-            if v.get_field("item_template_id").and_then(Value::as_i64) == Some(180_101) {
+            if v.get_field("item_template_id").and_then(Value::as_i64) == Some(182_001) {
                 starter_trs_gid = k.parse().unwrap();
             }
         }
     }
     assert!(starter_wpn_gid > 0 && starter_trs_gid > 0);
 
-    // Negative: equipping a Treasure (`180_101`) into Weapon slot `1` MUST fail with `equip_type_mismatch`!
+    // Negative: equipping a Treasure (`182_001`) into Weapon slot `1` MUST fail with `equip_type_mismatch`!
     assert_eq!(
         client_a
             .call_rpc(
@@ -1145,7 +1145,7 @@ fn strict_all_12_domains_gameplay_security_and_wal_recovery() {
         "equip_type_mismatch"
     );
 
-    // Equip Weapon `101_101` onto slot 1 equip_slot 1, and Treasure `180_101` onto slot 1 equip_slot 5
+    // Equip Weapon `112_001` onto slot 1 equip_slot 1, and Treasure `182_001` onto slot 1 equip_slot 5
     assert_eq!(
         client_a
             .call_rpc(

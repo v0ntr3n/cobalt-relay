@@ -1050,6 +1050,13 @@ impl ArenaEngine {
         let bought = self.attacks_bought.get(&player.uid).copied().unwrap_or(0);
         DtoValue::map([
             ("ret", DtoValue::from("ok")),
+            ("is_have_challeged", DtoValue::from(0u32)),
+            ("position", DtoValue::from(my_pos)),
+            ("history_min_position", DtoValue::from(my_pos)),
+            ("attack_num", DtoValue::from(used)),
+            ("buy_num", DtoValue::from(bought)),
+            ("win_num", DtoValue::from(0u32)),
+            ("num_reward", DtoValue::Array(Vec::new())),
             (
                 "res",
                 DtoValue::map([
@@ -1194,9 +1201,15 @@ impl SignAndOnlineService {
         let signed_today = self.last_sign_day_bucket.get(&uid).copied() == Some(day_bucket);
         let vip_claimed = self.last_sign_vip_claimed.get(&uid).copied().unwrap_or(false);
         DtoValue::map([
+            ("uid", DtoValue::from(uid)),
             ("sign_num", DtoValue::from(self.sign_days.get(&uid).copied().unwrap_or(0))),
             ("signed_today", DtoValue::from(signed_today)),
             ("vip_multi", DtoValue::from(if vip_claimed { 1u32 } else { 0u32 })),
+            ("rechargeRmb", DtoValue::from(0u32)),
+            ("va_recharge_sign", DtoValue::Map(BTreeMap::new())),
+            ("recharge_sign_num", DtoValue::from(0u32)),
+            ("sign_time", DtoValue::from(0u64)),
+            ("level_recharge", DtoValue::from(1u32)),
         ])
     }
 
@@ -1264,7 +1277,9 @@ impl SignAndOnlineService {
             .unwrap_or_default();
         DtoValue::map([
             ("accum_online_secs", DtoValue::from(player.online_accum_secs)),
-            ("claimed_ids", DtoValue::Array(claimed)),
+            ("online_time", DtoValue::from(player.online_accum_secs)),
+            ("claimed_ids", DtoValue::Array(claimed.clone())),
+            ("received", DtoValue::Array(claimed)),
         ])
     }
 
