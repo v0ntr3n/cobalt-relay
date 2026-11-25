@@ -1010,6 +1010,30 @@ impl ArenaEngine {
         }
     }
 
+    /// Replaces the default NPC ladder with real snapshot competitors `(uid, uname, level, fight_force, position)`.
+    pub fn seed_competitors(&mut self, entries: Vec<(u64, String, u32, u64, u32)>) {
+        if entries.is_empty() {
+            return;
+        }
+        self.ladder.clear();
+        self.uid_to_pos.clear();
+        for (uid, uname, level, fight_force, position) in entries {
+            if position == 0 {
+                continue;
+            }
+            let comp = ArenaCompetitor {
+                uid,
+                uname,
+                level: level.max(1),
+                fight_force,
+                position,
+                is_npc: true,
+            };
+            self.ladder.insert(position, comp);
+            self.uid_to_pos.insert(uid, position);
+        }
+    }
+
     pub fn ensure_registered(&mut self, player: &PlayerState) -> u32 {
         if let Some(&pos) = self.uid_to_pos.get(&player.uid) {
             if let Some(entry) = self.ladder.get_mut(&pos) {

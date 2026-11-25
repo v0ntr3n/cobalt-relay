@@ -10,6 +10,7 @@
 //! - **Multiplayer Town, Chat + GM Commands, Tavern Gacha, Shop, Mail & Battle** (`gserver-gameplay`)
 
 pub mod bridge;
+pub mod bxh_snapshot;
 pub mod config;
 pub mod player_rpcs;
 pub mod tcp_server;

@@ -14,6 +14,7 @@ pub struct DaemonConfig {
     pub public_host: String,
     pub data_dir: PathBuf,
     pub db_export_dir: Option<PathBuf>,
+    pub bxh_snapshot_path: Option<PathBuf>,
     pub strict_session: bool,
     pub strict_sign: bool,
     pub strict_auth_sig: bool,
@@ -91,6 +92,7 @@ impl Default for DaemonConfig {
             public_host: "127.0.0.1".to_string(),
             data_dir: PathBuf::from("./data"),
             db_export_dir: None,
+            bxh_snapshot_path: Some(PathBuf::from("./official_bxh_snapshot.json")),
             strict_session: true,
             strict_sign: false,
             strict_auth_sig: false,
@@ -154,6 +156,9 @@ impl DaemonConfig {
                 "data_dir" => self.data_dir = PathBuf::from(val),
                 "db_export_dir" if !val.is_empty() => {
                     self.db_export_dir = Some(PathBuf::from(val));
+                }
+                "bxh_snapshot_path" if !val.is_empty() => {
+                    self.bxh_snapshot_path = Some(PathBuf::from(val));
                 }
                 "strict_session" => self.strict_session = val == "true" || val == "1",
                 "strict_sign" => self.strict_sign = val == "true" || val == "1",

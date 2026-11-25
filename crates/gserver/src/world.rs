@@ -21,6 +21,7 @@ use crate::bridge::{
     catalog_amf3_to_protocol, dto_to_amf3, player_json_to_amf3, profile_to_gameplay_state,
     sync_gameplay_back_to_profile, to_gameplay_request, u64_to_amf3,
 };
+use crate::bxh_snapshot::BxhSnapshot;
 use crate::config::DaemonConfig;
 use crate::player_rpcs::try_handle_player_rpc;
 
@@ -54,6 +55,7 @@ pub struct ServerWorld {
     config: DaemonConfig,
     mapi: Arc<MapiService>,
     data_store: GameDataStore,
+    bxh_snapshot: BxhSnapshot,
     tx_encoder: ServerTxEncoder,
     inner: Mutex<WorldInner>,
 }
@@ -70,7 +72,25 @@ impl ServerWorld {
             GameDataStore::new_embedded()
         };
 
+        let bxh_snapshot = if let Some(ref snap_path) = config.bxh_snapshot_path {
+            BxhSnapshot::load_optional(snap_path).unwrap_or_else(|e| {
+                eprintln!("[gserver] warning: ignoring BXH snapshot {:?}: {e}", snap_path);
+                BxhSnapshot::default()
+            })
+        } else {
+            BxhSnapshot::default()
+        };
+
         let mut gameplay = GameplayEngine::new(0x4F4D_4733_515F_564E);
+        let snap_arena = bxh_snapshot.extract_arena_players();
+        if !snap_arena.is_empty() {
+            gameplay.arena.seed_competitors(
+                snap_arena
+                    .into_iter()
+                    .map(|p| (p.uid, p.uname, p.level, p.fight_force, p.position))
+                    .collect(),
+            );
+        }
 
         // Hydrate MapiService role summaries & GameplayEngine from persisted PlayerStore!
         let mut roles_by_pid: HashMap<String, Vec<RoleSummary>> = HashMap::new();
@@ -85,6 +105,7 @@ impl ServerWorld {
             config,
             mapi,
             data_store,
+            bxh_snapshot,
             tx_encoder: ServerTxEncoder::new(),
             inner: Mutex::new(WorldInner {
                 store,
@@ -460,6 +481,21 @@ impl ServerWorld {
             ..
         } = *guard;
         if let Some(player_res) = try_handle_player_rpc(store, gameplay, uid, req, now_ts) {
+            if req.method == "formation.getOtherPositionInfo" {
+                if let Err(ref code) = player_res {
+                    if code == "target_player_not_found" {
+                        if let Some(target_uid) = req.args.first().and_then(Value::as_i64) {
+                            if target_uid > 0 {
+                                if let Some(snap_form) =
+                                    self.bxh_snapshot.get_other_formation(target_uid as u64)
+                                {
+                                    return Self::ok_reply(req, session, snap_form, now_i64);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             return match player_res {
                 Ok(ok) => {
                     if let Some(ref pid) = ok.refresh_roles_pid {
@@ -859,6 +895,71 @@ impl ServerWorld {
                     ("todayPresentUids", Value::empty_array()),
                     ("todayReceiveTimes", Value::Int(0)),
                 ]);
+                Self::ok_reply(req, session, ret_val, now_i64)
+            }
+
+            "top.get" => {
+                let tab = req
+                    .args
+                    .first()
+                    .and_then(Value::as_str)
+                    .unwrap_or("fight_force_max");
+                let self_profile = guard.store.get_player(uid).cloned();
+                let local_profiles = Self::collect_all_persisted_profiles(&guard.store);
+                let ret_val = self.bxh_snapshot.build_top_get_reply(
+                    tab,
+                    self_profile.as_ref(),
+                    &local_profiles,
+                );
+                Self::ok_reply(req, session, ret_val, now_i64)
+            }
+
+            "top.getWorldFightForceRank" => {
+                let self_profile = guard.store.get_player(uid).cloned();
+                let local_profiles = Self::collect_all_persisted_profiles(&guard.store);
+                let ret_val = self.bxh_snapshot.build_world_fight_force_reply(
+                    self_profile.as_ref(),
+                    &local_profiles,
+                );
+                Self::ok_reply(req, session, ret_val, now_i64)
+            }
+
+            "top.getUserInfo" => {
+                let target_uid = req.args.first().and_then(Value::as_i64).unwrap_or(0) as u64;
+                if let Some(info) = self.bxh_snapshot.get_user_info(target_uid) {
+                    return Self::ok_reply(req, session, info, now_i64);
+                }
+                if let Some(p) = guard.store.get_player(target_uid) {
+                    let ret_val = Value::map([
+                        ("uid", u64_to_amf3(p.uid)),
+                        ("uname", Value::String(p.uname.clone())),
+                        ("level", Value::Int(p.level as i32)),
+                        ("vip", Value::Int(p.vip as i32)),
+                        ("fight_force", u64_to_amf3(p.fc)),
+                        ("utid", Value::Int(p.utid as i32)),
+                    ]);
+                    return Self::ok_reply(req, session, ret_val, now_i64);
+                }
+                Self::ok_reply(req, session, Value::empty_array(), now_i64)
+            }
+
+            "top.getSelf" => {
+                let tab = req
+                    .args
+                    .first()
+                    .and_then(Value::as_str)
+                    .unwrap_or("fight_force_max");
+                let self_profile = guard.store.get_player(uid).cloned();
+                let local_profiles = Self::collect_all_persisted_profiles(&guard.store);
+                let full = self.bxh_snapshot.build_top_get_reply(
+                    tab,
+                    self_profile.as_ref(),
+                    &local_profiles,
+                );
+                let ret_val = full
+                    .get_field("self")
+                    .cloned()
+                    .unwrap_or_else(Value::empty_array);
                 Self::ok_reply(req, session, ret_val, now_i64)
             }
 
