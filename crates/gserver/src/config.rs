@@ -15,7 +15,12 @@ pub struct DaemonConfig {
     pub data_dir: PathBuf,
     pub db_export_dir: Option<PathBuf>,
     pub strict_session: bool,
+    pub strict_sign: bool,
+    pub strict_auth_sig: bool,
+    pub strict_auth_token: bool,
     pub verify_tickets: bool,
+    pub strict_rpc: bool,
+    pub print_bound_addrs: bool,
     pub compress_s2c_threshold: usize,
     pub starter: StarterPackConfig,
 }
@@ -60,6 +65,22 @@ impl Default for DaemonConfig {
                     item_template_id: 22202,
                     count: 20,
                 },
+                StarterItemSeed {
+                    item_template_id: 101_101,
+                    count: 1,
+                },
+                StarterItemSeed {
+                    item_template_id: 180_101,
+                    count: 1,
+                },
+                StarterItemSeed {
+                    item_template_id: 50_101,
+                    count: 30,
+                },
+                StarterItemSeed {
+                    item_template_id: 3_100_101,
+                    count: 20,
+                },
             ],
             ..StarterPackConfig::default()
         };
@@ -71,7 +92,12 @@ impl Default for DaemonConfig {
             data_dir: PathBuf::from("./data"),
             db_export_dir: None,
             strict_session: true,
+            strict_sign: false,
+            strict_auth_sig: false,
+            strict_auth_token: false,
             verify_tickets: true,
+            strict_rpc: false,
+            print_bound_addrs: false,
             compress_s2c_threshold: 512,
             starter,
         }
@@ -79,6 +105,30 @@ impl Default for DaemonConfig {
 }
 
 impl DaemonConfig {
+    /// Constructs an ephemeral loopback configuration with every strict verification gate enabled.
+    pub fn strict_all(data_dir: PathBuf) -> Self {
+        let mut cfg = Self {
+            http_bind: "127.0.0.1:0".to_string(),
+            tcp_bind: "127.0.0.1:0".to_string(),
+            public_host: "127.0.0.1".to_string(),
+            data_dir,
+            compress_s2c_threshold: 256,
+            ..Self::default()
+        };
+        cfg.enable_strict_all();
+        cfg
+    }
+
+    /// Enables strict HTTP signature, auth token, session cookie, login ticket, and RPC enforcement.
+    pub fn enable_strict_all(&mut self) {
+        self.strict_session = true;
+        self.strict_sign = true;
+        self.strict_auth_sig = true;
+        self.strict_auth_token = true;
+        self.verify_tickets = true;
+        self.strict_rpc = true;
+    }
+
     /// Parses a flat `key = value` TOML file into `self`.
     pub fn load_toml_file(&mut self, path: impl AsRef<Path>) -> io::Result<()> {
         let content = fs::read_to_string(path)?;
@@ -106,7 +156,11 @@ impl DaemonConfig {
                     self.db_export_dir = Some(PathBuf::from(val));
                 }
                 "strict_session" => self.strict_session = val == "true" || val == "1",
+                "strict_sign" => self.strict_sign = val == "true" || val == "1",
+                "strict_auth_sig" => self.strict_auth_sig = val == "true" || val == "1",
+                "strict_auth_token" => self.strict_auth_token = val == "true" || val == "1",
                 "verify_tickets" => self.verify_tickets = val == "true" || val == "1",
+                "strict_rpc" => self.strict_rpc = val == "true" || val == "1",
                 "compress_s2c_threshold" => {
                     if let Ok(n) = val.parse::<usize>() {
                         self.compress_s2c_threshold = n;
@@ -155,7 +209,7 @@ impl DaemonConfig {
         }
     }
 
-    /// Parses CLI flags (`--config`, `--http-addr`, `--tcp-addr`, `--public-host`, `--data-dir`, etc.).
+    /// Parses CLI flags (`--config`, `--http-addr`, `--tcp-addr`, `--strict-all`, etc.).
     pub fn from_cli_args<I, S>(args: I) -> Result<Option<Self>, String>
     where
         I: IntoIterator<Item = S>,
@@ -224,6 +278,30 @@ impl DaemonConfig {
                         vec.get(idx + 1).ok_or("missing --db-export-dir value")?,
                     ));
                     idx += 2;
+                }
+                "--strict-all" => {
+                    cfg.enable_strict_all();
+                    idx += 1;
+                }
+                "--strict-sign" => {
+                    cfg.strict_sign = true;
+                    idx += 1;
+                }
+                "--strict-auth-sig" => {
+                    cfg.strict_auth_sig = true;
+                    idx += 1;
+                }
+                "--strict-auth-token" => {
+                    cfg.strict_auth_token = true;
+                    idx += 1;
+                }
+                "--strict-rpc" => {
+                    cfg.strict_rpc = true;
+                    idx += 1;
+                }
+                "--print-bound-addrs" => {
+                    cfg.print_bound_addrs = true;
+                    idx += 1;
                 }
                 "--no-strict-session" => {
                     cfg.strict_session = false;

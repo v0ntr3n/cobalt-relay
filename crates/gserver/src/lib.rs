@@ -11,6 +11,7 @@
 
 pub mod bridge;
 pub mod config;
+pub mod player_rpcs;
 pub mod tcp_server;
 pub mod world;
 
@@ -41,6 +42,9 @@ impl RunningServer {
     pub fn start(config: DaemonConfig) -> Result<Self, String> {
         let mapi_cfg = HttpMapiConfig {
             strict_session: config.strict_session,
+            strict_sign: config.strict_sign,
+            strict_auth_sig: config.strict_auth_sig,
+            strict_auth_token: config.strict_auth_token,
             ..HttpMapiConfig::default()
         };
 

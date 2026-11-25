@@ -22,6 +22,7 @@ use crate::bridge::{
     sync_gameplay_back_to_profile, to_gameplay_request, u64_to_amf3,
 };
 use crate::config::DaemonConfig;
+use crate::player_rpcs::try_handle_player_rpc;
 
 /// Per-TCP-connection session state tracked across RPCs.
 #[derive(Debug, Default, Clone)]
@@ -342,6 +343,14 @@ impl ServerWorld {
                     .unwrap_or("")
                     .trim()
                     .to_string();
+                if guard
+                    .gameplay
+                    .players
+                    .values()
+                    .any(|p| p.uname == uname)
+                {
+                    return Self::err_reply(req, "uname_used", now_i64);
+                }
 
                 match guard
                     .store
@@ -444,6 +453,35 @@ impl ServerWorld {
             return Self::err_reply(req, "user_not_logged_in", now_i64);
         };
 
+        // Check `PlayerStore`-backed progression, bag, hero, squad, arming, forge & extended RPCs
+        let WorldInner {
+            ref mut store,
+            ref mut gameplay,
+            ..
+        } = *guard;
+        if let Some(player_res) = try_handle_player_rpc(store, gameplay, uid, req, now_ts) {
+            return match player_res {
+                Ok(ok) => {
+                    if let Some(ref pid) = ok.refresh_roles_pid {
+                        self.refresh_mapi_roles(store, pid);
+                    }
+                    let mut main_env =
+                        S2cEnvelope::ok_response(&req.callback_name, ok.ret).with_time(now_i64);
+                    if !session.session_token.is_empty() {
+                        main_env = main_env.with_token(session.session_token.clone());
+                    }
+                    let mut caller_envelopes = Vec::with_capacity(1 + ok.caller_pushes.len());
+                    caller_envelopes.push(main_env);
+                    caller_envelopes.extend(ok.caller_pushes);
+                    HandledRpc {
+                        caller_envelopes,
+                        peer_envelopes: ok.peer_pushes,
+                    }
+                }
+                Err(code) => Self::err_reply(req, &code, now_i64),
+            };
+        }
+
         match req.method.as_str() {
             "user.getUser" => {
                 let Some(profile) = guard.store.get_player(uid) else {
@@ -496,15 +534,19 @@ impl ServerWorld {
             }
 
             "user.setVaConfig" => {
-                if let (Some(k), Some(v)) = (
-                    req.args.first().and_then(Value::as_str),
-                    req.args.get(1),
-                ) {
-                    let key_owned = k.to_string();
-                    let pj = amf3_to_player_json(v);
-                    let _ = guard
-                        .store
-                        .mutate_player(uid, now_ts, |p| p.set_user_config(key_owned, pj));
+                let Some(k) = req.args.first().and_then(Value::as_str) else {
+                    return Self::err_reply(req, "missing_vaconfig_key", now_i64);
+                };
+                let Some(v) = req.args.get(1) else {
+                    return Self::err_reply(req, "missing_vaconfig_val", now_i64);
+                };
+                let key_owned = k.to_string();
+                let pj = amf3_to_player_json(v);
+                if let Err(e) = guard
+                    .store
+                    .mutate_player(uid, now_ts, |p| p.set_user_config(key_owned, pj))
+                {
+                    return Self::err_reply(req, &format!("vaconfig_failed:{e}"), now_i64);
                 }
                 Self::ok_reply(req, session, Value::String("ok".into()), now_i64)
             }
@@ -513,14 +555,29 @@ impl ServerWorld {
                 let Some(profile) = guard.store.get_player(uid) else {
                     return Self::err_reply(req, "player_missing", now_i64);
                 };
-                // `FormationData:parseData` requires a 6-slot 1-based numeric array `ret.formation`!
+                // `FormationData:parseData` requires a 6-slot 1-based numeric array `ret.formation`
+                // plus `grid_formation` (`1..=9 -> hid`) for the 3x3 battle matrix!
                 let slots: Vec<Value> = (1..=6u8)
                     .map(|slot| {
                         let hid = profile.formation.position.get(&slot).copied().unwrap_or(0);
                         u64_to_amf3(hid)
                     })
                     .collect();
-                let ret_val = Value::map([("formation", Value::dense_array(slots))]);
+                let grid_entries: Vec<(String, Value)> = profile
+                    .formation
+                    .grid_formation
+                    .iter()
+                    .map(|(cell, &hid)| (cell.to_string(), u64_to_amf3(hid)))
+                    .collect();
+                let grid_val = if grid_entries.is_empty() {
+                    Value::empty_array()
+                } else {
+                    Value::map(grid_entries)
+                };
+                let ret_val = Value::map([
+                    ("formation", Value::dense_array(slots)),
+                    ("grid_formation", grid_val),
+                ]);
                 Self::ok_reply(req, session, ret_val, now_i64)
             }
 
@@ -639,6 +696,9 @@ impl ServerWorld {
                 let outcome = guard.gameplay.dispatch(uid, &gp_req, now_ts);
 
                 if outcome.response.err == "unsupported_method" {
+                    if self.config.strict_rpc {
+                        return Self::err_reply(req, "unsupported_method", now_i64);
+                    }
                     return Self::ok_reply(req, session, Value::empty_array(), now_i64);
                 }
 

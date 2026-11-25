@@ -2,6 +2,7 @@
 //! CLI entry point for the unified GServer (`vnsg2`) private server daemon (`gserver`).
 
 use std::env;
+use std::io::{self, Write};
 use std::process;
 use std::thread;
 use std::time::Duration;
@@ -20,6 +21,12 @@ fn print_help() {
            --public-host <HOST>     Host advertised in /phone/serverlist & /phone/gethash (default: 127.0.0.1)\n\
            --data-dir <DIR>         Persistent CRC32 WAL + player JSON directory (default: ./data)\n\
            --db-export-dir <DIR>    Optional decrypted client DB JSON export directory\n\
+           --strict-all             Enable strict HTTP sign/sig/token/cookie, TCP ticket, and RPC validation\n\
+           --strict-sign            Require valid MD5 sign=... on /phone/* MAPI endpoints\n\
+           --strict-auth-sig        Require valid GTSDK sig=... on /api/login/* endpoints\n\
+           --strict-auth-token      Require /phone/login sessionid to match issued Platform sessionID\n\
+           --strict-rpc             Reject unimplemented RPC methods with err='unsupported_method'\n\
+           --print-bound-addrs      Emit machine-readable 'GSERVER_READY http=<addr> tcp=<addr>' line\n\
            --no-strict-session      Disable PHPSESSID/GSESS_ID cookie enforcement on /phone/gethash\n\
            --no-verify-tickets      Allow TCP user.login without checking /phone/gethash ticket\n\
            -h, --help               Print this help message"
@@ -49,6 +56,14 @@ fn main() {
         }
     };
 
+    if cfg.print_bound_addrs {
+        println!(
+            "GSERVER_READY http={} tcp={}",
+            server.http_addr, server.tcp_addr
+        );
+        let _ = io::stdout().flush();
+    }
+
     println!("==================================================================");
     println!("  GServer (vnsg2) Pure-Rust Private Server — ONLINE");
     println!("==================================================================");
@@ -56,9 +71,19 @@ fn main() {
     println!("  TCP AMF3 Game Server : {} (24B LCPacket RX / 8B S2C TX)", server.tcp_addr);
     println!("  Advertised Host      : {}", cfg.public_host);
     println!("  Persistent Data Dir  : {}", cfg.data_dir.display());
+    println!(
+        "  Strict Gates         : session={} sign={} auth_sig={} token={} ticket={} rpc={}",
+        cfg.strict_session,
+        cfg.strict_sign,
+        cfg.strict_auth_sig,
+        cfg.strict_auth_token,
+        cfg.verify_tickets,
+        cfg.strict_rpc
+    );
     println!("  Win32 Client Env     : set GCLIENT_AUTH_URL=http://{}", server.http_addr);
     println!("  In-Game GM Commands  : /help /gold /silver /vip /level /item /hero /mail /heal");
     println!("==================================================================");
+    let _ = io::stdout().flush();
 
     loop {
         thread::sleep(Duration::from_secs(60));

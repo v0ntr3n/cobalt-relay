@@ -272,7 +272,7 @@ pub fn profile_to_gameplay_state(profile: &PlayerProfile) -> GameplayPlayer {
             }
         }
     }
-    if gp.roster.formation[0] == 0 {
+    if !gp.roster.formation.contains(&profile.protagonist_hid) && gp.roster.formation[0] == 0 {
         gp.roster.formation[0] = profile.protagonist_hid;
     }
 
@@ -308,6 +308,9 @@ pub fn sync_gameplay_back_to_profile(
     profile: &mut PlayerProfile,
     now_ts: u64,
 ) {
+    if !gp.uname.is_empty() {
+        profile.uname = gp.uname.clone();
+    }
     profile.level = gp.level.max(1);
     profile.exp = gp.exp;
     profile.vip = gp.vip;
@@ -354,11 +357,13 @@ pub fn sync_gameplay_back_to_profile(
         }
     }
 
-    // Sync 6-slot squad lineup
+    // Sync 6-slot squad lineup without resurrecting unset companion slots
     for (idx, &hid) in gp.roster.formation.iter().enumerate() {
         let slot = (idx + 1) as u8;
         if hid > 0 && profile.heroes.contains_key(&hid) {
             profile.formation.position.insert(slot, hid);
+        } else if profile.formation.position.get(&slot).copied() != Some(profile.protagonist_hid) {
+            profile.formation.position.remove(&slot);
         }
     }
     profile.formation.sync_grid_with_squad();

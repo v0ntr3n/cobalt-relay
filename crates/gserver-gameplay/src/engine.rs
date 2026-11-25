@@ -94,7 +94,7 @@ impl GameplayEngine {
                         ret
                     })
             }
-            rpc::ROYALCITY_ENTER => {
+            rpc::ROYALCITY_ENTER | "royalcity.enter" => {
                 let x = req.args.first().and_then(DtoValue::as_i64).map(|v| v as i32);
                 let y = req.args.get(1).and_then(DtoValue::as_i64).map(|v| v as i32);
                 self.town
@@ -104,13 +104,13 @@ impl GameplayEngine {
                         ret
                     })
             }
-            rpc::CITY_LEAVE | rpc::ROYALCITY_LEAVE => {
+            rpc::CITY_LEAVE | rpc::ROYALCITY_LEAVE | "royalcity.leave" => {
                 let (ret, bcasts) = self.town.leave_town(uid, now_ts);
                 peer_pushes.extend(bcasts);
                 Ok(ret)
             }
             rpc::CITY_GET_ENTER_LIST => Ok(self.town.get_enter_list(uid)),
-            rpc::TOWN_MOVE | rpc::ROYALCITY_MOVE => {
+            rpc::TOWN_MOVE | rpc::ROYALCITY_MOVE | "royalcity.move" => {
                 let x = req.args.first().and_then(DtoValue::as_i64).unwrap_or(100) as i32;
                 let y = req.args.get(1).and_then(DtoValue::as_i64).unwrap_or(100) as i32;
                 self.town.move_player(uid, x, y, now_ts).map(|(ret, bcasts)| {
@@ -231,7 +231,7 @@ impl GameplayEngine {
             rpc::CHAT_GET_PERSONAL_LAST => Ok(self.chat.get_personal_last_msgs(uid)),
 
             // --- Mail & Reward Center ---
-            rpc::MAIL_GET_LIST => Ok(self.mail_center.get_mail_list(uid)),
+            rpc::MAIL_GET_LIST | "mail.getMailList" => Ok(self.mail_center.get_mail_list(uid)),
             rpc::MAIL_READ_ALL => Ok(self.mail_center.read_all_mail(uid)),
             rpc::MAIL_SEND => {
                 let target_uid = req.args.first().and_then(DtoValue::as_u64).unwrap_or(0);
@@ -312,7 +312,7 @@ impl GameplayEngine {
                     })
             }
             rpc::RAFFLE_GET_INFO => Ok(self.raffle.get_info(uid, now_ts)),
-            rpc::RAFFLE_SINGLE | rpc::RAFFLE_AUTO => {
+            rpc::RAFFLE_SINGLE | rpc::RAFFLE_AUTO | "raffle.raffle" => {
                 let pool_id = req.args.first().and_then(DtoValue::as_u32).unwrap_or(2);
                 let pool = RafflePool::from_u32(pool_id).unwrap_or(RafflePool::Divine);
                 let player = self.players.get_mut(&uid).unwrap();
@@ -362,7 +362,7 @@ impl GameplayEngine {
                         ret
                     })
             }
-            rpc::RAFFLE_BUY_TOKEN => {
+            rpc::RAFFLE_BUY_TOKEN | "raffle.buyRaffleToken" => {
                 let qty = req.args.first().and_then(DtoValue::as_u32).unwrap_or(1);
                 let player = self.players.get_mut(&uid).unwrap();
                 self.raffle
@@ -449,7 +449,7 @@ impl GameplayEngine {
                         ret
                     })
             }
-            rpc::COPY_RESET_ATK => {
+            rpc::COPY_RESET_ATK | "copy.resetAtkNum" => {
                 let chapter_id = req.args.first().and_then(DtoValue::as_u32).unwrap_or(1001);
                 let copy_id = req.args.get(1).and_then(DtoValue::as_u32).unwrap_or(100101);
                 let player = self.players.get_mut(&uid).unwrap();
@@ -508,7 +508,7 @@ impl GameplayEngine {
             }
 
             // --- Sign, Online & Activity ---
-            rpc::SIGN_GET_INFO => Ok(self.sign_online.get_sign_info(uid, now_ts)),
+            rpc::SIGN_GET_INFO | "sign.getSignInfo" => Ok(self.sign_online.get_sign_info(uid, now_ts)),
             rpc::SIGN_TODAY => {
                 let player = self.players.get_mut(&uid).unwrap();
                 self.sign_online
@@ -528,10 +528,10 @@ impl GameplayEngine {
                         ret
                     })
             }
-            rpc::ONLINE_GET_INFO | rpc::OPEN_ONLINE_GET_INFO => {
+            rpc::ONLINE_GET_INFO | rpc::OPEN_ONLINE_GET_INFO | "online.getOnlineInfo" => {
                 Ok(self.sign_online.get_online_info(&self.players[&uid]))
             }
-            rpc::ONLINE_FETCH | rpc::OPEN_ONLINE_RECEIVE => {
+            rpc::ONLINE_FETCH | rpc::OPEN_ONLINE_RECEIVE | "online.fetchOnlineReward" => {
                 let tier_id = req.args.first().and_then(DtoValue::as_u32).unwrap_or(1);
                 let player = self.players.get_mut(&uid).unwrap();
                 self.sign_online
