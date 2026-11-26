@@ -67,6 +67,24 @@ jobs:
           set -o pipefail
           cargo test --workspace --offline 2>&1 | tee -a ci_logs/build.log
 
+      - name: Stress-test Windows TCP framing scenarios (100 iterations)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Set-Content -Path ci_logs/last_step.txt -Value "Stress-test Windows TCP framing scenarios (100 iterations)"
+          for ($i = 1; $i -le 100; $i++) {
+            $iterOut = & cargo test --offline -q -p gserver-qa-harness --test adversarial_qa test_tcp_scenario_ 2>&1
+            if ($LASTEXITCODE -ne 0) {
+              "=== FAILED on Windows TCP scenario iteration $i/100 ===" | Add-Content -Path ci_logs/build.log
+              $iterOut | ForEach-Object { "$_" } | Add-Content -Path ci_logs/build.log
+              $iterOut | ForEach-Object { Write-Host "$_" }
+              exit $LASTEXITCODE
+            }
+          }
+          "PASS: 100/100 Windows TCP framing scenario iterations succeeded." | Add-Content -Path ci_logs/build.log
+          Write-Host "PASS: 100/100 Windows TCP framing scenario iterations succeeded."
+
       - name: Upload release server binary
         uses: actions/upload-artifact@v4
         with:

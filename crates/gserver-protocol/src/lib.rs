@@ -28,12 +28,10 @@ pub mod rpc;
 pub mod zlib;
 
 pub use amf3::{Amf3Decoder, Amf3Encoder, Amf3Object, DecodeConfig, TraitInfo, Value};
-pub use error::{
-    Amf3Error, BtDecryptError, EnvelopeError, FrameError, ProtocolError, ZlibError,
-};
+pub use error::{Amf3Error, BtDecryptError, EnvelopeError, FrameError, ProtocolError, ZlibError};
 pub use frame::{
-    C2sFrame, C2sFrameMode, C2sWireKind, ClientRxDecoder, S2cFlags, S2cFrame, ServerRxDecoder,
-    ServerTxEncoder,
+    C2sFrame, C2sFrameMode, C2sParserState, C2sWireKind, ClientRxDecoder, S2cFlags, S2cFrame,
+    ServerRxDecoder, ServerTxEncoder,
 };
 pub use rpc::{
     decode_s2c_frame_batch, encode_s2c_multi_batch_amf3, encode_s2c_multi_frame,

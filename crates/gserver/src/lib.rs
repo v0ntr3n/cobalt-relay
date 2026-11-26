@@ -25,7 +25,10 @@ use gserver_http::{
 };
 
 pub use config::DaemonConfig;
-pub use tcp_server::{spawn_tcp_game_server, TcpGameServerHandle};
+pub use tcp_server::{
+    spawn_tcp_game_server, TcpConnectionRecord, TcpGameServerHandle, TcpServerTelemetry,
+    TcpShutdownReason,
+};
 pub use world::{ConnectionSession, HandledRpc, ServerWorld};
 
 /// Handle owning both the running HTTP MAPI server and TCP AMF3 game server.
@@ -53,8 +56,13 @@ impl RunningServer {
         let world = ServerWorld::open(config.clone(), Arc::clone(&mapi))?;
 
         // Bind TCP Game Server first so ephemeral `:0` ports resolve before configuring `/phone/serverlist`
-        let tcp_handle = spawn_tcp_game_server(&config.tcp_bind, Arc::clone(&world))
-            .map_err(|e| format!("failed to bind TCP game server on '{}': {e}", config.tcp_bind))?;
+        let tcp_handle =
+            spawn_tcp_game_server(&config.tcp_bind, Arc::clone(&world)).map_err(|e| {
+                format!(
+                    "failed to bind TCP game server on '{}': {e}",
+                    config.tcp_bind
+                )
+            })?;
         let tcp_addr = tcp_handle.local_addr();
 
         let s161 = GameServerEntry::default_s161(config.public_host.clone(), tcp_addr.port());
@@ -67,7 +75,12 @@ impl RunningServer {
             Arc::clone(&mapi),
             HttpServerConfig::default(),
         )
-        .map_err(|e| format!("failed to bind HTTP MAPI server on '{}': {e}", config.http_bind))?;
+        .map_err(|e| {
+            format!(
+                "failed to bind HTTP MAPI server on '{}': {e}",
+                config.http_bind
+            )
+        })?;
         let http_addr = http_handle.local_addr();
 
         Ok(Self {
@@ -77,6 +90,10 @@ impl RunningServer {
             http_handle,
             tcp_handle,
         })
+    }
+
+    pub fn tcp_telemetry(&self) -> &Arc<TcpServerTelemetry> {
+        self.tcp_handle.telemetry()
     }
 
     pub fn shutdown(mut self) {

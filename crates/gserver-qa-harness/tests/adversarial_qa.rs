@@ -4,7 +4,7 @@
 //! hostile TCP framing, and 32-thread concurrent client simulation suite for `gserver-qa-harness`.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Barrier, Mutex};
@@ -24,15 +24,15 @@ use gserver_qa_harness::crypto::{
 };
 use gserver_qa_harness::framing::{
     build_ping_response, build_rpc_response, encode_client_lc_packet, encode_server_multi_frame,
-    encode_server_raw_frame, encode_server_single_frame, is_framed_lc_packet, FrameError,
-    ServerRxStreamDecoder, Win32ClientSimulator, CLIENT_LC_HEADER_LEN, MAX_SERVER_FRAME_BODY_LEN,
-    SERVER_RX_HEADER_LEN,
+    encode_server_raw_frame, encode_server_single_frame, is_framed_lc_packet, DecoderParserState,
+    FrameError, ServerRxStreamDecoder, Win32ClientSimulator, CLIENT_LC_HEADER_LEN,
+    MAX_SERVER_FRAME_BODY_LEN, SERVER_RX_HEADER_LEN,
 };
 use gserver_qa_harness::fuzzer::{run_deterministic_fuzz_campaign, DEFAULT_FUZZ_SEED};
 use gserver_qa_harness::http_gateway::{
     route_sdk_http_request, HttpGatewayConfig, HttpGatewayMetrics, HttpSdkGateway,
 };
-use gserver_qa_harness::server::{GameServerConfig, GameTcpServer};
+use gserver_qa_harness::server::{GameServerConfig, GameTcpServer, ShutdownReason};
 use gserver_qa_harness::zlib::{
     adler32, craft_zlib_zero_bomb, zlib_compress, zlib_decompress_bounded, ZlibError,
 };
@@ -43,8 +43,20 @@ fn wait_until<F: Fn() -> bool>(timeout: Duration, cond: F) {
         if cond() {
             return;
         }
-        thread::sleep(Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// Returns `true` ONLY for socket errors expected when the server intentionally aborts/closes
+/// a hostile connection (e.g. `> 16 MiB` oversized frame flood) while the attacker is still
+/// attempting to push trailing bytes (`WSAECONNRESET = 10054`, `WSAECONNABORTED = 10053`, `EPIPE`).
+fn is_expected_hostile_peer_cutoff(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::BrokenPipe
+    )
 }
 
 // ============================================================================
@@ -90,10 +102,10 @@ fn test_u29_exact_boundaries_and_auto_double_promotion() {
     // Automatic promotion to `0x05 Double` outside `-268_435_456..=268_435_455`:
     let double_promoted_cases: &[i64] = &[
         (AMF3_INT_MIN as i64) - 1, // -268,435,457
-        (AMF3_INT_MAX as i64) + 1, // +268,435,456
+        (AMF3_INT_MAX as i64) + 1, // +268,435_456
         1_667_530_800,             // mergeServerTime from live_capture_filtered.log:76
         1_795_500_450,             // live vnsg2 server timestamp from live_capture_filtered.log:76
-        1_879_048_192,             // 0x7000_0000 (bit 28 == 1 -> would sign-extend to -268,435,456 if U29!)
+        1_879_048_192, // 0x7000_0000 (bit 28 == 1 -> would sign-extend to -268,435,456 if U29!)
         -1_795_500_450,
     ];
 
@@ -198,7 +210,10 @@ fn test_amf3_empty_table_string_refs_bytearray_and_lua_nil_holes() {
             0x00, // ref index 0 << 1 == 0x00!
         ]
     );
-    assert_eq!(Amf3Decoder::decode(&wire_strs).unwrap(), arr_with_empty_strs);
+    assert_eq!(
+        Amf3Decoder::decode(&wire_strs).unwrap(),
+        arr_with_empty_strs
+    );
 
     // 4. `0x06 String` (`stringRefs`) vs `0x0C ByteArray` (`objectRefs`) separate reference tables!
     let raw_mixed_refs = vec![
@@ -256,7 +271,13 @@ fn test_amf3_empty_table_string_refs_bytearray_and_lua_nil_holes() {
     ));
 
     // 6. Lua 5.1 Nil-Hole Trap in `multi=1` `data.ret`:
-    let rpc = build_rpc_response("ok", "user.getUser_2", Amf3Value::empty_lua_table(), None, None);
+    let rpc = build_rpc_response(
+        "ok",
+        "user.getUser_2",
+        Amf3Value::empty_lua_table(),
+        None,
+        None,
+    );
     let hole_at_1 = Amf3Value::anonymous_object(vec![(
         "ret",
         Amf3Value::dense_array(vec![Amf3Value::Null, rpc.clone()]),
@@ -356,7 +377,7 @@ fn test_asymmetric_framing_and_off_by_one_flag_traps() {
 
         assert_eq!(wire[4], 0);
         assert_eq!(wire[5], u8::from(compress)); // Lua string.byte(head, 6) == zipped!
-        assert_eq!(wire[6], u8::from(multi));    // Lua string.byte(head, 7) == multi!
+        assert_eq!(wire[6], u8::from(multi)); // Lua string.byte(head, 7) == multi!
         assert_eq!(wire[7], 0);
 
         let events = sim.receive_server_bytes(&wire, 1_795_500_450).unwrap();
@@ -374,19 +395,26 @@ fn test_asymmetric_framing_and_off_by_one_flag_traps() {
     let mut bad_sim1 = Win32ClientSimulator::new();
     assert!(matches!(
         bad_sim1.receive_server_bytes(&off_by_one_frame, 1_795_500_450),
-        Err(FrameError::Amf3(Amf3Error::UnsupportedMarker { marker: 0x78, offset: 0 }))
+        Err(FrameError::Amf3(Amf3Error::UnsupportedMarker {
+            marker: 0x78,
+            offset: 0
+        }))
     ));
 
     // TRAP B: Server mistakenly sends a 24-byte `LCPacket` to 8-byte RX client!
     let wrong_24b = encode_client_lc_packet(&Amf3Encoder::encode(&valid_resp).unwrap(), true);
     let mut bad_sim2 = Win32ClientSimulator::new();
-    assert!(bad_sim2.receive_server_bytes(&wrong_24b, 1_795_500_450).is_err());
+    assert!(bad_sim2
+        .receive_server_bytes(&wrong_24b, 1_795_500_450)
+        .is_err());
 
     // TRAP C: Server sends 0-byte body (`[0,0,0,0, 0,0,0,0]`) -> `CConnection` closes socket (`HEAD_SCRIPT_ERROR`)!
     let zero_hdr = [0u8; SERVER_RX_HEADER_LEN];
     let mut bad_sim3 = Win32ClientSimulator::new();
     assert_eq!(
-        bad_sim3.receive_server_bytes(&zero_hdr, 1_795_500_450).unwrap_err(),
+        bad_sim3
+            .receive_server_bytes(&zero_hdr, 1_795_500_450)
+            .unwrap_err(),
         FrameError::ClientSocketClosed("HEAD_SCRIPT_ERROR")
     );
     assert!(bad_sim3.socket_closed);
@@ -510,10 +538,22 @@ fn test_nested_amf3_bombs_corrupted_zlib_and_16mib_dos_guards() {
     stored_zlib.extend_from_slice(&nlen.to_le_bytes());
     stored_zlib.extend_from_slice(payload);
     stored_zlib.extend_from_slice(&adler32(payload).to_be_bytes());
-    assert_eq!(zlib_decompress_bounded(&stored_zlib, 1024).unwrap(), payload);
+    assert_eq!(
+        zlib_decompress_bounded(&stored_zlib, 1024).unwrap(),
+        payload
+    );
 
     let mut tmp = Vec::new();
-    for &u in &[0u32, 0x7F, 0x80, 0x3FFF, 0x4000, 0x1F_FFFF, 0x20_0000, 0x1FFF_FFFF] {
+    for &u in &[
+        0u32,
+        0x7F,
+        0x80,
+        0x3FFF,
+        0x4000,
+        0x1F_FFFF,
+        0x20_0000,
+        0x1FFF_FFFF,
+    ] {
         tmp.clear();
         write_u29(&mut tmp, u);
         let mut p = 0;
@@ -555,7 +595,10 @@ fn test_bt_platform_win32_live_signatures_empty_query_segments_and_bt_decrypt() 
     verify_platform_url_signature(&signed_sim, VNSG2_LIVE_SIGN_KEY).unwrap();
 
     let parsed = parse_tolerant_query_params(&signed_weird);
-    assert_eq!(parsed.get("pid").map(String::as_str), Some("636df6782106606d"));
+    assert_eq!(
+        parsed.get("pid").map(String::as_str),
+        Some("636df6782106606d")
+    );
 
     let cfg = HttpGatewayConfig {
         enforce_signature: true,
@@ -602,79 +645,199 @@ fn test_bt_platform_win32_live_signatures_empty_query_segments_and_bt_decrypt() 
 }
 
 // ============================================================================
-// 6. Live TCP Streaming Torture: 1-Byte Chunks, 64-RPC Pipeline & Truncated EOF
+// 6. Live TCP Streaming Scenarios (5 Isolated Scenarios + Lifecycle Diagnostics)
 // ============================================================================
 
+/// Scenario 1: Valid 1-byte fragmented packets (`user.login`, `qa.multiBurst`, `user.getUser`).
+/// Strictly asserts 0 `ConnectionReset` errors on both TX and RX, exercising both the original
+/// `300ms` partial-frame timeout and the default `1500ms` configuration.
 #[test]
-fn test_1byte_chunked_tcp_pipelined_bursts_and_truncated_frames() {
-    let cfg = GameServerConfig {
-        read_timeout: Duration::from_millis(300),
-        ..GameServerConfig::default()
-    };
-    let mut server = GameTcpServer::start("127.0.0.1:0", cfg).unwrap();
-    let addr = server.local_addr();
+fn test_tcp_scenario_1_valid_1byte_fragmented_packets() {
+    for &read_timeout_ms in &[300u64, 1500u64] {
+        let cfg = GameServerConfig {
+            read_timeout: Duration::from_millis(read_timeout_ms),
+            ..GameServerConfig::default()
+        };
+        let mut server = GameTcpServer::start("127.0.0.1:0", cfg).unwrap();
+        let addr = server.local_addr();
 
-    {
         let mut stream = TcpStream::connect(addr).unwrap();
         stream.set_nodelay(true).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
 
         let mut sim = Win32ClientSimulator::new();
         sim.reg_push_callback("push.reward.update");
         let (cb1, pkt1) = sim.build_send_msg("user.login", Amf3Value::empty_lua_table(), true);
         let (cb2, pkt2) = sim.build_send_msg("qa.multiBurst", Amf3Value::empty_lua_table(), false);
+        let (cb3, pkt3) = sim.build_send_msg("user.getUser", Amf3Value::empty_lua_table(), true);
 
-        for &b in pkt1.iter().chain(pkt2.iter()) {
-            stream.write_all(&[b]).unwrap();
+        let expected_rx_bytes = (pkt1.len() + pkt2.len() + pkt3.len()) as u64;
+        for (idx, &b) in pkt1
+            .iter()
+            .chain(pkt2.iter())
+            .chain(pkt3.iter())
+            .enumerate()
+        {
+            stream.write_all(&[b]).unwrap_or_else(|err| {
+                panic!(
+                    "valid 1-byte write failed at byte {}/{} (read_timeout={}ms): {}\n{}",
+                    idx,
+                    expected_rx_bytes,
+                    read_timeout_ms,
+                    err,
+                    server.telemetry().format_diagnostics()
+                )
+            });
         }
         stream.flush().unwrap();
 
-        let mut received_events = Vec::new();
+        let mut received_events = Vec::with_capacity(4);
         let mut one_byte = [0u8; 1];
-        while received_events.len() < 3 {
-            let n = stream.read(&mut one_byte).unwrap();
-            assert_eq!(n, 1);
-            let mut evs = sim.receive_server_bytes(&one_byte, 1_795_500_450).unwrap();
+        let mut total_s2c_bytes = 0u64;
+        while received_events.len() < 4 {
+            let n = stream.read(&mut one_byte).unwrap_or_else(|err| {
+                panic!(
+                    "valid 1-byte read failed after {} events: {}\n{}",
+                    received_events.len(),
+                    err,
+                    server.telemetry().format_diagnostics()
+                )
+            });
+            assert_eq!(n, 1, "unexpected early EOF during 1-byte response stream");
+            total_s2c_bytes += 1;
+            let mut evs = sim
+                .receive_server_bytes(&one_byte, 1_795_500_450)
+                .expect("S2C frame must decode cleanly");
             received_events.append(&mut evs);
         }
+
         assert_eq!(received_events[0].callback_name, cb1);
         assert_eq!(received_events[1].callback_name, cb2);
         assert_eq!(received_events[2].callback_name, "push.reward.update");
         assert!(received_events[2].was_push);
-    }
-
-    {
-        let mut stream = TcpStream::connect(addr).unwrap();
-        stream.set_nodelay(true).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-
-        let mut sim = Win32ClientSimulator::new();
-        let mut burst = Vec::new();
-        let mut expected_cbs = Vec::with_capacity(64);
-        for idx in 0..64 {
-            let (cb, pkt) = sim.build_send_msg(
-                "bag.bagInfo",
-                Amf3Value::anonymous_object(vec![("slot", Amf3Value::Integer(idx))]),
-                idx % 2 == 0,
-            );
-            expected_cbs.push(cb);
-            burst.extend_from_slice(&pkt);
-        }
-
-        stream.write_all(&burst).unwrap();
-        stream.flush().unwrap();
-
-        let mut all_events = Vec::with_capacity(64);
-        let mut rbuf = [0u8; 4096];
-        while all_events.len() < 64 {
-            let n = stream.read(&mut rbuf).unwrap();
-            assert!(n > 0);
-            all_events.extend(sim.receive_server_bytes(&rbuf[..n], 1_795_500_450).unwrap());
-        }
-        let got_cbs: Vec<String> = all_events.into_iter().map(|e| e.callback_name).collect();
-        assert_eq!(got_cbs, expected_cbs);
+        assert_eq!(received_events[3].callback_name, cb3);
         assert_eq!(sim.pending_one_shot_count(), 0);
+
+        stream.shutdown(Shutdown::Write).unwrap();
+        let mut eof_probe = [0u8; 8];
+        assert_eq!(stream.read(&mut eof_probe).unwrap(), 0);
+        drop(stream);
+
+        let tel = Arc::clone(server.telemetry());
+        server.stop();
+        assert_eq!(tel.clean_truncated_disconnects.load(Ordering::Acquire), 0);
+        assert_eq!(tel.lua_hazard_violations.load(Ordering::Acquire), 0);
+        assert_eq!(tel.valid_rpcs_handled.load(Ordering::Acquire), 3);
+
+        let rec = tel
+            .connection_record(1)
+            .expect("conn#1 lifecycle record must be present");
+        assert_eq!(rec.rx_bytes_total, expected_rx_bytes);
+        assert_eq!(rec.tx_bytes_total, total_s2c_bytes);
+        assert_eq!(rec.frames_decoded, 3);
+        assert_eq!(rec.frames_sent, 3);
+        assert_eq!(rec.final_parser_state, DecoderParserState::Idle);
+        assert_eq!(rec.shutdown_reason, ShutdownReason::CleanClientEof);
     }
+}
+
+/// Scenario 2: Valid 64-RPC pipelined burst (`bag.bagInfo_2` .. `bag.bagInfo_65`).
+/// Verifies all 64 responses arrive strictly in order with 0 `ConnectionReset` errors.
+#[test]
+fn test_tcp_scenario_2_valid_64_rpc_pipelined_burst() {
+    let mut server = GameTcpServer::start("127.0.0.1:0", GameServerConfig::default()).unwrap();
+    let addr = server.local_addr();
+
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream.set_nodelay(true).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+
+    let mut sim = Win32ClientSimulator::new();
+    let mut burst = Vec::new();
+    let mut expected_cbs = Vec::with_capacity(64);
+    for idx in 0..64 {
+        let (cb, pkt) = sim.build_send_msg(
+            "bag.bagInfo",
+            Amf3Value::anonymous_object(vec![("slot", Amf3Value::Integer(idx))]),
+            idx % 2 == 0,
+        );
+        expected_cbs.push(cb);
+        burst.extend_from_slice(&pkt);
+    }
+
+    stream.write_all(&burst).unwrap_or_else(|err| {
+        panic!(
+            "64-RPC pipelined burst write failed: {}\n{}",
+            err,
+            server.telemetry().format_diagnostics()
+        )
+    });
+    stream.flush().unwrap();
+
+    let mut all_events = Vec::with_capacity(64);
+    let mut rbuf = [0u8; 4096];
+    let mut total_s2c_bytes = 0u64;
+    while all_events.len() < 64 {
+        let n = stream.read(&mut rbuf).unwrap_or_else(|err| {
+            panic!(
+                "64-RPC pipelined burst read failed at {}/64 events: {}\n{}",
+                all_events.len(),
+                err,
+                server.telemetry().format_diagnostics()
+            )
+        });
+        assert!(n > 0, "unexpected EOF after {}/64 events", all_events.len());
+        total_s2c_bytes += n as u64;
+        all_events.extend(sim.receive_server_bytes(&rbuf[..n], 1_795_500_450).unwrap());
+    }
+
+    let got_cbs: Vec<String> = all_events.into_iter().map(|e| e.callback_name).collect();
+    assert_eq!(got_cbs, expected_cbs);
+    assert_eq!(sim.pending_one_shot_count(), 0);
+
+    stream.shutdown(Shutdown::Write).unwrap();
+    let mut eof_probe = [0u8; 8];
+    assert_eq!(stream.read(&mut eof_probe).unwrap(), 0);
+    drop(stream);
+
+    let tel = Arc::clone(server.telemetry());
+    server.stop();
+    assert_eq!(tel.valid_rpcs_handled.load(Ordering::Acquire), 64);
+    assert_eq!(tel.clean_truncated_disconnects.load(Ordering::Acquire), 0);
+    assert_eq!(tel.lua_hazard_violations.load(Ordering::Acquire), 0);
+
+    let rec = tel
+        .connection_record(1)
+        .expect("conn#1 lifecycle record must be present");
+    assert_eq!(rec.rx_bytes_total, burst.len() as u64);
+    assert_eq!(rec.tx_bytes_total, total_s2c_bytes);
+    assert_eq!(rec.frames_decoded, 64);
+    assert_eq!(rec.frames_sent, 64);
+    assert_eq!(rec.final_parser_state, DecoderParserState::Idle);
+    assert_eq!(rec.shutdown_reason, ShutdownReason::CleanClientEof);
+}
+
+/// Scenario 3: Truncated-frame shutdown (`TruncatedFrameEof` on half-close AND
+/// `IdleTimeoutTruncatedFrame` on stalled Slowloris connections without `FIN`).
+#[test]
+fn test_tcp_scenario_3_truncated_frame_shutdown_and_idle_timeout() {
+    let partial_timeout = Duration::from_millis(120);
+    let cfg = GameServerConfig {
+        read_timeout: partial_timeout,
+        ..GameServerConfig::default()
+    };
+    let mut server = GameTcpServer::start("127.0.0.1:0", cfg).unwrap();
+    let addr = server.local_addr();
 
     let sample_pkt = encode_client_lc_packet(
         &Amf3Encoder::encode(&Amf3Value::anonymous_object(vec![(
@@ -684,32 +847,470 @@ fn test_1byte_chunked_tcp_pipelined_bursts_and_truncated_frames() {
         .unwrap(),
         true,
     );
-    for &cut in &[1usize, 10, 24, sample_pkt.len() - 2] {
+    let declared_body_len =
+        u32::from_be_bytes([sample_pkt[0], sample_pkt[1], sample_pkt[2], sample_pkt[3]]);
+
+    // Part A: Half-closed (`Shutdown::Write`) truncated frames at all 4 parser state boundaries.
+    let eof_cuts = [1usize, 10, CLIENT_LC_HEADER_LEN, sample_pkt.len() - 2];
+    for &cut in &eof_cuts {
         let mut s = TcpStream::connect(addr).unwrap();
+        s.set_nodelay(true).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         s.write_all(&sample_pkt[..cut]).unwrap();
         s.flush().unwrap();
-        let _ = s.shutdown(Shutdown::Write);
-    }
-    {
-        let mut dos_sock = TcpStream::connect(addr).unwrap();
-        let mut fake_hdr = [0u8; CLIENT_LC_HEADER_LEN];
-        fake_hdr[0..4].copy_from_slice(&((MAX_SERVER_FRAME_BODY_LEN as u32) + 42).to_be_bytes());
-        fake_hdr[4..8].copy_from_slice(&[1, 1, 1, 1]);
-        let _ = dos_sock.write_all(&fake_hdr);
-        let _ = dos_sock.flush();
-        let _ = dos_sock.shutdown(Shutdown::Write);
+        s.shutdown(Shutdown::Write).unwrap();
+        let mut drain = [0u8; 16];
+        assert_eq!(
+            s.read(&mut drain).unwrap(),
+            0,
+            "server must close cleanly with FIN"
+        );
     }
 
-    let tel = server.telemetry();
+    // Part B: Genuinely stalled Slowloris truncated connections (client keeps write-half OPEN).
+    let mut stalled_hdr = TcpStream::connect(addr).unwrap();
+    stalled_hdr.set_nodelay(true).unwrap();
+    stalled_hdr
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    stalled_hdr.write_all(&sample_pkt[..12]).unwrap();
+    stalled_hdr.flush().unwrap();
+
+    let body_stall_cut = CLIENT_LC_HEADER_LEN + 2;
+    let mut stalled_body = TcpStream::connect(addr).unwrap();
+    stalled_body.set_nodelay(true).unwrap();
+    stalled_body
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    stalled_body
+        .write_all(&sample_pkt[..body_stall_cut])
+        .unwrap();
+    stalled_body.flush().unwrap();
+
+    let tel = Arc::clone(server.telemetry());
     wait_until(Duration::from_secs(5), || {
-        tel.clean_truncated_disconnects.load(Ordering::Relaxed) >= 4
-            && tel.rejected_oversized_frames.load(Ordering::Relaxed) >= 1
+        tel.clean_truncated_disconnects.load(Ordering::Acquire) == 6
     });
-    assert!(tel.clean_truncated_disconnects.load(Ordering::Relaxed) >= 4);
-    assert!(tel.rejected_oversized_frames.load(Ordering::Relaxed) >= 1);
-    assert_eq!(tel.lua_hazard_violations.load(Ordering::Relaxed), 0);
+
+    // Both stalled peers must observe clean server `FIN` (`Ok(0)`) once `IdleTimeoutTruncatedFrame` fires!
+    let mut probe = [0u8; 16];
+    assert_eq!(stalled_hdr.read(&mut probe).unwrap(), 0);
+    assert_eq!(stalled_body.read(&mut probe).unwrap(), 0);
+    drop(stalled_hdr);
+    drop(stalled_body);
 
     server.stop();
+    assert_eq!(
+        tel.clean_truncated_disconnects.load(Ordering::Acquire),
+        6,
+        "{}",
+        tel.format_diagnostics()
+    );
+
+    let records = tel.connection_records();
+    assert_eq!(records.len(), 6, "{}", tel.format_diagnostics());
+
+    // Verify exact parser states & shutdown reasons for the 4 half-closed truncated connections:
+    assert_eq!(
+        records[0].shutdown_reason,
+        ShutdownReason::TruncatedFrameEof { buffered_bytes: 1 }
+    );
+    assert_eq!(
+        records[0].final_parser_state,
+        DecoderParserState::AwaitingLengthPrefix { buffered_bytes: 1 }
+    );
+
+    assert_eq!(
+        records[1].shutdown_reason,
+        ShutdownReason::TruncatedFrameEof { buffered_bytes: 10 }
+    );
+    assert_eq!(
+        records[1].final_parser_state,
+        DecoderParserState::AwaitingLcHeader {
+            declared_body_len,
+            buffered_bytes: 10,
+        }
+    );
+
+    assert_eq!(
+        records[2].shutdown_reason,
+        ShutdownReason::TruncatedFrameEof {
+            buffered_bytes: CLIENT_LC_HEADER_LEN
+        }
+    );
+    assert_eq!(
+        records[2].final_parser_state,
+        DecoderParserState::AwaitingFrameBody {
+            declared_body_len,
+            buffered_body_bytes: 0,
+        }
+    );
+
+    let last_cut = sample_pkt.len() - 2;
+    assert_eq!(
+        records[3].shutdown_reason,
+        ShutdownReason::TruncatedFrameEof {
+            buffered_bytes: last_cut
+        }
+    );
+    assert_eq!(
+        records[3].final_parser_state,
+        DecoderParserState::AwaitingFrameBody {
+            declared_body_len,
+            buffered_body_bytes: last_cut - CLIENT_LC_HEADER_LEN,
+        }
+    );
+
+    // Verify both stalled Slowloris connections timed out with `IdleTimeoutTruncatedFrame`:
+    let mut saw_hdr_timeout = false;
+    let mut saw_body_timeout = false;
+    for rec in &records[4..6] {
+        match (&rec.shutdown_reason, rec.final_parser_state) {
+            (
+                ShutdownReason::IdleTimeoutTruncatedFrame {
+                    buffered_bytes: 12,
+                    idle_ms,
+                },
+                DecoderParserState::AwaitingLcHeader {
+                    declared_body_len: dlen,
+                    buffered_bytes: 12,
+                },
+            ) => {
+                assert!(
+                    *idle_ms >= partial_timeout.as_millis() as u64,
+                    "idle_ms={} must be >= {}ms",
+                    idle_ms,
+                    partial_timeout.as_millis()
+                );
+                assert_eq!(dlen, declared_body_len);
+                saw_hdr_timeout = true;
+            }
+            (
+                ShutdownReason::IdleTimeoutTruncatedFrame {
+                    buffered_bytes,
+                    idle_ms,
+                },
+                DecoderParserState::AwaitingFrameBody {
+                    declared_body_len: dlen,
+                    buffered_body_bytes: 2,
+                },
+            ) if *buffered_bytes == body_stall_cut => {
+                assert!(
+                    *idle_ms >= partial_timeout.as_millis() as u64,
+                    "idle_ms={} must be >= {}ms",
+                    idle_ms,
+                    partial_timeout.as_millis()
+                );
+                assert_eq!(dlen, declared_body_len);
+                saw_body_timeout = true;
+            }
+            other => panic!("unexpected stalled lifecycle record: {:?}", other),
+        }
+    }
+    assert!(
+        saw_hdr_timeout && saw_body_timeout,
+        "{}",
+        tel.format_diagnostics()
+    );
+}
+
+/// Scenario 4: Oversized-frame rejection (`> MAX_SERVER_FRAME_BODY_LEN` / `16 MiB`).
+/// Verifies immediate pre-allocation rejection (`OversizedFrame`) both on a standalone header
+/// and on a hostile multi-chunk payload flood where Winsock may emit `TCP RST` (`10054`) on the
+/// attacker's remaining trailing writes after the server closes the socket.
+#[test]
+fn test_tcp_scenario_4_oversized_frame_rejection() {
+    let mut server = GameTcpServer::start("127.0.0.1:0", GameServerConfig::default()).unwrap();
+    let addr = server.local_addr();
+
+    let declared_a = (MAX_SERVER_FRAME_BODY_LEN as u32) + 42;
+    {
+        let mut dos_hdr_only = TcpStream::connect(addr).unwrap();
+        dos_hdr_only.set_nodelay(true).unwrap();
+        dos_hdr_only
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+
+        let mut fake_hdr = [0u8; CLIENT_LC_HEADER_LEN];
+        fake_hdr[0..4].copy_from_slice(&declared_a.to_be_bytes());
+        fake_hdr[4..8].copy_from_slice(&[1, 1, 1, 1]);
+        dos_hdr_only.write_all(&fake_hdr).unwrap();
+        dos_hdr_only.flush().unwrap();
+        let _ = dos_hdr_only.shutdown(Shutdown::Write);
+
+        let mut rbuf = [0u8; 16];
+        match dos_hdr_only.read(&mut rbuf) {
+            Ok(0) => {}
+            Ok(n) => panic!(
+                "server must never emit bytes for oversized frame, got {}B",
+                n
+            ),
+            Err(ref e) if is_expected_hostile_peer_cutoff(e) => {}
+            Err(e) => panic!("unexpected read error on oversized probe: {}", e),
+        }
+    }
+
+    // Hostile flood: sends `u32::MAX` header followed by trailing 4 KiB garbage chunks.
+    // Only on this hostile oversized stream may trailing writes encounter `ConnectionReset` (10054) / `BrokenPipe`.
+    {
+        let mut dos_flood = TcpStream::connect(addr).unwrap();
+        dos_flood.set_nodelay(true).unwrap();
+        dos_flood
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        dos_flood
+            .set_write_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+
+        let mut max_hdr = [0u8; CLIENT_LC_HEADER_LEN];
+        max_hdr[0..4].copy_from_slice(&u32::MAX.to_be_bytes());
+        max_hdr[4..8].copy_from_slice(&[1, 1, 1, 1]);
+        dos_flood.write_all(&max_hdr).unwrap();
+
+        let hostile_chunk = [0xA5u8; 4096];
+        for _ in 0..32 {
+            match dos_flood.write_all(&hostile_chunk) {
+                Ok(()) => {}
+                Err(ref e) if is_expected_hostile_peer_cutoff(e) => break,
+                Err(e) => panic!("unexpected error writing hostile oversized flood: {}", e),
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        let mut rbuf = [0u8; 16];
+        match dos_flood.read(&mut rbuf) {
+            Ok(0) => {}
+            Ok(n) => panic!("server must never reply to u32::MAX flood, got {}B", n),
+            Err(ref e) if is_expected_hostile_peer_cutoff(e) => {}
+            Err(e) => panic!("unexpected read error on hostile oversized flood: {}", e),
+        }
+    }
+
+    let tel = Arc::clone(server.telemetry());
+    wait_until(Duration::from_secs(5), || {
+        tel.rejected_oversized_frames.load(Ordering::Acquire) == 2
+    });
+    server.stop();
+
+    assert_eq!(
+        tel.rejected_oversized_frames.load(Ordering::Acquire),
+        2,
+        "{}",
+        tel.format_diagnostics()
+    );
+    assert_eq!(tel.valid_rpcs_handled.load(Ordering::Acquire), 0);
+
+    let records = tel.connection_records();
+    assert_eq!(records.len(), 2, "{}", tel.format_diagnostics());
+    assert_eq!(records[0].frames_decoded, 0);
+    assert_eq!(records[0].tx_bytes_total, 0);
+    assert_eq!(
+        records[0].shutdown_reason,
+        ShutdownReason::OversizedFrame {
+            declared: declared_a,
+            max: MAX_SERVER_FRAME_BODY_LEN,
+        }
+    );
+    assert_eq!(records[1].frames_decoded, 0);
+    assert_eq!(records[1].tx_bytes_total, 0);
+    assert_eq!(
+        records[1].shutdown_reason,
+        ShutdownReason::OversizedFrame {
+            declared: u32::MAX,
+            max: MAX_SERVER_FRAME_BODY_LEN,
+        }
+    );
+}
+
+/// Scenario 5: Server availability after malformed connections.
+/// Exercises truncated EOF, Slowloris partial-frame stall, `> 16 MiB` oversized flood, zero-length
+/// header, corrupted MD5, and 80-level AMF3 depth bomb — then immediately verifies clean 1-byte
+/// and pipelined client sessions succeed 100% on the exact same server instance.
+#[test]
+fn test_tcp_scenario_5_server_availability_after_malformed_connections() {
+    let cfg = GameServerConfig {
+        read_timeout: Duration::from_millis(120),
+        ..GameServerConfig::default()
+    };
+    let mut server = GameTcpServer::start("127.0.0.1:0", cfg).unwrap();
+    let addr = server.local_addr();
+
+    let valid_ping_pkt = encode_client_lc_packet(
+        &Amf3Encoder::encode(&Amf3Value::anonymous_object(vec![(
+            "method",
+            Amf3Value::from_str("ping"),
+        )]))
+        .unwrap(),
+        true,
+    );
+
+    // 1. Truncated EOF (10 bytes + FIN)
+    {
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.set_nodelay(true).unwrap();
+        s.write_all(&valid_ping_pkt[..10]).unwrap();
+        s.flush().unwrap();
+        s.shutdown(Shutdown::Write).unwrap();
+    }
+
+    // 2. Stalled Slowloris partial frame (kept open until server's 120ms idle timeout closes it)
+    let mut stalled = TcpStream::connect(addr).unwrap();
+    stalled.set_nodelay(true).unwrap();
+    stalled
+        .write_all(&valid_ping_pkt[..CLIENT_LC_HEADER_LEN + 1])
+        .unwrap();
+    stalled.flush().unwrap();
+
+    // 3. Oversized frame (`16 MiB + 1024`) with trailing hostile bytes
+    {
+        let mut oversize = TcpStream::connect(addr).unwrap();
+        oversize.set_nodelay(true).unwrap();
+        let mut hdr = [0u8; CLIENT_LC_HEADER_LEN];
+        hdr[0..4].copy_from_slice(&((MAX_SERVER_FRAME_BODY_LEN as u32) + 1024).to_be_bytes());
+        hdr[4..8].copy_from_slice(&[1, 1, 1, 1]);
+        oversize.write_all(&hdr).unwrap();
+        let trailing = [0xFFu8; 2048];
+        if let Err(e) = oversize.write_all(&trailing) {
+            assert!(
+                is_expected_hostile_peer_cutoff(&e),
+                "unexpected error on hostile trailing bytes: {}",
+                e
+            );
+        }
+    }
+
+    // 4. Zero-length frame (`body_len == 0`)
+    {
+        let mut zero_sock = TcpStream::connect(addr).unwrap();
+        zero_sock.set_nodelay(true).unwrap();
+        let mut zero_hdr = [0u8; CLIENT_LC_HEADER_LEN];
+        zero_hdr[4..8].copy_from_slice(&[1, 1, 1, 1]);
+        let _ = zero_sock.write_all(&zero_hdr);
+        let _ = zero_sock.shutdown(Shutdown::Write);
+    }
+
+    // 5. Corrupted BabelTime MD5 frame
+    {
+        let mut bad_md5 = TcpStream::connect(addr).unwrap();
+        bad_md5.set_nodelay(true).unwrap();
+        let mut tampered = valid_ping_pkt.clone();
+        tampered[12] ^= 0x5A;
+        let _ = bad_md5.write_all(&tampered);
+        let _ = bad_md5.shutdown(Shutdown::Write);
+    }
+
+    // 6. 80-level AMF3 recursion depth bomb
+    {
+        let mut bomb_sock = TcpStream::connect(addr).unwrap();
+        bomb_sock.set_nodelay(true).unwrap();
+        let mut depth_bomb = Vec::with_capacity(80 * 3 + 2);
+        for _ in 0..80 {
+            depth_bomb.extend_from_slice(&[MARKER_ARRAY, 0x03, 0x01]);
+        }
+        depth_bomb.extend_from_slice(&[MARKER_INTEGER, 0x01]);
+        let framed = encode_client_lc_packet(&depth_bomb, true);
+        let _ = bomb_sock.write_all(&framed);
+        let _ = bomb_sock.shutdown(Shutdown::Write);
+    }
+
+    // Immediately verify clean client connections succeed 100% while/after attacks resolve!
+    for clean_idx in 0..2 {
+        let mut clean = TcpStream::connect(addr).unwrap();
+        clean.set_nodelay(true).unwrap();
+        clean
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        clean
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let mut sim = Win32ClientSimulator::new();
+        sim.reg_push_callback("push.reward.update");
+        let (cb_login, pkt_login) =
+            sim.build_send_msg("user.login", Amf3Value::empty_lua_table(), true);
+        let (cb_user, pkt_user) =
+            sim.build_send_msg("user.getUser", Amf3Value::empty_lua_table(), false);
+        let (cb_multi, pkt_multi) =
+            sim.build_send_msg("qa.multiBurst", Amf3Value::empty_lua_table(), true);
+
+        if clean_idx == 0 {
+            for &b in pkt_login
+                .iter()
+                .chain(pkt_user.iter())
+                .chain(pkt_multi.iter())
+            {
+                clean
+                    .write_all(&[b])
+                    .expect("post-attack clean 1-byte write must succeed");
+            }
+        } else {
+            let mut batch = Vec::new();
+            batch.extend_from_slice(&pkt_login);
+            batch.extend_from_slice(&pkt_user);
+            batch.extend_from_slice(&pkt_multi);
+            clean
+                .write_all(&batch)
+                .expect("post-attack clean batch write must succeed");
+        }
+        clean.flush().unwrap();
+
+        let mut events = Vec::with_capacity(4);
+        let mut rbuf = [0u8; 1024];
+        while events.len() < 4 {
+            let n = clean
+                .read(&mut rbuf)
+                .expect("post-attack clean client read must succeed");
+            assert!(n > 0);
+            events.extend(sim.receive_server_bytes(&rbuf[..n], 1_795_500_450).unwrap());
+        }
+        assert_eq!(events[0].callback_name, cb_login);
+        assert_eq!(events[1].callback_name, cb_user);
+        assert_eq!(events[2].callback_name, cb_multi);
+        assert_eq!(events[3].callback_name, "push.reward.update");
+        assert_eq!(sim.pending_one_shot_count(), 0);
+
+        clean.shutdown(Shutdown::Write).unwrap();
+        let mut eof_probe = [0u8; 8];
+        assert_eq!(clean.read(&mut eof_probe).unwrap(), 0);
+    }
+
+    let tel = Arc::clone(server.telemetry());
+    wait_until(Duration::from_secs(5), || {
+        tel.clean_truncated_disconnects.load(Ordering::Acquire) == 2
+            && tel.rejected_oversized_frames.load(Ordering::Acquire) == 1
+            && tel.rejected_zero_frames.load(Ordering::Acquire) == 1
+            && tel.rejected_md5_frames.load(Ordering::Acquire) == 1
+            && tel.rejected_amf3_depth_bombs.load(Ordering::Acquire) == 1
+            && tel.active_connections.load(Ordering::Acquire) == 0
+    });
+    drop(stalled);
+    server.stop();
+
+    assert_eq!(
+        tel.clean_truncated_disconnects.load(Ordering::Acquire),
+        2,
+        "{}",
+        tel.format_diagnostics()
+    );
+    assert_eq!(tel.rejected_oversized_frames.load(Ordering::Acquire), 1);
+    assert_eq!(tel.rejected_zero_frames.load(Ordering::Acquire), 1);
+    assert_eq!(tel.rejected_md5_frames.load(Ordering::Acquire), 1);
+    assert_eq!(tel.rejected_amf3_depth_bombs.load(Ordering::Acquire), 1);
+    assert_eq!(tel.valid_rpcs_handled.load(Ordering::Acquire), 6);
+    assert_eq!(tel.lua_hazard_violations.load(Ordering::Acquire), 0);
+
+    let records = tel.connection_records();
+    assert_eq!(records.len(), 8, "{}", tel.format_diagnostics());
+    assert_eq!(
+        records
+            .iter()
+            .filter(|r| {
+                r.shutdown_reason == ShutdownReason::CleanClientEof && r.frames_decoded == 3
+            })
+            .count(),
+        2,
+        "{}",
+        tel.format_diagnostics()
+    );
 }
 
 // ============================================================================
@@ -841,19 +1442,25 @@ fn test_32_thread_concurrent_client_and_hostile_neighbor_stress() {
 
     let tel = game_server.telemetry();
     wait_until(Duration::from_secs(5), || {
-        tel.accepted_connections.load(Ordering::Relaxed) >= 32 + 16
-            && tel.rejected_md5_frames.load(Ordering::Relaxed) == 8
-            && tel.rejected_amf3_depth_bombs.load(Ordering::Relaxed) == 8
+        tel.accepted_connections.load(Ordering::Acquire) >= 32 + 16
+            && tel.rejected_md5_frames.load(Ordering::Acquire) == 8
+            && tel.rejected_amf3_depth_bombs.load(Ordering::Acquire) == 8
     });
-    assert!(tel.accepted_connections.load(Ordering::Relaxed) >= 32 + 16);
-    assert_eq!(tel.valid_rpcs_handled.load(Ordering::Relaxed), (32 * 3) as u64);
-    assert_eq!(tel.stat_msgs_ignored_cleanly.load(Ordering::Relaxed), 32);
-    assert_eq!(tel.multi_batches_sent.load(Ordering::Relaxed), 32);
-    assert_eq!(tel.rejected_md5_frames.load(Ordering::Relaxed), 8);
-    assert_eq!(tel.rejected_amf3_depth_bombs.load(Ordering::Relaxed), 8);
-    assert_eq!(tel.lua_hazard_violations.load(Ordering::Relaxed), 0);
+    assert!(tel.accepted_connections.load(Ordering::Acquire) >= 32 + 16);
     assert_eq!(
-        http_gateway.metrics().gethash_requests.load(Ordering::Relaxed),
+        tel.valid_rpcs_handled.load(Ordering::Acquire),
+        (32 * 3) as u64
+    );
+    assert_eq!(tel.stat_msgs_ignored_cleanly.load(Ordering::Acquire), 32);
+    assert_eq!(tel.multi_batches_sent.load(Ordering::Acquire), 32);
+    assert_eq!(tel.rejected_md5_frames.load(Ordering::Acquire), 8);
+    assert_eq!(tel.rejected_amf3_depth_bombs.load(Ordering::Acquire), 8);
+    assert_eq!(tel.lua_hazard_violations.load(Ordering::Acquire), 0);
+    assert_eq!(
+        http_gateway
+            .metrics()
+            .gethash_requests
+            .load(Ordering::Relaxed),
         32
     );
 }
@@ -875,9 +1482,16 @@ fn test_deterministic_prng_fuzz_suite_5000_iterations() {
 #[test]
 fn test_c_zlib_dynamic_huffman_interop() {
     // Exact RFC 1950 + BTYPE=10 Dynamic-Huffman vector compressed by C libz (level 9):
-    let c_zlib_dynamic: &[u8] = &[0x78, 0xDA, 0x73, 0x77, 0xF6, 0xF1, 0x74, 0xF5, 0x0B, 0x89, 0x2F, 0xCB, 0x2B, 0x4E, 0x37, 0x8A, 0x4F, 0xA9, 0xCC, 0x4B, 0xCC, 0xCD, 0x4C, 0x8E, 0xCF, 0x28, 0x4D, 0x4B, 0xCB, 0x4D, 0xCC, 0x8B, 0x4F, 0xCA, 0xC9, 0x4F, 0xCE, 0x8E, 0x37, 0x30, 0x34, 0x32, 0x36, 0x31, 0x35, 0x33, 0xB7, 0xB0, 0x74, 0x74, 0x72, 0x76, 0x71, 0x75, 0x8B, 0x77, 0x1F, 0xD5, 0x34, 0xAA, 0x89, 0x72, 0x4D, 0x00, 0xF4, 0xF2, 0xD3, 0xD5];
+    let c_zlib_dynamic: &[u8] = &[
+        0x78, 0xDA, 0x73, 0x77, 0xF6, 0xF1, 0x74, 0xF5, 0x0B, 0x89, 0x2F, 0xCB, 0x2B, 0x4E, 0x37,
+        0x8A, 0x4F, 0xA9, 0xCC, 0x4B, 0xCC, 0xCD, 0x4C, 0x8E, 0xCF, 0x28, 0x4D, 0x4B, 0xCB, 0x4D,
+        0xCC, 0x8B, 0x4F, 0xCA, 0xC9, 0x4F, 0xCE, 0x8E, 0x37, 0x30, 0x34, 0x32, 0x36, 0x31, 0x35,
+        0x33, 0xB7, 0xB0, 0x74, 0x74, 0x72, 0x76, 0x71, 0x75, 0x8B, 0x77, 0x1F, 0xD5, 0x34, 0xAA,
+        0x89, 0x72, 0x4D, 0x00, 0xF4, 0xF2, 0xD3, 0xD5,
+    ];
     let expected = b"GCLIENT_vnsg2_dynamic_huffman_block_0123456789ABCDEF_".repeat(12);
-    let inflated = zlib_decompress_bounded(c_zlib_dynamic, 4096).expect("must inflate C libz BTYPE=10");
+    let inflated =
+        zlib_decompress_bounded(c_zlib_dynamic, 4096).expect("must inflate C libz BTYPE=10");
     assert_eq!(inflated, expected);
 
     // Re-compress with our pure-Rust compressor and verify round-trip + Adler-32 trailer match:
