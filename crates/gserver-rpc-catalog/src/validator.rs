@@ -389,7 +389,7 @@ pub fn validate_response_for_method(
             match ret
                 .get_field("battleInfo")
                 .and_then(|bi| bi.get_field("arrTeam1"))
-                .and_then(|t1| t1.get_field("1"))
+                .and_then(|t1| t1.as_array().and_then(|a| a.first()).or_else(|| t1.get_field("1")))
                 .and_then(|w1| w1.get_field("arrHero"))
                 .and_then(Amf3Value::as_map)
             {

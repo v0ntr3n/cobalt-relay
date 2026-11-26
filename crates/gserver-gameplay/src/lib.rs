@@ -1156,10 +1156,11 @@ mod tests {
             .ret
             .get("battleInfo")
             .and_then(|b| b.get("arrTeam1"))
-            .and_then(|t| t.get("1"))
+            .and_then(DtoValue::as_array)
+            .and_then(|a| a.first())
             .and_then(|t| t.get("arrHero"))
             .and_then(DtoValue::as_map)
-            .expect("arrTeam1.1.arrHero");
+            .expect("arrTeam1[0].arrHero");
         assert_eq!(team1_heroes.len(), 4);
 
         let expected_team1_skills: &[(u32, u32, u32)] = &[
@@ -1191,10 +1192,11 @@ mod tests {
             .ret
             .get("battleInfo")
             .and_then(|b| b.get("arrTeam2"))
-            .and_then(|t| t.get("1"))
+            .and_then(DtoValue::as_array)
+            .and_then(|a| a.first())
             .and_then(|t| t.get("arrHero"))
             .and_then(DtoValue::as_map)
-            .expect("arrTeam2.1.arrHero");
+            .expect("arrTeam2[0].arrHero");
         for m_dto in team2_monsters.values() {
             let arr_skill = m_dto.get("arrSkill").and_then(DtoValue::as_array).unwrap();
             assert_eq!(arr_skill[0].as_array().unwrap()[0].as_u32(), Some(1001));
@@ -1256,7 +1258,8 @@ mod tests {
             .get("serverData")
             .and_then(|s| s.get("battleInfo"))
             .and_then(|b| b.get("arrTeam2"))
-            .and_then(|t| t.get("1"))
+            .and_then(DtoValue::as_array)
+            .and_then(|a| a.first())
             .and_then(|t| t.get("arrHero"))
             .and_then(|h| h.get("1"))
             .expect("arena pvp defender unit");
@@ -1309,7 +1312,8 @@ mod tests {
             .get("serverData")
             .and_then(|s| s.get("battleInfo"))
             .and_then(|b| b.get("arrTeam2"))
-            .and_then(|t| t.get("1"))
+            .and_then(DtoValue::as_array)
+            .and_then(|a| a.first())
             .and_then(|t| t.get("arrHero"))
             .and_then(|h| h.get("1"))
             .expect("arena npc guard unit");
@@ -1390,7 +1394,8 @@ mod tests {
             .ret
             .get("battleInfo")
             .and_then(|b| b.get("arrTeam1"))
-            .and_then(|t| t.get("1"))
+            .and_then(DtoValue::as_array)
+            .and_then(|a| a.first())
             .and_then(|t| t.get("arrHero"))
             .and_then(|h| h.get("1"))
             .unwrap();

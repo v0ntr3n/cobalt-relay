@@ -508,16 +508,14 @@ pub fn build_attack_server_dto(
         ])
     };
 
-    let mut arr_team1 = BTreeMap::new();
-    arr_team1.insert("1".to_owned(), build_team_dto(team1_units));
-    let mut arr_team2 = BTreeMap::new();
-    arr_team2.insert("1".to_owned(), build_team_dto(&safe_team2));
-
+    // `FightProxy.lua:168-174` converts `index_team = tonumber(index_team)` and indexes
+    // `battleInfo["arrTeam2"][index_team]` with an INTEGER key (1), so `arrTeam1`/`arrTeam2`
+    // MUST be AMF3 dense arrays (Lua 1-based integer-indexed tables), NOT string-keyed maps!
     let battle_info = DtoValue::map([
         ("isPVP", DtoValue::from(if is_pvp { 1u32 } else { 0u32 })),
         ("replaceInfo", DtoValue::array([DtoValue::from(0u32)])),
-        ("arrTeam1", DtoValue::Map(arr_team1)),
-        ("arrTeam2", DtoValue::Map(arr_team2)),
+        ("arrTeam1", DtoValue::array([build_team_dto(team1_units)])),
+        ("arrTeam2", DtoValue::array([build_team_dto(&safe_team2)])),
         ("extraMonster", DtoValue::Map(BTreeMap::new())),
         ("skillRate", DtoValue::Map(BTreeMap::new())),
     ]);

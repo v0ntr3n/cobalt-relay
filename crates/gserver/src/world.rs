@@ -1475,9 +1475,12 @@ mod tests {
             .ret
             .get_field("battleInfo")
             .and_then(|b| b.get_field("arrTeam1"))
-            .and_then(|t| t.get_field("1"))
+            .and_then(|t| match t {
+                Value::Array { dense, .. } => dense.first(),
+                other => other.get_field("1"),
+            })
             .and_then(|t| t.get_field("arrHero"))
-            .expect("copy.attack arrTeam1.1.arrHero");
+            .expect("copy.attack arrTeam1[0].arrHero");
         for (slot_key, exp_htid, exp_com, exp_angry) in [
             ("1", 2, 104, 103),
             ("2", 201, 20102, 20101),

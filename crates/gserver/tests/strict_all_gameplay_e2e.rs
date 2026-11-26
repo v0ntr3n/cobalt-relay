@@ -1873,11 +1873,14 @@ fn issue_3_flow_a_copy_battle_and_flow_b_act_star_gift_claim_live_e2e() {
     for team_key in ["arrTeam1", "arrTeam2"] {
         let Value::Object(heroes) = battle_info
             .get_field(team_key)
-            .and_then(|t| t.get_field("1"))
+            .and_then(|t| match t {
+                Value::Array { dense, .. } => dense.first(),
+                other => other.get_field("1"),
+            })
             .and_then(|t| t.get_field("arrHero"))
             .expect("arrHero")
         else {
-            panic!("expected {team_key}.1.arrHero object");
+            panic!("expected {team_key}[0].arrHero object");
         };
         if team_key == "arrTeam1" {
             assert_eq!(heroes.iter().count(), 3);
