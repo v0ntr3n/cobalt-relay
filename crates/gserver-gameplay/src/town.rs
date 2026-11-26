@@ -1,6 +1,7 @@
 //! `MainTown` bootstrap validator and multiplayer walking town room manager
-//! (`city.enter`, `city.leave`, `city.getEnterList`, `town.move`, `imperialcity.*`,
-//! and server pushes `town.addPlayer`, `town.delPlayer`, `town.move`, `town.update`).
+//! (`city.enter`, `city.enterShadowInfo`, `city.leave`, `city.getEnterList`, `town.move`,
+//! `castle.getInfo`, `imperialcity.*`, and server pushes `town.addPlayer`, `town.delPlayer`,
+//! `town.move`, `town.update`).
 
 use std::collections::BTreeMap;
 
@@ -98,7 +99,10 @@ impl TownMapConfig {
     }
 
     pub fn clamp_point(&self, x: i32, y: i32) -> (i32, i32) {
-        (x.clamp(self.min_x, self.max_x), y.clamp(self.min_y, self.max_y))
+        (
+            x.clamp(self.min_x, self.max_x),
+            y.clamp(self.min_y, self.max_y),
+        )
     }
 }
 
@@ -118,7 +122,11 @@ pub enum MainTownCrashRisk {
 
 pub fn validate_maintown_bootstrap(player: &PlayerState) -> Result<(), MainTownCrashRisk> {
     if player.server_open_time.len() < 14
-        || !player.server_open_time.bytes().take(14).all(|b| b.is_ascii_digit())
+        || !player
+            .server_open_time
+            .bytes()
+            .take(14)
+            .all(|b| b.is_ascii_digit())
     {
         return Err(MainTownCrashRisk::InvalidServerOpenTime(
             player.server_open_time.clone(),
@@ -157,7 +165,13 @@ pub struct TownPlayerPresence {
 }
 
 impl TownPlayerPresence {
-    pub fn from_player(player: &PlayerState, town_id: u32, instance_id: u32, x: i32, y: i32) -> Self {
+    pub fn from_player(
+        player: &PlayerState,
+        town_id: u32,
+        instance_id: u32,
+        x: i32,
+        y: i32,
+    ) -> Self {
         Self {
             uid: player.uid,
             icuid: format!("{}_{}", player.server_id, player.uid),
@@ -205,6 +219,7 @@ impl TownPlayerPresence {
             ("x", DtoValue::from(self.x)),
             ("y", DtoValue::from(self.y)),
             ("dir", DtoValue::from(self.dir)),
+            ("pos", DtoValue::map([("x", DtoValue::from(self.x)), ("y", DtoValue::from(self.y))])),
             ("extra", extra),
         ])
     }
@@ -293,7 +308,8 @@ impl TownRoomManager {
         }
 
         inst.occupants.insert(player.uid, presence.clone());
-        self.player_loc.insert(player.uid, (cfg.town_id, target_inst_id));
+        self.player_loc
+            .insert(player.uid, (cfg.town_id, target_inst_id));
 
         let peers: Vec<DtoValue> = inst
             .occupants
@@ -309,10 +325,32 @@ impl TownRoomManager {
             ("x", DtoValue::from(x)),
             ("y", DtoValue::from(y)),
             ("speed", DtoValue::from(cfg.walk_speed)),
-            ("enter_list", DtoValue::Array(peers)),
+            ("enter_list", DtoValue::Array(peers.clone())),
+            ("arrUser", DtoValue::Array(peers)),
         ]);
 
         Ok((ret, broadcasts))
+    }
+
+    /// Returns lightweight shadow/NPC presence snapshot (`city.enterShadowInfo` / `tmCity.enterShadowInfo`).
+    pub fn enter_shadow_info(&self, player: &PlayerState, town_id: u32) -> DtoValue {
+        let cfg = TownMapConfig::preset(town_id);
+        let self_presence =
+            TownPlayerPresence::from_player(player, cfg.town_id, 1, cfg.spawn_x, cfg.spawn_y);
+        let mut shadows = vec![self_presence.to_dto()];
+        if let Some(inst) = self.instances.get(&(cfg.town_id, 1)) {
+            for (&peer_uid, occ) in &inst.occupants {
+                if peer_uid != player.uid && shadows.len() < cfg.max_visible_players {
+                    shadows.push(occ.to_dto());
+                }
+            }
+        }
+        DtoValue::map([
+            ("ret", DtoValue::from("ok")),
+            ("town_id", DtoValue::from(cfg.town_id)),
+            ("shadow_list", DtoValue::Array(shadows.clone())),
+            ("enter_list", DtoValue::Array(shadows)),
+        ])
     }
 
     /// Removes `uid` from their current room (`city.leave` / `imperialcity.leave`) and broadcasts `town.delPlayer`.
@@ -362,7 +400,10 @@ impl TownRoomManager {
         now_ts: u64,
     ) -> Result<(DtoValue, PeerPushList), &'static str> {
         let &(town_id, inst_id) = self.player_loc.get(&uid).ok_or("not_in_town")?;
-        let inst = self.instances.get_mut(&(town_id, inst_id)).ok_or("not_in_town")?;
+        let inst = self
+            .instances
+            .get_mut(&(town_id, inst_id))
+            .ok_or("not_in_town")?;
         let (clamped_x, clamped_y) = inst.config.clamp_point(dest_x, dest_y);
 
         let occupant = inst.occupants.get_mut(&uid).ok_or("not_in_town")?;
@@ -384,7 +425,7 @@ impl TownRoomManager {
             ("y", DtoValue::from(clamped_y)),
             ("dir", DtoValue::from(dir)),
         ]);
-        let pkt = PushPacket::new(push::TOWN_MOVE, move_dto.clone(), now_ts);
+        let pkt = PushPacket::new(push::TOWN_MOVE, move_dto, now_ts);
 
         let mut broadcasts = Vec::new();
         for &peer_uid in inst.occupants.keys() {
@@ -435,14 +476,122 @@ impl TownRoomManager {
             .collect()
     }
 
-    /// Safe response for castle/fief building info RPCs (`castle.getInfo`, `hall.getInfo`, etc.).
+    /// Crash-proof castle/fief building info DTO (`castle.getInfo`, `hall.getInfo`, `market.getInfo`,
+    /// `workshop.getInfo`, `smithy.getInfo`, and `tmCastle.getInfo`).
+    ///
+    /// Verified against `TownData.lua:449-525`:
+    /// - `data.queue.num` and `data.queue.max_num` MUST be present (`self._boughtQueueNum = data.queue.num - ...`)
+    /// - `data.building` entries MUST include `building_id`, `type`, `level`, `lvup_cd`, `build_time`,
+    ///   and `va_castle = { pos = [1, 1] }` (`pos[1]`, `pos[2]`).
     pub fn castle_building_info_dto(building_kind: &str) -> DtoValue {
+        let btype = match building_kind {
+            "hall.getInfo" | "tmHall.getInfo" => 1u32,
+            "workshop.getInfo" | "tmWorkshop.getInfo" => 2u32,
+            "market.getInfo" | "tmMarket.getInfo" => 3u32,
+            "smithy.getInfo" | "tmSmithy.getInfo" => 4u32,
+            _ => 1u32,
+        };
+        let b1 = DtoValue::map([
+            ("building_id", DtoValue::from(1u32)),
+            ("type", DtoValue::from(btype)),
+            ("level", DtoValue::from(1u32)),
+            ("lvup_cd", DtoValue::from(0u64)),
+            ("build_time", DtoValue::from(0u64)),
+            (
+                "va_castle",
+                DtoValue::map([(
+                    "pos",
+                    DtoValue::array([DtoValue::from(1u32), DtoValue::from(1u32)]),
+                )]),
+            ),
+        ]);
         DtoValue::map([
             ("ret", DtoValue::from("ok")),
             ("kind", DtoValue::from(building_kind)),
             ("level", DtoValue::from(1u32)),
             ("cd_time", DtoValue::from(0u32)),
+            (
+                "queue",
+                DtoValue::map([
+                    ("num", DtoValue::from(1u32)),
+                    ("max_num", DtoValue::from(1u32)),
+                ]),
+            ),
+            ("building", DtoValue::map([("1", b1)])),
             ("va_extra", DtoValue::Map(BTreeMap::new())),
         ])
+    }
+
+    /// Dual-socket Hoàng Thành gateway host info (`imperialcity.getImperialCityHost` / `tmImperialcity.getImperialCityHost`).
+    pub fn imperial_city_host_dto(ip: &str, port: u16, token: &str) -> DtoValue {
+        DtoValue::map([
+            ("ret", DtoValue::from("ok")),
+            ("ip", DtoValue::from(ip)),
+            ("port", DtoValue::from(u32::from(port))),
+            ("token", DtoValue::from(token)),
+        ])
+    }
+
+    /// Dual-socket Hoàng Thành login handshake (`imperialcity.login` / `tmImperialcity.login`).
+    pub fn imperial_city_login_dto(uid: u64, server_id: &str) -> DtoValue {
+        let icuid = format!("{server_id}_{uid}");
+        DtoValue::map([
+            ("ret", DtoValue::from("ok")),
+            ("uid", DtoValue::from(uid)),
+            ("icuid", DtoValue::from(icuid)),
+        ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn castle_building_info_matches_town_data_lua_queue_and_pos_schema() {
+        let dto = TownRoomManager::castle_building_info_dto("castle.getInfo");
+        let q = dto.get("queue").expect("queue required by TownData.lua:449");
+        assert_eq!(q.get("num").and_then(DtoValue::as_u32), Some(1));
+        assert_eq!(q.get("max_num").and_then(DtoValue::as_u32), Some(1));
+
+        let b1 = dto
+            .get("building")
+            .and_then(|b| b.get("1"))
+            .expect("building['1']");
+        assert_eq!(b1.get("building_id").and_then(DtoValue::as_u32), Some(1));
+        assert_eq!(b1.get("level").and_then(DtoValue::as_u32), Some(1));
+        let pos = b1
+            .get("va_castle")
+            .and_then(|vc| vc.get("pos"))
+            .and_then(DtoValue::as_array)
+            .expect("va_castle.pos array [x, y]");
+        assert_eq!(pos.len(), 2);
+        assert_eq!(pos[0].as_u32(), Some(1));
+        assert_eq!(pos[1].as_u32(), Some(1));
+    }
+
+    #[test]
+    fn shadow_info_and_imperial_city_gateway_helpers_work() {
+        let mut mgr = TownRoomManager::new();
+        let p1 = PlayerState::new(1001, "ChuaCong", 1);
+        let p2 = PlayerState::new(1002, "Peer", 2);
+        mgr.enter_town(&p2, 1, Some(100), Some(120), 1_700_000_000)
+            .unwrap();
+
+        let shadow = mgr.enter_shadow_info(&p1, 1);
+        assert_eq!(shadow.get("ret").and_then(DtoValue::as_str), Some("ok"));
+        assert_eq!(
+            shadow
+                .get("shadow_list")
+                .and_then(DtoValue::as_array)
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let host = TownRoomManager::imperial_city_host_dto("127.0.0.1", 8002, "tok_ic");
+        assert_eq!(host.get("port").and_then(DtoValue::as_u32), Some(8002));
+        let login = TownRoomManager::imperial_city_login_dto(1001, "s1");
+        assert_eq!(login.get("icuid").and_then(DtoValue::as_str), Some("s1_1001"));
     }
 }
