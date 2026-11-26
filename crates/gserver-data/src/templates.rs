@@ -4,6 +4,9 @@
 use crate::generated_consts::{
     BAG_LIMITS, GEAR_SUITS, HEROES, ITEMS, LEVEL_EXP_CURVES, PROTAGONISTS, TOWNS,
 };
+use crate::hero_skills::{
+    hero_skill_entry_by_htid, resolve_hero_battle_skills, ResolvedHeroBattleSkills,
+};
 use crate::json::{parse_json, JsonError, JsonValue};
 
 /// Raw embedded `data/curated_templates.json` extracted from real GServer `.db` tables.
@@ -96,6 +99,22 @@ pub struct ProtagonistTemplate {
     pub destiny_treasure_id: u32,
     /// All quality/destiny evolution `htid`s for this protagonist gender.
     pub quality_htids: &'static [u32],
+    /// Starter normal attack skill ID (`com_atk` in `timeMachine_hero`).
+    pub com_atk: u32,
+    /// Starter rage attack skill ID (`angry_atk` in `timeMachine_hero`).
+    pub angry_atk: u32,
+}
+
+impl ProtagonistTemplate {
+    /// Resolves authentic `(normal_skill_id, rage_skill_id)` for a specific quality `htid` on this protagonist chain.
+    pub fn battle_skills_for_htid(&self, htid: u32) -> ResolvedHeroBattleSkills {
+        let target = if self.quality_htids.contains(&htid) {
+            htid
+        } else {
+            self.starter_htid
+        };
+        resolve_hero_battle_skills(target)
+    }
 }
 
 /// Authentic Three Kingdoms Hero template (`hero.db` / `timeMachine_hero.db`).
@@ -119,6 +138,10 @@ pub struct HeroTemplate {
     pub dark_gold_htid: u32,
     pub purple_gold_htid: u32,
     pub color_gold_htid: u32,
+    /// Base normal attack skill ID (`com_atk` in `timeMachine_hero`).
+    pub com_atk: u32,
+    /// Base rage attack skill ID (`angry_atk` in `timeMachine_hero`).
+    pub angry_atk: u32,
 }
 
 impl HeroTemplate {
@@ -132,6 +155,16 @@ impl HeroTemplate {
                 || self.dark_gold_htid == candidate_htid
                 || self.purple_gold_htid == candidate_htid
                 || self.color_gold_htid == candidate_htid)
+    }
+
+    /// Resolves authentic `(normal_skill_id, rage_skill_id)` for any tier `htid` of this hero.
+    pub fn battle_skills_for_tier(&self, tier_htid: u32) -> ResolvedHeroBattleSkills {
+        let target = if self.matches_any_tier(tier_htid) {
+            tier_htid
+        } else {
+            self.htid
+        };
+        resolve_hero_battle_skills(target)
     }
 }
 
@@ -277,9 +310,12 @@ pub fn hero_by_name(query: &str) -> Option<&'static HeroTemplate> {
         .find(|h| h.name_en.to_lowercase() == q || h.name_vi.to_lowercase() == q)
 }
 
-/// Returns `true` if `htid` is a valid protagonist `htid` or curated hero `htid` (base or promoted).
+/// Returns `true` if `htid` exists in the protagonist chains, curated hero tiers, or the full
+/// 801-row `timeMachine_hero` table.
 pub fn is_valid_hero_htid(htid: u32) -> bool {
-    is_protagonist_htid(htid) || hero_by_htid(htid).is_some()
+    is_protagonist_htid(htid)
+        || hero_by_htid(htid).is_some()
+        || hero_skill_entry_by_htid(htid).is_some()
 }
 
 /// Looks up a curated item template by `item_tid`.

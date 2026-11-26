@@ -1322,3 +1322,40 @@ fn test_34_user_login_ok_and_banned_account_response_format() {
     assert!(acc_ref.is_banned(1_700_000_200));
     assert!(!acc_ref.is_banned(1_900_000_000));
 }
+
+#[test]
+fn test_35_player_hero_instance_authentic_battle_skill_resolution() {
+    let cfg = StarterPackConfig::default();
+    let mut profile = PlayerProfile::new_character(
+        60_001,
+        "pid_sk",
+        "2900161",
+        1,
+        "SkillHero",
+        1_700_000_000,
+        &cfg,
+    )
+    .expect("create character");
+
+    // Starter protagonist (htid=1) -> (102, 101)
+    let prot = profile.heroes.get(&profile.protagonist_hid).unwrap();
+    assert_eq!(prot.battle_skill_ids(), (102, 101));
+    assert!(!prot.resolved_battle_skills().used_any_fallback());
+
+    // Starter companion Tân Hiến Anh (htid=426) -> (42602, 42601)
+    let companion = profile.heroes.values().find(|h| h.htid == 426).unwrap();
+    assert_eq!(companion.battle_skill_ids(), (42602, 42601));
+
+    // Quality 11 protagonist `htid = 35` / `36` recognized as protagonist and blocked from summon_hero
+    assert!(profile.summon_hero(35, 1).is_err());
+    assert!(profile.summon_hero(36, 1).is_err());
+
+    // Summoned Trương Liêu (`101`) transitions to `awake_com_atk`/`awake_angry_atk` at `awake_rank = 5`
+    let zl_hid = profile.summon_hero(101, 80).unwrap();
+    assert_eq!(profile.heroes[&zl_hid].battle_skill_ids(), (10102, 10101));
+    profile.heroes.get_mut(&zl_hid).unwrap().awake_rank = 5;
+    assert_eq!(
+        profile.heroes[&zl_hid].battle_skill_ids(),
+        (5210102, 5210101)
+    );
+}

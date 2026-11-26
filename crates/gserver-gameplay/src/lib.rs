@@ -1070,4 +1070,235 @@ mod tests {
             Some(ChatErrorCode::Succ as i64)
         );
     }
+
+    // 31. Copy & Arena battle execution emit authentic per-hero `arrSkill`, step skill IDs, and `rageQueue`
+    #[test]
+    fn test_31_copy_and_arena_battles_emit_authentic_per_hero_skills() {
+        let mut eng = GameplayEngine::new(77);
+        let mut p1 = PlayerState::new(1001, "ChuaCongNam", 1); // Nam Chủ Tướng (102 / 101)
+        p1.level = 35;
+        p1.roster.heroes.get_mut(&10_000_001).unwrap().level = 35;
+        p1.roster
+            .heroes
+            .get_mut(&10_000_001)
+            .unwrap()
+            .recalculate_stats();
+        let (zy, _) = p1.roster.recruit_hero(201, 35, NOW); // Triệu Vân (20102 / 20101)
+        let (lb, _) = p1.roster.recruit_hero(401, 35, NOW); // Lữ Bố (40102 / 40101)
+        let (dt, _) = p1.roster.recruit_hero(406, 35, NOW); // Điêu Thuyền (40602 / 40601)
+        assert_eq!((zy.normal_skill_id, zy.rage_skill_id), (20102, 20101));
+        assert_eq!((lb.normal_skill_id, lb.rage_skill_id), (40102, 40101));
+        assert_eq!((dt.normal_skill_id, dt.rage_skill_id), (40602, 40601));
+
+        let mut p2 = PlayerState::new(1002, "ChuaCongNu", 2); // Nữ Chủ Tướng (104 / 103)
+        p2.level = 10;
+        p2.roster.heroes.get_mut(&10_000_001).unwrap().level = 10;
+        p2.roster
+            .heroes
+            .get_mut(&10_000_001)
+            .unwrap()
+            .recalculate_stats();
+
+        eng.register_player(p1);
+        eng.register_player(p2);
+
+        // --- A. Copy Battle (`copy.attack` + `battle.getRecord`) ---
+        let copy_atk = eng.dispatch(
+            1001,
+            &RpcRequest::new(
+                rpc::COPY_ATTACK,
+                vec![DtoValue::from(1001u32), DtoValue::from(100101u32)],
+                1,
+            ),
+            NOW,
+        );
+        assert_eq!(copy_atk.response.err, "ok");
+        let team1_heroes = copy_atk
+            .response
+            .ret
+            .get("battleInfo")
+            .and_then(|b| b.get("arrTeam1"))
+            .and_then(|t| t.get("1"))
+            .and_then(|t| t.get("arrHero"))
+            .and_then(DtoValue::as_map)
+            .expect("arrTeam1.1.arrHero");
+        assert_eq!(team1_heroes.len(), 4);
+
+        let expected_team1_skills: &[(u32, u32, u32)] = &[
+            (1, 102, 101),
+            (201, 20102, 20101),
+            (401, 40102, 40101),
+            (406, 40602, 40601),
+        ];
+        for (idx, &(exp_htid, exp_com, exp_angry)) in expected_team1_skills.iter().enumerate() {
+            let unit_dto = team1_heroes.get(&(idx + 1).to_string()).expect("unit slot");
+            assert_eq!(
+                unit_dto.get("htid").and_then(DtoValue::as_u32),
+                Some(exp_htid)
+            );
+            let arr_skill = unit_dto
+                .get("arrSkill")
+                .and_then(DtoValue::as_array)
+                .expect("arrSkill");
+            let s0 = arr_skill[0].as_array().unwrap()[0].as_u32().unwrap();
+            let s1 = arr_skill[1].as_array().unwrap()[0].as_u32().unwrap();
+            assert_eq!((s0, s1), (exp_com, exp_angry));
+            assert_ne!(s0, 1001);
+            assert_ne!(s1, 2001);
+        }
+
+        // Copy stronghold monsters (`5002`, `5003`) retain monster default `(1001, 2001)`
+        let team2_monsters = copy_atk
+            .response
+            .ret
+            .get("battleInfo")
+            .and_then(|b| b.get("arrTeam2"))
+            .and_then(|t| t.get("1"))
+            .and_then(|t| t.get("arrHero"))
+            .and_then(DtoValue::as_map)
+            .expect("arrTeam2.1.arrHero");
+        for m_dto in team2_monsters.values() {
+            let arr_skill = m_dto.get("arrSkill").and_then(DtoValue::as_array).unwrap();
+            assert_eq!(arr_skill[0].as_array().unwrap()[0].as_u32(), Some(1001));
+            assert_eq!(arr_skill[1].as_array().unwrap()[0].as_u32(), Some(2001));
+        }
+
+        // Verify Copy AMF3 replay report preserves `appraisal == 50`
+        let brid = copy_atk
+            .response
+            .ret
+            .get("brid")
+            .and_then(DtoValue::as_u64)
+            .unwrap();
+        let rec_out = eng.dispatch(
+            1001,
+            &RpcRequest::new(rpc::BATTLE_GET_RECORD, vec![DtoValue::from(brid)], 2),
+            NOW,
+        );
+        let copy_report = decode_amf3(rec_out.response.ret.as_bytes().unwrap()).unwrap();
+        assert_eq!(
+            copy_report.get("appraisal").and_then(DtoValue::as_u32),
+            Some(50)
+        );
+
+        // --- B. Arena Battle (`arena.challenge` vs Player 1002 & vs NPC Guard pos 15 Tiểu Kiều) ---
+        let _ = eng.dispatch(1002, &RpcRequest::new(rpc::ARENA_ENTER, vec![], 3), NOW); // pos 16 (htid=2)
+        let _ = eng.dispatch(1001, &RpcRequest::new(rpc::ARENA_ENTER, vec![], 4), NOW); // pos 17 (htid=1)
+
+        // Challenge Player 1002 at pos 16 -> defender has Nữ Chủ Tướng (104 / 103), NOT 1001 / 2001!
+        let arena_pvp = eng.dispatch(
+            1001,
+            &RpcRequest::new(
+                rpc::ARENA_CHALLENGE,
+                vec![
+                    DtoValue::from(17u32),
+                    DtoValue::from(16u32),
+                    DtoValue::from(0u32),
+                    DtoValue::from("ChuaCongNu"),
+                ],
+                5,
+            ),
+            NOW,
+        );
+        assert_eq!(arena_pvp.response.err, "ok");
+        let pvp_report = decode_amf3(
+            arena_pvp
+                .response
+                .ret
+                .get("battleRecord")
+                .and_then(DtoValue::as_bytes)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            pvp_report.get("appraisal").and_then(DtoValue::as_u32),
+            Some(50)
+        );
+        let pvp_def = pvp_report
+            .get("serverData")
+            .and_then(|s| s.get("battleInfo"))
+            .and_then(|b| b.get("arrTeam2"))
+            .and_then(|t| t.get("1"))
+            .and_then(|t| t.get("arrHero"))
+            .and_then(|h| h.get("1"))
+            .expect("arena pvp defender unit");
+        assert_eq!(pvp_def.get("htid").and_then(DtoValue::as_u32), Some(2));
+        let pvp_def_skills = pvp_def
+            .get("arrSkill")
+            .and_then(DtoValue::as_array)
+            .unwrap();
+        assert_eq!(pvp_def_skills[0].as_array().unwrap()[0].as_u32(), Some(104));
+        assert_eq!(pvp_def_skills[1].as_array().unwrap()[0].as_u32(), Some(103));
+
+        // Challenge NPC Guard at pos 15 (`htid = 310` Tiểu Kiều -> 31002 / 31001) + multi-round rage check
+        let mut p_tank = PlayerState::new(1003, "RageTester", 201); // Triệu Vân (20102 / 20101)
+        p_tank.level = 15;
+        p_tank.roster.heroes.get_mut(&10_000_001).unwrap().level = 15;
+        p_tank
+            .roster
+            .heroes
+            .get_mut(&10_000_001)
+            .unwrap()
+            .recalculate_stats();
+        p_tank.roster.heroes.get_mut(&10_000_001).unwrap().atk = 400; // Ensures >= 2 rounds so rage triggers!
+        eng.register_player(p_tank);
+        let _ = eng.dispatch(1003, &RpcRequest::new(rpc::ARENA_ENTER, vec![], 6), NOW); // pos 18
+        let arena_npc = eng.dispatch(
+            1003,
+            &RpcRequest::new(
+                rpc::ARENA_CHALLENGE,
+                vec![
+                    DtoValue::from(18u32),
+                    DtoValue::from(15u32),
+                    DtoValue::from(15u32),
+                    DtoValue::from("ArenaGuard_15"),
+                ],
+                7,
+            ),
+            NOW,
+        );
+        assert_eq!(arena_npc.response.err, "ok");
+        let npc_report = decode_amf3(
+            arena_npc
+                .response
+                .ret
+                .get("battleRecord")
+                .and_then(DtoValue::as_bytes)
+                .unwrap(),
+        )
+        .unwrap();
+        let npc_def = npc_report
+            .get("serverData")
+            .and_then(|s| s.get("battleInfo"))
+            .and_then(|b| b.get("arrTeam2"))
+            .and_then(|t| t.get("1"))
+            .and_then(|t| t.get("arrHero"))
+            .and_then(|h| h.get("1"))
+            .expect("arena npc guard unit");
+        assert_eq!(npc_def.get("htid").and_then(DtoValue::as_u32), Some(310));
+        let npc_def_skills = npc_def
+            .get("arrSkill")
+            .and_then(DtoValue::as_array)
+            .unwrap();
+        assert_eq!(
+            npc_def_skills[0].as_array().unwrap()[0].as_u32(),
+            Some(31002)
+        );
+        assert_eq!(
+            npc_def_skills[1].as_array().unwrap()[0].as_u32(),
+            Some(31001)
+        );
+
+        // Round 2 rageQueue must record Triệu Vân's authentic rage skill `20101` (not 2001)
+        let rage_q = npc_report
+            .get("rageQueue")
+            .and_then(DtoValue::as_array)
+            .expect("rageQueue");
+        assert!(
+            rage_q
+                .iter()
+                .any(|entry| entry.get("skillId").and_then(DtoValue::as_u32) == Some(20101)),
+            "rageQueue must contain Triệu Vân's authentic angry_atk 20101: {rage_q:?}"
+        );
+    }
 }

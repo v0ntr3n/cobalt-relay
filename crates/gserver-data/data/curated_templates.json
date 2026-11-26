@@ -48,7 +48,9 @@
         31,
         33,
         35
-      ]
+      ],
+      "com_atk": 102,
+      "angry_atk": 101
     },
     {
       "utid": 2,
@@ -85,7 +87,9 @@
         32,
         34,
         36
-      ]
+      ],
+      "com_atk": 104,
+      "angry_atk": 103
     }
   ],
   "heroes": [
@@ -107,7 +111,9 @@
       "gold_htid": 2101,
       "dark_gold_htid": 3101,
       "purple_gold_htid": 4101,
-      "color_gold_htid": 5101
+      "color_gold_htid": 5101,
+      "com_atk": 10102,
+      "angry_atk": 10101
     },
     {
       "htid": 102,
@@ -127,7 +133,9 @@
       "gold_htid": 2102,
       "dark_gold_htid": 3102,
       "purple_gold_htid": 4102,
-      "color_gold_htid": 5102
+      "color_gold_htid": 5102,
+      "com_atk": 10202,
+      "angry_atk": 10201
     },
     {
       "htid": 103,
@@ -147,7 +155,9 @@
       "gold_htid": 2103,
       "dark_gold_htid": 3103,
       "purple_gold_htid": 4103,
-      "color_gold_htid": 5103
+      "color_gold_htid": 5103,
+      "com_atk": 10302,
+      "angry_atk": 10301
     },
     {
       "htid": 104,
@@ -167,7 +177,9 @@
       "gold_htid": 2104,
       "dark_gold_htid": 3104,
       "purple_gold_htid": 4104,
-      "color_gold_htid": 5104
+      "color_gold_htid": 5104,
+      "com_atk": 10402,
+      "angry_atk": 10401
     },
     {
       "htid": 105,
@@ -187,7 +199,9 @@
       "gold_htid": 2105,
       "dark_gold_htid": 0,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 10502,
+      "angry_atk": 10501
     },
     {
       "htid": 106,
@@ -207,7 +221,9 @@
       "gold_htid": 2106,
       "dark_gold_htid": 3106,
       "purple_gold_htid": 4106,
-      "color_gold_htid": 5106
+      "color_gold_htid": 5106,
+      "com_atk": 10602,
+      "angry_atk": 10601
     },
     {
       "htid": 107,
@@ -227,7 +243,9 @@
       "gold_htid": 2107,
       "dark_gold_htid": 3107,
       "purple_gold_htid": 4107,
-      "color_gold_htid": 5107
+      "color_gold_htid": 5107,
+      "com_atk": 10702,
+      "angry_atk": 10701
     },
     {
       "htid": 108,
@@ -247,7 +265,9 @@
       "gold_htid": 2108,
       "dark_gold_htid": 0,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 10802,
+      "angry_atk": 10801
     },
     {
       "htid": 109,
@@ -267,7 +287,9 @@
       "gold_htid": 2109,
       "dark_gold_htid": 0,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 10902,
+      "angry_atk": 10901
     },
     {
       "htid": 110,
@@ -287,7 +309,9 @@
       "gold_htid": 2110,
       "dark_gold_htid": 3110,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 11002,
+      "angry_atk": 11001
     },
     {
       "htid": 111,
@@ -307,7 +331,9 @@
       "gold_htid": 2111,
       "dark_gold_htid": 3111,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 11102,
+      "angry_atk": 11101
     },
     {
       "htid": 115,
@@ -327,7 +353,9 @@
       "gold_htid": 2115,
       "dark_gold_htid": 0,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 11502,
+      "angry_atk": 11501
     },
     {
       "htid": 116,
@@ -347,7 +375,9 @@
       "gold_htid": 2116,
       "dark_gold_htid": 3116,
       "purple_gold_htid": 4116,
-      "color_gold_htid": 5116
+      "color_gold_htid": 5116,
+      "com_atk": 11602,
+      "angry_atk": 11601
     },
     {
       "htid": 117,
@@ -367,7 +397,9 @@
       "gold_htid": 2117,
       "dark_gold_htid": 0,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 11702,
+      "angry_atk": 11701
     },
     {
       "htid": 201,
@@ -387,7 +419,9 @@
       "gold_htid": 2201,
       "dark_gold_htid": 3201,
       "purple_gold_htid": 4201,
-      "color_gold_htid": 5201
+      "color_gold_htid": 5201,
+      "com_atk": 20102,
+      "angry_atk": 20101
     },
     {
       "htid": 202,
@@ -407,7 +441,9 @@
       "gold_htid": 2202,
       "dark_gold_htid": 3202,
       "purple_gold_htid": 4202,
-      "color_gold_htid": 5202
+      "color_gold_htid": 5202,
+      "com_atk": 20202,
+      "angry_atk": 20201
     },
     {
       "htid": 203,
@@ -427,7 +463,9 @@
       "gold_htid": 2203,
       "dark_gold_htid": 3203,
       "purple_gold_htid": 4203,
-      "color_gold_htid": 5203
+      "color_gold_htid": 5203,
+      "com_atk": 20302,
+      "angry_atk": 20301
     },
     {
       "htid": 204,
@@ -447,7 +485,9 @@
       "gold_htid": 2204,
       "dark_gold_htid": 3204,
       "purple_gold_htid": 4204,
-      "color_gold_htid": 5204
+      "color_gold_htid": 5204,
+      "com_atk": 20402,
+      "angry_atk": 20401
     },
     {
       "htid": 205,
@@ -467,7 +507,9 @@
       "gold_htid": 2205,
       "dark_gold_htid": 3205,
       "purple_gold_htid": 4205,
-      "color_gold_htid": 5205
+      "color_gold_htid": 5205,
+      "com_atk": 20502,
+      "angry_atk": 20501
     },
     {
       "htid": 206,
@@ -487,7 +529,9 @@
       "gold_htid": 2206,
       "dark_gold_htid": 3206,
       "purple_gold_htid": 4206,
-      "color_gold_htid": 5206
+      "color_gold_htid": 5206,
+      "com_atk": 20602,
+      "angry_atk": 20601
     },
     {
       "htid": 207,
@@ -507,7 +551,9 @@
       "gold_htid": 2207,
       "dark_gold_htid": 3207,
       "purple_gold_htid": 4207,
-      "color_gold_htid": 5207
+      "color_gold_htid": 5207,
+      "com_atk": 20702,
+      "angry_atk": 20701
     },
     {
       "htid": 208,
@@ -527,7 +573,9 @@
       "gold_htid": 2208,
       "dark_gold_htid": 0,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 20802,
+      "angry_atk": 20801
     },
     {
       "htid": 209,
@@ -547,7 +595,9 @@
       "gold_htid": 2209,
       "dark_gold_htid": 0,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 20902,
+      "angry_atk": 20901
     },
     {
       "htid": 210,
@@ -567,7 +617,9 @@
       "gold_htid": 2210,
       "dark_gold_htid": 0,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 21002,
+      "angry_atk": 21001
     },
     {
       "htid": 211,
@@ -587,7 +639,9 @@
       "gold_htid": 2211,
       "dark_gold_htid": 0,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 21102,
+      "angry_atk": 21101
     },
     {
       "htid": 212,
@@ -607,7 +661,9 @@
       "gold_htid": 2212,
       "dark_gold_htid": 0,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 21202,
+      "angry_atk": 21201
     },
     {
       "htid": 213,
@@ -627,7 +683,9 @@
       "gold_htid": 2213,
       "dark_gold_htid": 0,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 21302,
+      "angry_atk": 21301
     },
     {
       "htid": 220,
@@ -647,7 +705,9 @@
       "gold_htid": 0,
       "dark_gold_htid": 0,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 22002,
+      "angry_atk": 22001
     },
     {
       "htid": 301,
@@ -667,7 +727,9 @@
       "gold_htid": 2301,
       "dark_gold_htid": 3301,
       "purple_gold_htid": 4301,
-      "color_gold_htid": 5301
+      "color_gold_htid": 5301,
+      "com_atk": 30102,
+      "angry_atk": 30101
     },
     {
       "htid": 302,
@@ -687,7 +749,9 @@
       "gold_htid": 2302,
       "dark_gold_htid": 3302,
       "purple_gold_htid": 4302,
-      "color_gold_htid": 5302
+      "color_gold_htid": 5302,
+      "com_atk": 30202,
+      "angry_atk": 30201
     },
     {
       "htid": 303,
@@ -707,7 +771,9 @@
       "gold_htid": 2303,
       "dark_gold_htid": 3303,
       "purple_gold_htid": 4303,
-      "color_gold_htid": 5303
+      "color_gold_htid": 5303,
+      "com_atk": 30302,
+      "angry_atk": 30301
     },
     {
       "htid": 304,
@@ -727,7 +793,9 @@
       "gold_htid": 2304,
       "dark_gold_htid": 3304,
       "purple_gold_htid": 4304,
-      "color_gold_htid": 5304
+      "color_gold_htid": 5304,
+      "com_atk": 30402,
+      "angry_atk": 30401
     },
     {
       "htid": 305,
@@ -747,7 +815,9 @@
       "gold_htid": 2305,
       "dark_gold_htid": 3305,
       "purple_gold_htid": 4305,
-      "color_gold_htid": 5305
+      "color_gold_htid": 5305,
+      "com_atk": 30502,
+      "angry_atk": 30501
     },
     {
       "htid": 306,
@@ -767,7 +837,9 @@
       "gold_htid": 2306,
       "dark_gold_htid": 0,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 30602,
+      "angry_atk": 30601
     },
     {
       "htid": 307,
@@ -787,7 +859,9 @@
       "gold_htid": 2307,
       "dark_gold_htid": 3307,
       "purple_gold_htid": 4307,
-      "color_gold_htid": 5307
+      "color_gold_htid": 5307,
+      "com_atk": 30702,
+      "angry_atk": 30701
     },
     {
       "htid": 308,
@@ -807,7 +881,9 @@
       "gold_htid": 2308,
       "dark_gold_htid": 0,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 30802,
+      "angry_atk": 30801
     },
     {
       "htid": 309,
@@ -827,7 +903,9 @@
       "gold_htid": 2309,
       "dark_gold_htid": 3309,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 30902,
+      "angry_atk": 30901
     },
     {
       "htid": 310,
@@ -847,7 +925,9 @@
       "gold_htid": 2310,
       "dark_gold_htid": 3310,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 31002,
+      "angry_atk": 31001
     },
     {
       "htid": 311,
@@ -867,7 +947,9 @@
       "gold_htid": 2311,
       "dark_gold_htid": 0,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 31102,
+      "angry_atk": 31101
     },
     {
       "htid": 312,
@@ -887,7 +969,9 @@
       "gold_htid": 2312,
       "dark_gold_htid": 3312,
       "purple_gold_htid": 4312,
-      "color_gold_htid": 5312
+      "color_gold_htid": 5312,
+      "com_atk": 31202,
+      "angry_atk": 31201
     },
     {
       "htid": 314,
@@ -907,7 +991,9 @@
       "gold_htid": 2314,
       "dark_gold_htid": 0,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 31402,
+      "angry_atk": 31401
     },
     {
       "htid": 315,
@@ -927,7 +1013,9 @@
       "gold_htid": 2315,
       "dark_gold_htid": 0,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 31502,
+      "angry_atk": 31501
     },
     {
       "htid": 401,
@@ -947,7 +1035,9 @@
       "gold_htid": 2401,
       "dark_gold_htid": 3401,
       "purple_gold_htid": 4401,
-      "color_gold_htid": 5401
+      "color_gold_htid": 5401,
+      "com_atk": 40102,
+      "angry_atk": 40101
     },
     {
       "htid": 402,
@@ -967,7 +1057,9 @@
       "gold_htid": 2402,
       "dark_gold_htid": 3402,
       "purple_gold_htid": 4402,
-      "color_gold_htid": 5402
+      "color_gold_htid": 5402,
+      "com_atk": 40202,
+      "angry_atk": 40201
     },
     {
       "htid": 403,
@@ -987,7 +1079,9 @@
       "gold_htid": 2403,
       "dark_gold_htid": 3403,
       "purple_gold_htid": 4403,
-      "color_gold_htid": 5403
+      "color_gold_htid": 5403,
+      "com_atk": 40302,
+      "angry_atk": 40301
     },
     {
       "htid": 404,
@@ -1007,7 +1101,9 @@
       "gold_htid": 2404,
       "dark_gold_htid": 3404,
       "purple_gold_htid": 4404,
-      "color_gold_htid": 5404
+      "color_gold_htid": 5404,
+      "com_atk": 40402,
+      "angry_atk": 40401
     },
     {
       "htid": 405,
@@ -1027,7 +1123,9 @@
       "gold_htid": 2405,
       "dark_gold_htid": 3405,
       "purple_gold_htid": 4405,
-      "color_gold_htid": 5405
+      "color_gold_htid": 5405,
+      "com_atk": 40502,
+      "angry_atk": 40501
     },
     {
       "htid": 406,
@@ -1047,7 +1145,9 @@
       "gold_htid": 2406,
       "dark_gold_htid": 3406,
       "purple_gold_htid": 4406,
-      "color_gold_htid": 5406
+      "color_gold_htid": 5406,
+      "com_atk": 40602,
+      "angry_atk": 40601
     },
     {
       "htid": 407,
@@ -1067,7 +1167,9 @@
       "gold_htid": 2407,
       "dark_gold_htid": 3407,
       "purple_gold_htid": 4407,
-      "color_gold_htid": 5407
+      "color_gold_htid": 5407,
+      "com_atk": 40702,
+      "angry_atk": 40701
     },
     {
       "htid": 408,
@@ -1087,7 +1189,9 @@
       "gold_htid": 2408,
       "dark_gold_htid": 3408,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 40802,
+      "angry_atk": 40801
     },
     {
       "htid": 409,
@@ -1107,7 +1211,9 @@
       "gold_htid": 2409,
       "dark_gold_htid": 3409,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 40902,
+      "angry_atk": 40901
     },
     {
       "htid": 410,
@@ -1127,7 +1233,9 @@
       "gold_htid": 2410,
       "dark_gold_htid": 0,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 41002,
+      "angry_atk": 41001
     },
     {
       "htid": 411,
@@ -1147,7 +1255,9 @@
       "gold_htid": 2411,
       "dark_gold_htid": 0,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 41102,
+      "angry_atk": 41101
     },
     {
       "htid": 414,
@@ -1167,7 +1277,9 @@
       "gold_htid": 2414,
       "dark_gold_htid": 0,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 41402,
+      "angry_atk": 41401
     },
     {
       "htid": 415,
@@ -1187,7 +1299,9 @@
       "gold_htid": 2415,
       "dark_gold_htid": 0,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 41502,
+      "angry_atk": 41501
     },
     {
       "htid": 418,
@@ -1207,7 +1321,9 @@
       "gold_htid": 2418,
       "dark_gold_htid": 0,
       "purple_gold_htid": 0,
-      "color_gold_htid": 0
+      "color_gold_htid": 0,
+      "com_atk": 41802,
+      "angry_atk": 41801
     },
     {
       "htid": 901,
@@ -1227,7 +1343,9 @@
       "gold_htid": 2901,
       "dark_gold_htid": 3901,
       "purple_gold_htid": 4901,
-      "color_gold_htid": 5491
+      "color_gold_htid": 5491,
+      "com_atk": 90102,
+      "angry_atk": 90101
     },
     {
       "htid": 902,
@@ -1247,7 +1365,9 @@
       "gold_htid": 2902,
       "dark_gold_htid": 3902,
       "purple_gold_htid": 4902,
-      "color_gold_htid": 5492
+      "color_gold_htid": 5492,
+      "com_atk": 7100,
+      "angry_atk": 7120
     },
     {
       "htid": 904,
@@ -1267,7 +1387,9 @@
       "gold_htid": 2904,
       "dark_gold_htid": 3904,
       "purple_gold_htid": 4904,
-      "color_gold_htid": 5494
+      "color_gold_htid": 5494,
+      "com_atk": 90402,
+      "angry_atk": 90401
     }
   ],
   "items": [

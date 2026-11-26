@@ -18,8 +18,9 @@ use gserver_rpc_catalog::bootstrap::{
 };
 
 use crate::bridge::{
-    catalog_amf3_to_protocol, dto_to_amf3, player_json_to_amf3, profile_to_gameplay_state,
-    sync_gameplay_back_to_profile, to_gameplay_request, u64_to_amf3,
+    catalog_amf3_to_protocol, dto_to_amf3, player_json_to_amf3,
+    profile_to_gameplay_state_with_store, sync_gameplay_back_to_profile, to_gameplay_request,
+    u64_to_amf3,
 };
 use crate::bxh_snapshot::BxhSnapshot;
 use crate::config::DaemonConfig;
@@ -84,10 +85,10 @@ impl ServerWorld {
         let mut gameplay = GameplayEngine::new(0x4F4D_4733_515F_564E);
         let snap_arena = bxh_snapshot.extract_arena_players();
         if !snap_arena.is_empty() {
-            gameplay.arena.seed_competitors(
+            gameplay.arena.seed_competitors_with_htid(
                 snap_arena
                     .into_iter()
-                    .map(|p| (p.uid, p.uname, p.level, p.fight_force, p.position))
+                    .map(|p| (p.uid, p.uname, p.level, p.fight_force, p.position, p.htid))
                     .collect(),
             );
         }
@@ -95,7 +96,7 @@ impl ServerWorld {
         // Hydrate MapiService role summaries & GameplayEngine from persisted PlayerStore!
         let mut roles_by_pid: HashMap<String, Vec<RoleSummary>> = HashMap::new();
         for profile in Self::collect_all_persisted_profiles(&store) {
-            gp_register_and_role(&profile, &mut gameplay, &mut roles_by_pid);
+            gp_register_and_role(&profile, &data_store, &mut gameplay, &mut roles_by_pid);
         }
         for (pid, roles) in roles_by_pid {
             mapi.set_roles_for_pid(pid, roles);
@@ -389,7 +390,10 @@ impl ServerWorld {
                             )
                         });
                         if let Some(updated) = guard.store.get_player(uid) {
-                            let gp = profile_to_gameplay_state(updated);
+                            let gp = profile_to_gameplay_state_with_store(
+                                updated,
+                                Some(&self.data_store),
+                            );
                             guard.gameplay.register_player(gp);
                         }
                         // Seed welcome starter gift in MailBox & Reward Center (`reward.getRewardList`)
@@ -438,10 +442,9 @@ impl ServerWorld {
                         if status_str == "ok" {
                             session.logged_in_uid = Some(resolved_uid);
                             if !guard.gameplay.players.contains_key(&resolved_uid) {
-                                let gp_opt = guard
-                                    .store
-                                    .get_player(resolved_uid)
-                                    .map(profile_to_gameplay_state);
+                                let gp_opt = guard.store.get_player(resolved_uid).map(|p| {
+                                    profile_to_gameplay_state_with_store(p, Some(&self.data_store))
+                                });
                                 if let Some(gp) = gp_opt {
                                     guard.gameplay.register_player(gp);
                                 }
@@ -480,7 +483,9 @@ impl ServerWorld {
             ref mut gameplay,
             ..
         } = *guard;
-        if let Some(player_res) = try_handle_player_rpc(store, gameplay, uid, req, now_ts) {
+        if let Some(player_res) =
+            try_handle_player_rpc(store, gameplay, &self.data_store, uid, req, now_ts)
+        {
             if req.method == "formation.getOtherPositionInfo" {
                 if let Err(ref code) = player_res {
                     if code == "target_player_not_found" {
@@ -811,9 +816,12 @@ impl ServerWorld {
                 Self::ok_reply(req, session, ret_val, now_i64)
             }
 
-            "activityRechargeRebate.getInfo" => {
-                Self::ok_reply(req, session, Value::String("activity_close".to_string()), now_i64)
-            }
+            "activityRechargeRebate.getInfo" => Self::ok_reply(
+                req,
+                session,
+                Value::String("activity_close".to_string()),
+                now_i64,
+            ),
 
             "brochureStrategy.getInfo" => {
                 let ret_val = Value::map([
@@ -919,9 +927,7 @@ impl ServerWorld {
 
             "growth.getNum" => Self::ok_reply(req, session, Value::Int(0), now_i64),
 
-            "envelopRain.getInfo" => {
-                Self::ok_reply(req, session, Value::Bool(false), now_i64)
-            }
+            "envelopRain.getInfo" => Self::ok_reply(req, session, Value::Bool(false), now_i64),
 
             "activityStarPlaySignOpen.getInfo" => {
                 let ret_val = Value::map([("maked", Value::empty_array())]);
@@ -947,9 +953,7 @@ impl ServerWorld {
                 Self::ok_reply(req, session, ret_val, now_i64)
             }
 
-            "firstGift.getRechargeGold" => {
-                Self::ok_reply(req, session, Value::Int(0), now_i64)
-            }
+            "firstGift.getRechargeGold" => Self::ok_reply(req, session, Value::Int(0), now_i64),
 
             "dressBrightBook.getInfo" => {
                 let ret_val = Value::map([
@@ -1138,7 +1142,7 @@ impl ServerWorld {
     fn err_reply(req: &gserver_protocol::RpcRequest, code: &str, now_i64: i64) -> HandledRpc {
         HandledRpc {
             caller_envelopes: vec![
-                S2cEnvelope::error_response(&req.callback_name, code).with_time(now_i64),
+                S2cEnvelope::error_response(&req.callback_name, code).with_time(now_i64)
             ],
             peer_envelopes: Vec::new(),
         }
@@ -1147,10 +1151,14 @@ impl ServerWorld {
 
 fn gp_register_and_role(
     profile: &PlayerProfile,
+    data_store: &GameDataStore,
     gameplay: &mut GameplayEngine,
     roles_by_pid: &mut HashMap<String, Vec<RoleSummary>>,
 ) {
-    gameplay.register_player(profile_to_gameplay_state(profile));
+    gameplay.register_player(profile_to_gameplay_state_with_store(
+        profile,
+        Some(data_store),
+    ));
     roles_by_pid
         .entry(profile.pid.clone())
         .or_default()
@@ -1314,6 +1322,160 @@ mod tests {
                 "push {:?} must not contain hero_partner_map",
                 env.callback_name
             );
+        }
+
+        drop(world);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn server_world_copy_arena_and_skill_level_up_use_authentic_hero_skills() {
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "gserver_world_hero_skills_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).expect("create temp test dir");
+
+        let cfg = DaemonConfig {
+            data_dir: tmp_dir.clone(),
+            verify_tickets: false,
+            ..DaemonConfig::default()
+        };
+        let mapi = Arc::new(MapiService::new(HttpMapiConfig::default()));
+        let world = ServerWorld::open(cfg, mapi).expect("open ServerWorld");
+
+        let mut session = ConnectionSession::default();
+        let _ = world.handle_rpc(
+            &mut session,
+            &RpcRequest::with_seq_id(
+                "user.login",
+                1,
+                vec![Value::map([
+                    ("pid", Value::String("pid_skill_e2e".into())),
+                    ("serverID", Value::String("game2900161".into())),
+                ])],
+                "0",
+            ),
+        );
+        let tok = session.session_token.clone();
+        let _ = world.handle_rpc(
+            &mut session,
+            &RpcRequest::with_seq_id(
+                "user.createUser",
+                2,
+                vec![Value::Int(2), Value::String("ChuaCongNu".into())],
+                tok.as_str(),
+            ),
+        );
+        let before = world.handle_rpc(
+            &mut session,
+            &RpcRequest::with_seq_id("user.getUserBeforLogin", 3, vec![], tok.as_str()),
+        );
+        let uid = before.caller_envelopes[0]
+            .ret
+            .get_field("uid")
+            .and_then(Value::as_i64)
+            .unwrap();
+        let _ = world.handle_rpc(
+            &mut session,
+            &RpcRequest::with_seq_id(
+                "user.userLogin",
+                4,
+                vec![Value::Int(uid as i32)],
+                tok.as_str(),
+            ),
+        );
+
+        // `hero.skillLevelUp` with omitted skill_id defaults to hero's authentic `com_atk` (not 1001!)
+        let heroes_ret = world
+            .handle_rpc(
+                &mut session,
+                &RpcRequest::with_seq_id("hero.getAllHeroes", 5, vec![], tok.as_str()),
+            )
+            .caller_envelopes[0]
+            .ret
+            .clone();
+        let mut zhaoyun_hid = 0i32;
+        if let Value::Object(ref map) = heroes_ret {
+            for (_k, v) in map.iter() {
+                if v.get_field("htid").and_then(Value::as_i64) == Some(201) {
+                    zhaoyun_hid = v.get_field("hid").and_then(Value::as_i64).unwrap() as i32;
+                }
+            }
+        }
+        assert!(
+            zhaoyun_hid > 0,
+            "DaemonConfig::default grants starter Triệu Vân (htid=201)"
+        );
+
+        let sk_up = world.handle_rpc(
+            &mut session,
+            &RpcRequest::with_seq_id(
+                "hero.skillLevelUp",
+                6,
+                vec![Value::Int(zhaoyun_hid)],
+                tok.as_str(),
+            ),
+        );
+        assert_eq!(sk_up.caller_envelopes[0].err, "ok");
+
+        let heroes_after = world
+            .handle_rpc(
+                &mut session,
+                &RpcRequest::with_seq_id("hero.getAllHeroes", 7, vec![], tok.as_str()),
+            )
+            .caller_envelopes[0]
+            .ret
+            .clone();
+        let zy_dto = heroes_after
+            .get_field(&zhaoyun_hid.to_string())
+            .expect("Triệu Vân DTO");
+        if let Some(Value::Array { dense, .. }) = zy_dto.get_field("talent") {
+            assert_eq!(dense, &vec![Value::Int(20102)]);
+        } else {
+            panic!("expected talent array with authentic com_atk 20102");
+        }
+
+        // `copy.attack` over ServerWorld emits authentic `arrSkill` for Nữ Chủ Tướng (104/103), Triệu Vân (20102/20101), Điêu Thuyền (40602/40601)
+        let atk = world.handle_rpc(
+            &mut session,
+            &RpcRequest::with_seq_id(
+                "copy.attack",
+                8,
+                vec![Value::Int(1001), Value::Int(100101)],
+                tok.as_str(),
+            ),
+        );
+        assert_eq!(atk.caller_envelopes[0].err, "ok");
+        let arr_hero = atk.caller_envelopes[0]
+            .ret
+            .get_field("battleInfo")
+            .and_then(|b| b.get_field("arrTeam1"))
+            .and_then(|t| t.get_field("1"))
+            .and_then(|t| t.get_field("arrHero"))
+            .expect("copy.attack arrTeam1.1.arrHero");
+        for (slot_key, exp_htid, exp_com, exp_angry) in [
+            ("1", 2, 104, 103),
+            ("2", 201, 20102, 20101),
+            ("3", 406, 40602, 40601),
+        ] {
+            let u = arr_hero.get_field(slot_key).expect("deployed hero unit");
+            assert_eq!(u.get_field("htid").and_then(Value::as_i64), Some(exp_htid));
+            if let Some(Value::Array { dense, .. }) = u.get_field("arrSkill") {
+                if let (
+                    Some(Value::Array { dense: s0, .. }),
+                    Some(Value::Array { dense: s1, .. }),
+                ) = (dense.first(), dense.get(1))
+                {
+                    assert_eq!(s0.first().and_then(Value::as_i64), Some(exp_com));
+                    assert_eq!(s1.first().and_then(Value::as_i64), Some(exp_angry));
+                } else {
+                    panic!("invalid nested arrSkill entries");
+                }
+            } else {
+                panic!("missing arrSkill array");
+            }
         }
 
         drop(world);

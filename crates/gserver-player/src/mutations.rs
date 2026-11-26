@@ -365,7 +365,7 @@ impl PlayerProfile {
 
         // Pre-validate side-effect capacity before mutating the bag!
         if let UseItemEffect::SummonHero { htid } = &effect {
-            if (1..=28).contains(htid) {
+            if gserver_data::is_protagonist_htid(*htid) {
                 return Err(PlayerError::InvalidParameter(
                     "cannot summon additional protagonist template via item".into(),
                 ));
@@ -438,7 +438,7 @@ impl PlayerProfile {
         if htid == 0 {
             return Err(PlayerError::InvalidParameter("htid must be > 0".into()));
         }
-        if (1..=28).contains(&htid) {
+        if gserver_data::is_protagonist_htid(htid) {
             return Err(PlayerError::InvalidParameter(format!(
                 "protagonist htid={htid} cannot be summoned via summon_hero"
             )));
