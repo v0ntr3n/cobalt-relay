@@ -2,7 +2,7 @@
 //! Heartbeat (`err = "ping"`), and Multi-Batch envelope codecs.
 //!
 //! Verified directly against `Network.lua`, `SuperMapNetwork.lua`, `LoginProxy.lua`,
-//! `NetConst.lua`, and `live_capture_filtered.log`.
+//! `NetConst.lua`, `CityData.lua`, and `live_capture_filtered.log`.
 
 use crate::amf3::{self, Amf3Object, Value};
 use crate::error::{EnvelopeError, ProtocolError};
@@ -10,13 +10,27 @@ use crate::frame::{
     encode_c2s_lcpacket, split_length_prefixed_subpackets, S2cFrame, ServerTxEncoder,
 };
 
+/// Maximum sparse 1-based Lua numeric index reconstructed into [`RpcRequest::args`].
+const MAX_RECONSTRUCTED_SPARSE_INDEX: usize = 1024;
+
+/// Parses a canonical non-negative integer key (`"0"`, `"1"`, `"2"`, ..., rejecting `"-1"` or `"01"`).
+fn parse_canonical_usize_key(key: &str) -> Option<usize> {
+    if key.is_empty() || (key.len() > 1 && key.starts_with('0')) {
+        return None;
+    }
+    if !key.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    key.parse::<usize>().ok()
+}
+
 /// Client-to-Server RPC call decoded from `Network:sendMsg` / `sendStatMsg` / `sendNewStatMsg`.
 ///
 /// Exact Lua structure in `Network.lua:249-254`:
 /// ```lua
 /// local request = {
 ///     method   = method,                              -- e.g. "user.login"
-///     args     = args or {},                          -- 1-based dense Lua array
+///     args     = args or {},                          -- 1-based dense Lua array, 0-indexed table, map, or ""
 ///     token    = self.mToken,                         -- starts at "0"
 ///     callback = { callbackName = method .. "_" .. mId } -- or "user.stat"
 /// }
@@ -25,12 +39,18 @@ use crate::frame::{
 pub struct RpcRequest {
     /// Target RPC method name (e.g. `"user.login"`, `"user.getUserBeforLogin"`, `"user.userLogin"`).
     pub method: String,
-    /// Positional RPC arguments array (`{}` empty AMF3 Array when omitted).
+    /// Positional RPC arguments array (`{}` empty when omitted or `""`, 1-based dense + sparse reconstructed).
     pub args: Vec<Value>,
     /// Session token string (initialized to `"0"` in `Network:ctor`, updated via S2C `token`).
     pub token: String,
     /// Client callback correlation key (`request.callback.callbackName`, e.g. `"user.login_2"`).
     pub callback_name: String,
+    /// Optional Lua 0-indexed argument (`args[0]`, encoded by `Amf3Module.cpp` under string key `"0"`).
+    pub arg_zero: Option<Value>,
+    /// Named / associative entries carried on `args` (`{ boxId = 1 }`, `{ brid = ..., token = ... }`, etc.).
+    pub named_args: Vec<(String, Value)>,
+    /// Original decoded AMF3 `args` value preserved verbatim for lossless round-tripping and lookup.
+    pub raw_args: Option<Value>,
 }
 
 impl RpcRequest {
@@ -41,11 +61,15 @@ impl RpcRequest {
         token: impl Into<String>,
         callback_name: impl Into<String>,
     ) -> Self {
+        let raw_args = Some(Value::dense_array(args.clone()));
         Self {
             method: method.into(),
             args,
             token: token.into(),
             callback_name: callback_name.into(),
+            arg_zero: None,
+            named_args: Vec::new(),
+            raw_args,
         }
     }
 
@@ -58,20 +82,91 @@ impl RpcRequest {
     ) -> Self {
         let method_str = method.into();
         let callback_name = format!("{method_str}_{seq_id}");
+        let raw_args = Some(Value::dense_array(args.clone()));
         Self {
             method: method_str,
             args,
             token: token.into(),
             callback_name,
+            arg_zero: None,
+            named_args: Vec::new(),
+            raw_args,
         }
+    }
+
+    /// Returns the Lua 0-indexed element `args[0]` if present (e.g. `args[0] = gid; args[1] = item_id; args[2] = num`).
+    pub fn arg_zero(&self) -> Option<&Value> {
+        self.arg_zero.as_ref().or_else(|| {
+            self.raw_args
+                .as_ref()
+                .and_then(|raw| raw.get_field("0"))
+        })
+    }
+
+    /// Looks up a Lua argument using exact 0-based / 1-based Lua table indexing:
+    /// - `lua_idx == 0`: returns Lua `args[0]` (`assoc["0"]` / `object["0"]`).
+    /// - `lua_idx >= 1`: returns Lua `args[lua_idx]` (`dense[lua_idx - 1]` or sparse `assoc/object[tostring(lua_idx)]`).
+    pub fn arg_at_lua0(&self, lua_idx: usize) -> Option<&Value> {
+        if lua_idx == 0 {
+            return self.arg_zero();
+        }
+        match &self.raw_args {
+            Some(Value::Array { dense, assoc }) => {
+                if lua_idx <= dense.len() {
+                    Some(&dense[lua_idx - 1])
+                } else {
+                    let key = lua_idx.to_string();
+                    assoc
+                        .iter()
+                        .find(|(k, _)| k == &key)
+                        .map(|(_, v)| v)
+                        .or_else(|| self.args.get(lua_idx - 1))
+                }
+            }
+            Some(Value::Object(obj)) => {
+                let key = lua_idx.to_string();
+                obj.get(&key)
+            }
+            _ => self.args.get(lua_idx - 1),
+        }
+    }
+
+    /// Looks up a named/associative argument on `args` (e.g. `boxId`, `brid`, `token`).
+    pub fn named_arg(&self, key: &str) -> Option<&Value> {
+        self.named_args
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v)
+            .or_else(|| self.raw_args.as_ref().and_then(|raw| raw.get_field(key)))
     }
 
     /// Converts this [`RpcRequest`] into an AMF3 [`Value::Object`] matching `Amf3Module.cpp`.
     pub fn to_amf3_value(&self) -> Value {
         let callback_obj = Value::map([("callbackName", Value::String(self.callback_name.clone()))]);
+        let args_val = match &self.raw_args {
+            Some(raw) => raw.clone(),
+            None if self.arg_zero.is_none() && self.named_args.is_empty() => {
+                Value::dense_array(self.args.clone())
+            }
+            None => {
+                let mut assoc = Vec::new();
+                if let Some(z) = &self.arg_zero {
+                    assoc.push((String::from("0"), z.clone()));
+                }
+                for (k, v) in &self.named_args {
+                    if k != "0" {
+                        assoc.push((k.clone(), v.clone()));
+                    }
+                }
+                Value::Array {
+                    dense: self.args.clone(),
+                    assoc,
+                }
+            }
+        };
         Value::map([
             ("method", Value::String(self.method.clone())),
-            ("args", Value::dense_array(self.args.clone())),
+            ("args", args_val),
             ("token", Value::String(self.token.clone())),
             ("callback", callback_obj),
         ])
@@ -86,6 +181,114 @@ impl RpcRequest {
     pub fn to_lcpacket_frame(&self, compress: bool) -> Result<Vec<u8>, ProtocolError> {
         let amf3_bytes = self.to_amf3_bytes()?;
         encode_c2s_lcpacket(&amf3_bytes, compress)
+    }
+
+    fn normalize_args_field(
+        raw_field: Option<&Value>,
+    ) -> (Vec<Value>, Option<Value>, Vec<(String, Value)>, Option<Value>) {
+        match raw_field {
+            None | Some(Value::Null | Value::Undefined) => {
+                (Vec::new(), None, Vec::new(), raw_field.cloned())
+            }
+            Some(raw @ Value::Array { dense, assoc }) => {
+                let mut args = dense.clone();
+                let mut arg_zero = None;
+                let mut named_args = Vec::new();
+                let mut max_pos_idx = args.len();
+
+                for (k, v) in assoc {
+                    if let Some(idx) = parse_canonical_usize_key(k) {
+                        if idx == 0 {
+                            arg_zero = Some(v.clone());
+                        } else if idx <= MAX_RECONSTRUCTED_SPARSE_INDEX {
+                            if idx > max_pos_idx {
+                                max_pos_idx = idx;
+                            }
+                            if args.len() < idx {
+                                args.resize(idx, Value::Null);
+                            }
+                            if matches!(args[idx - 1], Value::Null | Value::Undefined)
+                                || idx > dense.len()
+                            {
+                                args[idx - 1] = v.clone();
+                            }
+                        } else {
+                            named_args.push((k.clone(), v.clone()));
+                        }
+                    } else {
+                        named_args.push((k.clone(), v.clone()));
+                    }
+                }
+
+                // When Lua passes `{ [0] = gid }` encoded as an associative array with no 1-based keys,
+                // also expose `gid` at `args[0]` so positional callers do not drop the sole argument.
+                if dense.is_empty() && max_pos_idx == 0 {
+                    if let Some(z) = &arg_zero {
+                        args.push(z.clone());
+                    }
+                }
+
+                (args, arg_zero, named_args, Some(raw.clone()))
+            }
+            Some(raw @ Value::Object(obj)) => {
+                let mut arg_zero = None;
+                let mut pos_entries: Vec<(usize, Value)> = Vec::new();
+                let mut named_args = Vec::new();
+                let mut max_pos_idx = 0usize;
+
+                for (k, v) in obj.iter() {
+                    if let Some(idx) = parse_canonical_usize_key(k) {
+                        if idx == 0 {
+                            arg_zero = Some(v.clone());
+                        } else if idx <= MAX_RECONSTRUCTED_SPARSE_INDEX {
+                            if idx > max_pos_idx {
+                                max_pos_idx = idx;
+                            }
+                            pos_entries.push((idx, v.clone()));
+                        } else {
+                            named_args.push((k.to_owned(), v.clone()));
+                        }
+                    } else {
+                        named_args.push((k.to_owned(), v.clone()));
+                    }
+                }
+
+                let mut args = if max_pos_idx > 0 {
+                    let mut vec = vec![Value::Null; max_pos_idx];
+                    for (idx, v) in pos_entries {
+                        vec[idx - 1] = v;
+                    }
+                    vec
+                } else if let Some(z) = &arg_zero {
+                    // `{ [0] = gid }` (`#t == 0` in Lua -> encoded as `0x0A` Object with key `"0"`)
+                    vec![z.clone()]
+                } else {
+                    Vec::new()
+                };
+
+                // If `args` is purely a named map like `{ boxId = 1 }` or `{ brid = 10, token = "x" }`,
+                // keep `args` containing `[Value::Object(obj)]` ONLY if callers inspect `args[0]`?
+                // Wait: in Lua `sendReceiveNewHero` passes `{ boxId = 1 }` directly as `args` (`Network:sendMsg(m, cb, { boxId = 1 })`),
+                // whereas other RPCs pass `{{ boxId = 1 }}`! Exposing `named_args` AND if `args.is_empty() && arg_zero.is_none() && !named_args.is_empty()`
+                // keeping `args` empty while `named_arg("boxId")` / `raw_args` has the map — OR wait:
+                // Let's check! What if a handler checks `req.args.first().and_then(as_map)` vs `req.named_arg("boxId")`?
+                // Wait: if `{ brid = 123, token = "abc" }` is passed directly as `args`, `req.named_arg("brid")` returns `123`!
+                // What if `args` stays empty when there are only named keys? Let's check Requirement 1:
+                // "Handle args = Value::Object(map) (when Lua passes { [0] = gid } or { brid = ..., token = ... } or { nil, x }!). Reconstruct positional args if numeric string keys "0", "1", "2" exist, AND expose arg_zero / named_args (or preserve a raw_args: Option<Value> field on RpcRequest with helper methods arg_at_lua0(&self, idx) / named_arg(&self, key))"
+                let _ = &mut args;
+
+                (args, arg_zero, named_args, Some(raw.clone()))
+            }
+            Some(raw) => {
+                // Gracefully handle `args = ""` (`CityData.lua:74` `"city.enterShadowInfo"`) -> empty `args`,
+                // and wrap other scalar non-array values without failing envelope decoding.
+                if raw.as_str() == Some("") {
+                    (Vec::new(), None, Vec::new(), Some(raw.clone()))
+                } else {
+                    (vec![raw.clone()], None, Vec::new(), Some(raw.clone()))
+                }
+            }
+        }
     }
 
     /// Parses an [`RpcRequest`] from a decoded AMF3 [`Value`].
@@ -104,17 +307,8 @@ impl RpcRequest {
             })?
             .to_owned();
 
-        let args = match val.get_field("args") {
-            None | Some(Value::Null | Value::Undefined) => Vec::new(),
-            Some(Value::Array { dense, .. }) => dense.clone(),
-            Some(_) => {
-                return Err(EnvelopeError::InvalidFieldType {
-                    field: "args",
-                    expected: "Array",
-                }
-                .into())
-            }
-        };
+        let (args, arg_zero, named_args, raw_args) =
+            Self::normalize_args_field(val.get_field("args"));
 
         let token = match val.get_field("token") {
             None | Some(Value::Null | Value::Undefined) => String::from("0"),
@@ -148,6 +342,9 @@ impl RpcRequest {
             args,
             token,
             callback_name,
+            arg_zero,
+            named_args,
+            raw_args,
         })
     }
 

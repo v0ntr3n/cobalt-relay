@@ -1229,3 +1229,176 @@ fn test_35_error_display_and_std_error_source_implementations() {
         assert!(std::error::Error::source(&e).is_some());
     }
 }
+
+// ============================================================================
+// 7. `RpcRequest` Lua Quirks (`args = ""`, Scalar, `Value::Object`, 0-Indexed `assoc["0"]`, Sparse)
+// ============================================================================
+
+#[test]
+fn test_36_rpc_request_empty_string_and_scalar_args_handled_gracefully() {
+    // `CityData.lua:74` (`"city.enterShadowInfo"`) returns `""` from `methodArgs()`,
+    // encoding `args = Value::String("")` instead of `{}`!
+    let empty_str_req = Value::map([
+        ("method", Value::from("city.enterShadowInfo")),
+        ("args", Value::from("")),
+        ("token", Value::from("tok_city")),
+        (
+            "callback",
+            Value::map([("callbackName", Value::from("city.enterShadowInfo_12"))]),
+        ),
+    ]);
+    let raw = amf3::encode(&empty_str_req).unwrap();
+    let parsed = RpcRequest::from_amf3_bytes(&raw).unwrap();
+    assert_eq!(parsed.method, "city.enterShadowInfo");
+    assert!(parsed.args.is_empty(), "empty string args must decode to empty args vec");
+    assert_eq!(parsed.arg_zero(), None);
+    assert_eq!(parsed.raw_args, Some(Value::from("")));
+
+    // Non-empty scalar `args` (e.g. `args = 42` or `args = "payload"`) wraps into single-element `args`
+    let scalar_int_req = Value::map([
+        ("method", Value::from("activity.pingFlag")),
+        ("args", Value::Int(42)),
+        ("token", Value::from("tok_1")),
+        (
+            "callback",
+            Value::map([("callbackName", Value::from("activity.pingFlag_3"))]),
+        ),
+    ]);
+    let parsed_scalar =
+        RpcRequest::from_amf3_bytes(&amf3::encode(&scalar_int_req).unwrap()).unwrap();
+    assert_eq!(parsed_scalar.args, vec![Value::Int(42)]);
+    assert_eq!(parsed_scalar.arg_at_lua0(1), Some(&Value::Int(42)));
+}
+
+#[test]
+fn test_37_rpc_request_lua_zero_indexed_mixed_array_and_sparse_assoc_preserved() {
+    // Lua: `local args = {}; args[0] = 30001; args[1] = 90000001; args[2] = 5; args[4] = 99`
+    // `Amf3Module.cpp` encodes `#args == 2` in `dense` and `["0"]`, `["4"]` in `assoc`!
+    let mixed_args = Value::Array {
+        dense: vec![Value::Int(90_000_001), Value::Int(5)],
+        assoc: vec![
+            (String::from("0"), Value::Int(30_001)),
+            (String::from("4"), Value::Int(99)),
+            (String::from("tag"), Value::from("extra")),
+        ],
+    };
+    let req_val = Value::map([
+        ("method", Value::from("bag.useItem")),
+        ("args", mixed_args.clone()),
+        ("token", Value::from("tok_bag")),
+        (
+            "callback",
+            Value::map([("callbackName", Value::from("bag.useItem_8"))]),
+        ),
+    ]);
+    let bytes = amf3::encode(&req_val).unwrap();
+    let parsed = RpcRequest::from_amf3_bytes(&bytes).unwrap();
+
+    assert_eq!(parsed.arg_zero, Some(Value::Int(30_001)));
+    assert_eq!(parsed.arg_at_lua0(0), Some(&Value::Int(30_001)));
+    assert_eq!(parsed.arg_at_lua0(1), Some(&Value::Int(90_000_001)));
+    assert_eq!(parsed.arg_at_lua0(2), Some(&Value::Int(5)));
+    assert_eq!(parsed.arg_at_lua0(3), Some(&Value::Null));
+    assert_eq!(parsed.arg_at_lua0(4), Some(&Value::Int(99)));
+    assert_eq!(
+        parsed.args,
+        vec![
+            Value::Int(90_000_001),
+            Value::Int(5),
+            Value::Null,
+            Value::Int(99),
+        ]
+    );
+    assert_eq!(parsed.named_arg("tag"), Some(&Value::from("extra")));
+
+    // Round-trip via `to_amf3_bytes` preserves `assoc["0"]` and `assoc["4"]` losslessly
+    let rt_bytes = parsed.to_amf3_bytes().unwrap();
+    let rt_parsed = RpcRequest::from_amf3_bytes(&rt_bytes).unwrap();
+    assert_eq!(rt_parsed, parsed);
+    assert_eq!(rt_parsed.arg_at_lua0(0), Some(&Value::Int(30_001)));
+    assert_eq!(rt_parsed.arg_at_lua0(4), Some(&Value::Int(99)));
+}
+
+#[test]
+fn test_38_rpc_request_object_map_zero_only_named_and_sparse_nil_hole() {
+    // Case 1: `{ [0] = 20001 }` (`#args == 0` in Lua -> encoded as `0x0A` Object)
+    let zero_only = Value::map([
+        ("method", Value::from("forge.reinforce")),
+        ("args", Value::map([("0", Value::Int(20_001))])),
+        ("token", Value::from("tok")),
+        (
+            "callback",
+            Value::map([("callbackName", Value::from("forge.reinforce_1"))]),
+        ),
+    ]);
+    let p_zero = RpcRequest::from_amf3_bytes(&amf3::encode(&zero_only).unwrap()).unwrap();
+    assert_eq!(p_zero.arg_zero(), Some(&Value::Int(20_001)));
+    assert_eq!(p_zero.arg_at_lua0(0), Some(&Value::Int(20_001)));
+    assert_eq!(p_zero.arg_at_lua0(1), None);
+    assert_eq!(p_zero.args, vec![Value::Int(20_001)]);
+
+    // Case 2: `{ nil, 777 }` (`#args == 0` in Lua -> encoded as `0x0A` Object `{ "2": 777 }`)
+    let sparse_hole = Value::map([
+        ("method", Value::from("hero.equip")),
+        ("args", Value::map([("2", Value::Int(777))])),
+        ("token", Value::from("tok")),
+        (
+            "callback",
+            Value::map([("callbackName", Value::from("hero.equip_2"))]),
+        ),
+    ]);
+    let p_sparse = RpcRequest::from_amf3_bytes(&amf3::encode(&sparse_hole).unwrap()).unwrap();
+    assert_eq!(p_sparse.args, vec![Value::Null, Value::Int(777)]);
+    assert_eq!(p_sparse.arg_at_lua0(1), None);
+    assert_eq!(p_sparse.arg_at_lua0(2), Some(&Value::Int(777)));
+
+    // Case 3: Named object args (`{ boxId = 3 }` / `{ brid = 888, token = "sec" }`)
+    let named_obj = Value::map([
+        ("method", Value::from("activitySoulStoneRecruit.openBox")),
+        (
+            "args",
+            Value::map([
+                ("boxId", Value::Int(3)),
+                ("brid", Value::Int(888)),
+                ("token", Value::from("sec")),
+            ]),
+        ),
+        ("token", Value::from("tok")),
+        (
+            "callback",
+            Value::map([(
+                "callbackName",
+                Value::from("activitySoulStoneRecruit.openBox_9"),
+            )]),
+        ),
+    ]);
+    let p_named = RpcRequest::from_amf3_bytes(&amf3::encode(&named_obj).unwrap()).unwrap();
+    assert!(p_named.args.is_empty());
+    assert_eq!(p_named.named_arg("boxId"), Some(&Value::Int(3)));
+    assert_eq!(p_named.named_arg("brid"), Some(&Value::Int(888)));
+    assert_eq!(p_named.named_arg("token"), Some(&Value::from("sec")));
+
+    // Case 4: `Value::Object` with `"0"`, `"1"`, `"2"` keys
+    let obj_012 = Value::map([
+        ("method", Value::from("bag.useItem")),
+        (
+            "args",
+            Value::map([
+                ("0", Value::Int(30_005)),
+                ("1", Value::Int(90_000_099)),
+                ("2", Value::Int(3)),
+            ]),
+        ),
+        ("token", Value::from("tok")),
+        (
+            "callback",
+            Value::map([("callbackName", Value::from("bag.useItem_10"))]),
+        ),
+    ]);
+    let p_012 = RpcRequest::from_amf3_bytes(&amf3::encode(&obj_012).unwrap()).unwrap();
+    assert_eq!(p_012.arg_zero(), Some(&Value::Int(30_005)));
+    assert_eq!(p_012.arg_at_lua0(0), Some(&Value::Int(30_005)));
+    assert_eq!(p_012.arg_at_lua0(1), Some(&Value::Int(90_000_099)));
+    assert_eq!(p_012.arg_at_lua0(2), Some(&Value::Int(3)));
+    assert_eq!(p_012.args, vec![Value::Int(90_000_099), Value::Int(3)]);
+}
