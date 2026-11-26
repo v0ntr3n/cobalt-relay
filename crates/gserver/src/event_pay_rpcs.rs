@@ -1345,6 +1345,7 @@ fn build_sign_info_value(profile: &PlayerProfile, now_ts: u64) -> Value {
 
     let lv = profile.level.max(1) as i32;
     Value::map([
+        ("uid", u64_to_amf3(profile.uid)),
         ("sign_num", Value::Int(sign_num)),
         ("acc_num", Value::Int(sign_num)),
         ("last_sign_time", u64_to_amf3(last_sign_time)),
@@ -1403,9 +1404,28 @@ fn build_active_task_shop_shop_info(profile: &PlayerProfile) -> Value {
 fn build_eight_years_info(profile: &PlayerProfile, now_ts: u64) -> Value {
     let day_bucket = now_ts / 86_400;
     let m = get_sub_obj(profile, "eight_years");
-    let sign_info = player_json_to_amf3(&PlayerJson::Object(obj_nested(&m, "sign_info")));
+    let mut sign_info_map = obj_nested(&m, "sign_info");
+    for day in 1..=7u32 {
+        sign_info_map.entry(day.to_string()).or_insert_with(|| {
+            let mut row = BTreeMap::new();
+            row.insert("sign".into(), PlayerJson::from(false));
+            row.insert("rare".into(), PlayerJson::from(false));
+            PlayerJson::Object(row)
+        });
+    }
+    let sign_info = player_json_to_amf3(&PlayerJson::Object(sign_info_map));
     let edict_score = obj_u64(&m, "edict_score", 200) as i32;
-    let edict_info = player_json_to_amf3(&PlayerJson::Object(obj_nested(&m, "edict_info")));
+    let mut edict_info_map = obj_nested(&m, "edict_info");
+    for pid in 1..=15u32 {
+        edict_info_map.entry(pid.to_string()).or_insert_with(|| {
+            let mut row = BTreeMap::new();
+            row.insert("normal".into(), PlayerJson::from(false));
+            row.insert("rare".into(), PlayerJson::from(false));
+            row.insert("super".into(), PlayerJson::from(false));
+            PlayerJson::Object(row)
+        });
+    }
+    let edict_info = player_json_to_amf3(&PlayerJson::Object(edict_info_map));
     let lucky_ticket = obj_u64(&m, "lucky_ticket", 5) as i32;
     let lucky_ticket_buy = obj_u64(&m, "lucky_ticket_buy", 0) as i32;
     let lucky_num = obj_u64(&m, "lucky_num", 3) as i32;
@@ -1434,7 +1454,7 @@ fn build_eight_years_info(profile: &PlayerProfile, now_ts: u64) -> Value {
 
     let task_claimed = obj_nested(&m, "task_claimed");
     let mut task_entries = Vec::new();
-    for tid in 1..=6u32 {
+    for tid in 1..=15u32 {
         let tk = tid.to_string();
         let st = if obj_bool(&task_claimed, &tk, false) { 3 } else { 2 };
         task_entries.push((
@@ -3042,10 +3062,15 @@ pub fn try_handle_event_or_pay_rpc(
             };
             let ss = get_sub_obj(profile, "super_sign");
             let signed_days = player_json_to_amf3(&PlayerJson::Object(obj_nested(&ss, "signed")));
-            let acc_claimed = player_json_to_amf3(&PlayerJson::Object(obj_nested(&ss, "acc_claimed")));
+            let acc_claimed_map = obj_nested(&ss, "acc_claimed");
+            let acc_num = acc_claimed_map.len() as i32;
+            let acc_claimed = player_json_to_amf3(&PlayerJson::Object(acc_claimed_map));
             let sign_cnt = obj_u64(&ss, "sign_count", 0) as i32;
+            let cur_day = (((now_ts / 86_400) % 30) + 1) as i32;
             Some(Ok(PlayerRpcSuccess {
                 ret: Value::map([
+                    ("cur_day", Value::Int(cur_day)),
+                    ("acc_num", Value::Int(acc_num)),
                     ("sign_num", Value::Int(sign_cnt)),
                     ("signed_days", signed_days.clone()),
                     ("va_sign", signed_days),
