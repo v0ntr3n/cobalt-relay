@@ -38,9 +38,15 @@ pub const CLIENT_MAX_FRAME_BODY_LEN: usize = 64 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameError {
     ZeroLengthBody,
-    OversizedBody { declared: u32, max: usize },
+    OversizedBody {
+        declared: u32,
+        max: usize,
+    },
     InvalidClientFlags([u8; 4]),
-    Md5Mismatch { expected: [u8; 16], actual: [u8; 16] },
+    Md5Mismatch {
+        expected: [u8; 16],
+        actual: [u8; 16],
+    },
     Zlib(ZlibError),
     Amf3(Amf3Error),
     ClientSocketClosed(&'static str),
@@ -52,14 +58,20 @@ impl fmt::Display for FrameError {
         match self {
             Self::ZeroLengthBody => write!(f, "zero-length frame body (body_len == 0)"),
             Self::OversizedBody { declared, max } => {
-                write!(f, "oversized frame body {} bytes exceeds max {} bytes", declared, max)
+                write!(
+                    f,
+                    "oversized frame body {} bytes exceeds max {} bytes",
+                    declared, max
+                )
             }
             Self::InvalidClientFlags(fl) => write!(f, "invalid LCPacket flags {:?}", fl),
             Self::Md5Mismatch { .. } => write!(f, "BabelTime 16-byte MD5 integrity check failed"),
             Self::Zlib(e) => write!(f, "zlib decompression error: {}", e),
             Self::Amf3(e) => write!(f, "AMF3 codec error: {}", e),
             Self::ClientSocketClosed(reason) => write!(f, "Win32 CConnection closed: {}", reason),
-            Self::LuaRuntimeCrash(msg) => write!(f, "Win32 Lua runtime panic in Network.lua: {}", msg),
+            Self::LuaRuntimeCrash(msg) => {
+                write!(f, "Win32 Lua runtime panic in Network.lua: {}", msg)
+            }
         }
     }
 }
@@ -126,6 +138,52 @@ pub struct DecodedClientPacket {
     pub value: Amf3Value,
 }
 
+/// Observable parser stage of [`ServerRxStreamDecoder`] for deterministic connection lifecycle diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecoderParserState {
+    /// Buffer is empty (`0` unconsumed bytes); awaiting next 24-byte `LCPacket` frame.
+    Idle,
+    /// Partial 4-byte big-endian `body_len` prefix buffered (`1..=3` bytes).
+    AwaitingLengthPrefix { buffered_bytes: usize },
+    /// Validated `body_len` prefix present, awaiting remainder of 24-byte `LCPacket` header (`4..=23` bytes).
+    AwaitingLcHeader {
+        declared_body_len: u32,
+        buffered_bytes: usize,
+    },
+    /// Complete 24-byte `LCPacket` header buffered, awaiting remaining payload body bytes.
+    AwaitingFrameBody {
+        declared_body_len: u32,
+        buffered_body_bytes: usize,
+    },
+}
+
+impl fmt::Display for DecoderParserState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Idle => write!(f, "Idle"),
+            Self::AwaitingLengthPrefix { buffered_bytes } => {
+                write!(f, "AwaitingLengthPrefix({}/4B)", buffered_bytes)
+            }
+            Self::AwaitingLcHeader {
+                declared_body_len,
+                buffered_bytes,
+            } => write!(
+                f,
+                "AwaitingLcHeader(hdr={}/24B, declared_body={}B)",
+                buffered_bytes, declared_body_len
+            ),
+            Self::AwaitingFrameBody {
+                declared_body_len,
+                buffered_body_bytes,
+            } => write!(
+                f,
+                "AwaitingFrameBody(body={}/{}B)",
+                buffered_body_bytes, declared_body_len
+            ),
+        }
+    }
+}
+
 /// Stateful, DoS-hardened streaming decoder for client->server 24-byte `LCPacket` streams.
 /// Handles 1-byte TCP segmentation, pipelined multi-packet bursts, immediate `> 16 MiB`
 /// rejection BEFORE body allocation, MD5 integrity verification, and bounded zlib inflation.
@@ -158,6 +216,33 @@ impl ServerRxStreamDecoder {
         self.buf.len().saturating_sub(self.read_offset)
     }
 
+    /// Returns the exact current framing parser stage for structured connection diagnostics.
+    pub fn parser_state(&self) -> DecoderParserState {
+        let avail = self.buffered_len();
+        if avail == 0 {
+            return DecoderParserState::Idle;
+        }
+        if avail < 4 {
+            return DecoderParserState::AwaitingLengthPrefix {
+                buffered_bytes: avail,
+            };
+        }
+        let hdr_slice = &self.buf[self.read_offset..];
+        let declared_body_len =
+            u32::from_be_bytes([hdr_slice[0], hdr_slice[1], hdr_slice[2], hdr_slice[3]]);
+        if avail < CLIENT_LC_HEADER_LEN {
+            DecoderParserState::AwaitingLcHeader {
+                declared_body_len,
+                buffered_bytes: avail,
+            }
+        } else {
+            DecoderParserState::AwaitingFrameBody {
+                declared_body_len,
+                buffered_body_bytes: avail - CLIENT_LC_HEADER_LEN,
+            }
+        }
+    }
+
     /// Feeds incoming TCP bytes and extracts all complete, validated client packets.
     /// Immediately returns `Err(FrameError::OversizedBody)` as soon as a 4-byte or 24-byte header
     /// declares `body_len > max_body_len`, WITHOUT waiting for or allocating the oversized body!
@@ -173,7 +258,8 @@ impl ServerRxStreamDecoder {
                 break;
             }
             let hdr_slice = &self.buf[self.read_offset..];
-            let body_len = u32::from_be_bytes([hdr_slice[0], hdr_slice[1], hdr_slice[2], hdr_slice[3]]);
+            let body_len =
+                u32::from_be_bytes([hdr_slice[0], hdr_slice[1], hdr_slice[2], hdr_slice[3]]);
             if body_len == 0 {
                 self.clear();
                 return Err(FrameError::ZeroLengthBody);
@@ -192,7 +278,10 @@ impl ServerRxStreamDecoder {
 
             let flags = [hdr_slice[4], hdr_slice[5], hdr_slice[6], hdr_slice[7]];
             if self.require_strict_flags
-                && ((flags[0] != 0 && flags[0] != 1) || flags[1] != 1 || flags[2] != 1 || flags[3] != 1)
+                && ((flags[0] != 0 && flags[0] != 1)
+                    || flags[1] != 1
+                    || flags[2] != 1
+                    || flags[3] != 1)
             {
                 self.clear();
                 return Err(FrameError::InvalidClientFlags(flags));
@@ -275,7 +364,10 @@ impl ServerRxStreamDecoder {
 
 /// Encodes a single server->client 8-byte framed packet (`multi = 0`):
 /// `head = [body_len BE (4B), flag0=0, zipped=head[5], multi=0 (head[6]), flag3=0]`.
-pub fn encode_server_single_frame(payload: &Amf3Value, compress: bool) -> Result<Vec<u8>, FrameError> {
+pub fn encode_server_single_frame(
+    payload: &Amf3Value,
+    compress: bool,
+) -> Result<Vec<u8>, FrameError> {
     let raw_amf3 = Amf3Encoder::encode(payload)?;
     encode_server_raw_frame(&raw_amf3, compress, false)
 }
@@ -339,10 +431,10 @@ pub fn encode_server_raw_frame(
     let body_len = body.len() as u32;
     let mut out = Vec::with_capacity(SERVER_RX_HEADER_LEN + body.len());
     out.extend_from_slice(&body_len.to_be_bytes()); // head[0..4] -> Lua 1..4
-    out.push(0x00);                                 // head[4]    -> Lua 5 (flag0)
-    out.push(if compress { 1 } else { 0 });         // head[5]    -> Lua 6 (zipped!)
-    out.push(if multi { 1 } else { 0 });            // head[6]    -> Lua 7 (multi!)
-    out.push(0x00);                                 // head[7]    -> Lua 8 (flag3)
+    out.push(0x00); // head[4]    -> Lua 5 (flag0)
+    out.push(if compress { 1 } else { 0 }); // head[5]    -> Lua 6 (zipped!)
+    out.push(if multi { 1 } else { 0 }); // head[6]    -> Lua 7 (multi!)
+    out.push(0x00); // head[7]    -> Lua 8 (flag3)
     out.extend_from_slice(&body);
     Ok(out)
 }
@@ -462,7 +554,12 @@ impl Win32ClientSimulator {
     /// increments `self.mId` first (`_2`, `_3`, ...), registers `mContext[callbackName]`,
     /// AMF3-encodes `{ method, args, token, callback = { callbackName } }`, and wraps in a
     /// 24-byte `LCPacket` (`compress = true`).
-    pub fn build_send_msg(&mut self, method: &str, args: Amf3Value, compress: bool) -> (String, Vec<u8>) {
+    pub fn build_send_msg(
+        &mut self,
+        method: &str,
+        args: Amf3Value,
+        compress: bool,
+    ) -> (String, Vec<u8>) {
         self.m_id += 1;
         let callback_name = format!("{}_{}", method, self.m_id);
         let request = Amf3Value::anonymous_object(vec![
@@ -471,7 +568,10 @@ impl Win32ClientSimulator {
             ("token", Amf3Value::from_str(&self.token)),
             (
                 "callback",
-                Amf3Value::anonymous_object(vec![("callbackName", Amf3Value::from_str(&callback_name))]),
+                Amf3Value::anonymous_object(vec![(
+                    "callbackName",
+                    Amf3Value::from_str(&callback_name),
+                )]),
             ),
         ]);
         self.contexts.insert(
@@ -494,7 +594,10 @@ impl Win32ClientSimulator {
             ("token", Amf3Value::from_str(&self.token)),
             (
                 "callback",
-                Amf3Value::anonymous_object(vec![("callbackName", Amf3Value::from_str("user.stat"))]),
+                Amf3Value::anonymous_object(vec![(
+                    "callbackName",
+                    Amf3Value::from_str("user.stat"),
+                )]),
             ),
         ]);
         let raw_amf3 = Amf3Encoder::encode(&request).expect("valid stat AMF3");
@@ -561,8 +664,10 @@ impl Win32ClientSimulator {
                 if avail < SERVER_RX_HEADER_LEN {
                     break;
                 }
-                let hdr_slice = &self.recv_buf[self.recv_cursor..self.recv_cursor + SERVER_RX_HEADER_LEN];
-                let body_len = u32::from_be_bytes([hdr_slice[0], hdr_slice[1], hdr_slice[2], hdr_slice[3]]);
+                let hdr_slice =
+                    &self.recv_buf[self.recv_cursor..self.recv_cursor + SERVER_RX_HEADER_LEN];
+                let body_len =
+                    u32::from_be_bytes([hdr_slice[0], hdr_slice[1], hdr_slice[2], hdr_slice[3]]);
                 // Exact `CConnection.cpp:493, 528-533` check!
                 if body_len == 0 || (body_len as usize) > CLIENT_MAX_FRAME_BODY_LEN {
                     self.socket_closed = true;
@@ -628,7 +733,8 @@ impl Win32ClientSimulator {
         if multi != 0 {
             let ret_field = data.get_field("ret").ok_or_else(|| {
                 FrameError::LuaRuntimeCrash(
-                    "Network.lua:112: attempt to get length of field 'ret' (a nil value)".to_string(),
+                    "Network.lua:112: attempt to get length of field 'ret' (a nil value)"
+                        .to_string(),
                 )
             })?;
             match ret_field {
@@ -689,7 +795,8 @@ impl Win32ClientSimulator {
         // `Network.lua:132-134`: `if(#rets == 0) then Logger.showFatal("onBodyData rets 不合法") end`
         if rets.is_empty() {
             return Err(FrameError::LuaRuntimeCrash(
-                "Network.lua:133: Logger.showFatal('onBodyData rets 不合法') (#rets == 0)".to_string(),
+                "Network.lua:133: Logger.showFatal('onBodyData rets 不合法') (#rets == 0)"
+                    .to_string(),
             ));
         }
 

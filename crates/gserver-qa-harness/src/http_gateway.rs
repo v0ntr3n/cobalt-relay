@@ -14,8 +14,8 @@
 //!   and returns `"host": "<game_host>", "port": <game_port>`)
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::io::{self, Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -65,7 +65,7 @@ pub struct HttpSdkGateway {
 }
 
 impl HttpSdkGateway {
-    pub fn start(bind_addr: &str, config: HttpGatewayConfig) -> std::io::Result<Self> {
+    pub fn start(bind_addr: &str, config: HttpGatewayConfig) -> io::Result<Self> {
         let listener = TcpListener::bind(bind_addr)?;
         listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
@@ -86,7 +86,7 @@ impl HttpSdkGateway {
                             let _ = handle_http_client(stream, &cfg, &m, &sess);
                         });
                     }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(2));
                     }
                     Err(_) => {
@@ -251,7 +251,7 @@ pub fn route_sdk_http_request(
 }
 
 fn resolve_pid(
-    params: & std::collections::BTreeMap<String, String>,
+    params: &std::collections::BTreeMap<String, String>,
     phpsessid: Option<&str>,
     cookie_sessions: &Mutex<HashMap<String, String>>,
 ) -> String {
@@ -287,20 +287,29 @@ fn handle_http_client(
     cfg: &HttpGatewayConfig,
     metrics: &HttpGatewayMetrics,
     cookie_sessions: &Mutex<HashMap<String, String>>,
-) -> std::io::Result<()> {
+) -> io::Result<()> {
+    // Clear Winsock2 `FIONBIO` non-blocking mode inherited from `listener.set_nonblocking(true)`
+    // before installing blocking read/write timeouts.
+    stream.set_nonblocking(false)?;
+    let _ = stream.set_nodelay(true);
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
 
     let mut req_buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 2048];
     loop {
-        let n = stream.read(&mut chunk)?;
-        if n == 0 {
-            return Ok(());
-        }
-        req_buf.extend_from_slice(&chunk[..n]);
-        if req_buf.windows(4).any(|w| w == b"\r\n\r\n") || req_buf.len() >= MAX_HTTP_HEADER_BYTES {
-            break;
+        match stream.read(&mut chunk) {
+            Ok(0) => return Ok(()),
+            Ok(n) => {
+                req_buf.extend_from_slice(&chunk[..n]);
+                if req_buf.windows(4).any(|w| w == b"\r\n\r\n")
+                    || req_buf.len() >= MAX_HTTP_HEADER_BYTES
+                {
+                    break;
+                }
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
         }
     }
 
@@ -343,7 +352,9 @@ fn handle_http_client(
     resp.push_str(&body);
 
     stream.write_all(resp.as_bytes())?;
-    stream.flush()
+    stream.flush()?;
+    let _ = stream.shutdown(Shutdown::Write);
+    Ok(())
 }
 
 fn json_escape(s: &str) -> String {

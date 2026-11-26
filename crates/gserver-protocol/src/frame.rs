@@ -27,6 +27,8 @@
 //!   - `[7]` `flag3` (reserved, `0x00`)
 //!   - `[8..8+body_len]` S2C payload
 
+use std::fmt;
+
 use crate::error::{FrameError, ProtocolError};
 use crate::md5::compute_babeltime_md5;
 use crate::zlib::{
@@ -59,10 +61,7 @@ pub enum C2sFrameMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum C2sWireKind {
     /// 24-byte BabelTime `LCPacket` frame (`compressed` indicates `flags[0] == 1`).
-    LcPacket24 {
-        compressed: bool,
-        md5: [u8; 16],
-    },
+    LcPacket24 { compressed: bool, md5: [u8; 16] },
     /// Raw 4-byte big-endian length-prefixed AMF3 frame.
     Raw4Byte,
 }
@@ -78,11 +77,54 @@ pub struct C2sFrame {
     pub amf3_payload: Vec<u8>,
 }
 
+/// Observable parser stage of [`ClientRxDecoder`] for connection lifecycle diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum C2sParserState {
+    /// No unconsumed bytes buffered.
+    Idle,
+    /// Partial 4-byte `body_len` prefix buffered (`1..=3` bytes).
+    AwaitingLengthPrefix { buffered_bytes: usize },
+    /// Partial `LCPacket` header buffered (`4..=23` bytes).
+    AwaitingHeader {
+        declared_body_len: u32,
+        buffered_bytes: usize,
+    },
+    /// Header buffered; awaiting remaining frame payload bytes.
+    AwaitingBody {
+        declared_body_len: u32,
+        buffered_bytes: usize,
+    },
+}
+
+impl fmt::Display for C2sParserState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Idle => write!(f, "Idle"),
+            Self::AwaitingLengthPrefix { buffered_bytes } => {
+                write!(f, "AwaitingLengthPrefix({}/4B)", buffered_bytes)
+            }
+            Self::AwaitingHeader {
+                declared_body_len,
+                buffered_bytes,
+            } => write!(
+                f,
+                "AwaitingHeader(buffered={}B, declared_body={}B)",
+                buffered_bytes, declared_body_len
+            ),
+            Self::AwaitingBody {
+                declared_body_len,
+                buffered_bytes,
+            } => write!(
+                f,
+                "AwaitingBody(buffered={}B, declared_body={}B)",
+                buffered_bytes, declared_body_len
+            ),
+        }
+    }
+}
+
 /// Encodes an AMF3 C2S payload into a 24-byte BabelTime `LCPacket` matching `LCPacket::makeLCPacket`.
-pub fn encode_c2s_lcpacket(
-    amf3_payload: &[u8],
-    compress: bool,
-) -> Result<Vec<u8>, ProtocolError> {
+pub fn encode_c2s_lcpacket(amf3_payload: &[u8], compress: bool) -> Result<Vec<u8>, ProtocolError> {
     encode_c2s_lcpacket_with_mode(amf3_payload, compress, CompressionMode::FixedHuffmanLz77)
 }
 
@@ -103,8 +145,8 @@ pub fn encode_c2s_lcpacket_with_mode(
     if body.is_empty() {
         return Err(FrameError::ZeroBodyLength.into());
     }
-    let body_len = u32::try_from(body.len())
-        .map_err(|_| FrameError::PayloadOverflow { len: body.len() })?;
+    let body_len =
+        u32::try_from(body.len()).map_err(|_| FrameError::PayloadOverflow { len: body.len() })?;
     let md5 = compute_babeltime_md5(body);
 
     let mut frame = Vec::with_capacity(C2S_LCPACKET_HEADER_SIZE + body.len());
@@ -176,6 +218,52 @@ impl ClientRxDecoder {
         self.buf.len().saturating_sub(self.read_offset)
     }
 
+    /// Returns the current parser state for structured connection lifecycle diagnostics.
+    pub fn parser_state(&self) -> C2sParserState {
+        let avail = &self.buf[self.read_offset..];
+        if avail.is_empty() {
+            return C2sParserState::Idle;
+        }
+        if avail.len() < 4 {
+            return C2sParserState::AwaitingLengthPrefix {
+                buffered_bytes: avail.len(),
+            };
+        }
+        let declared_body_len = u32::from_be_bytes([avail[0], avail[1], avail[2], avail[3]]);
+        match self.mode {
+            C2sFrameMode::Raw4Byte => C2sParserState::AwaitingBody {
+                declared_body_len,
+                buffered_bytes: avail.len(),
+            },
+            C2sFrameMode::LcPacket24 => {
+                if avail.len() < C2S_LCPACKET_HEADER_SIZE {
+                    C2sParserState::AwaitingHeader {
+                        declared_body_len,
+                        buffered_bytes: avail.len(),
+                    }
+                } else {
+                    C2sParserState::AwaitingBody {
+                        declared_body_len,
+                        buffered_bytes: avail.len(),
+                    }
+                }
+            }
+            C2sFrameMode::Auto => {
+                if avail.len() < C2S_LCPACKET_HEADER_SIZE && (avail.len() < 5 || avail[4] <= 0x01) {
+                    C2sParserState::AwaitingHeader {
+                        declared_body_len,
+                        buffered_bytes: avail.len(),
+                    }
+                } else {
+                    C2sParserState::AwaitingBody {
+                        declared_body_len,
+                        buffered_bytes: avail.len(),
+                    }
+                }
+            }
+        }
+    }
+
     /// Attempts to decode the next complete [`C2sFrame`] from the internal buffer.
     /// Returns `Ok(None)` when more socket bytes are required.
     pub fn next_frame(&mut self) -> Result<Option<C2sFrame>, ProtocolError> {
@@ -239,11 +327,7 @@ impl ClientRxDecoder {
             }
 
             let flags = [avail[4], avail[5], avail[6], avail[7]];
-            if (flags[0] != 0 && flags[0] != 1)
-                || flags[1] != 1
-                || flags[2] != 1
-                || flags[3] != 1
-            {
+            if (flags[0] != 0 && flags[0] != 1) || flags[1] != 1 || flags[2] != 1 || flags[3] != 1 {
                 return Err(FrameError::InvalidLcFlags(flags).into());
             }
 
@@ -431,8 +515,9 @@ impl ServerTxEncoder {
         if wire_body.is_empty() {
             return Err(FrameError::ZeroBodyLength.into());
         }
-        let body_len = u32::try_from(wire_body.len())
-            .map_err(|_| FrameError::PayloadOverflow { len: wire_body.len() })?;
+        let body_len = u32::try_from(wire_body.len()).map_err(|_| FrameError::PayloadOverflow {
+            len: wire_body.len(),
+        })?;
         if body_len > self.max_body_len {
             return Err(FrameError::BodyTooLarge {
                 body_len,
