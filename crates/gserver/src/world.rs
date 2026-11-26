@@ -11,20 +11,23 @@ use gserver_data::{protagonist_by_utid, GameDataStore};
 use gserver_gameplay::engine::GameplayEngine;
 use gserver_gameplay::mail::RewardEntry;
 use gserver_http::{MapiService, RoleSummary};
-use gserver_player::{JsonValue as PlayerJson, PlayerProfile, PlayerStore};
+use gserver_player::{
+    is_valid_battle_grid_cell, JsonValue as PlayerJson, PlayerProfile, PlayerStore,
+};
 use gserver_protocol::{encode_s2c_single_frame, S2cEnvelope, ServerTxEncoder, Value};
 use gserver_rpc_catalog::bootstrap::{
     build_random_names_ret, BarrageState, EnterViewSnapshot, VaConfig,
 };
 
 use crate::bridge::{
-    catalog_amf3_to_protocol, dto_to_amf3, dto_to_player_json, player_json_to_amf3,
-    player_json_to_dto, profile_to_gameplay_state_with_store, sync_gameplay_back_to_profile,
-    to_gameplay_request, u64_to_amf3,
+    catalog_amf3_to_protocol, dto_to_amf3, dto_to_player_json, export_raffle_state_to_profile,
+    import_raffle_state_from_profile, player_json_to_amf3, player_json_to_dto,
+    profile_to_gameplay_state_with_store, sync_gameplay_back_to_profile, to_gameplay_request,
+    u64_to_amf3,
 };
 use crate::bxh_snapshot::BxhSnapshot;
 use crate::config::DaemonConfig;
-use crate::player_rpcs::try_handle_player_rpc;
+use crate::player_rpcs::{normalize_player_method, try_handle_player_rpc};
 
 /// Per-TCP-connection session state tracked across RPCs.
 #[derive(Debug, Default, Clone)]
@@ -34,6 +37,7 @@ pub struct ConnectionSession {
     pub group_id: String,
     pub logged_in_uid: Option<u64>,
     pub session_token: String,
+    pub is_tm: bool,
 }
 
 /// Output envelopes produced by handling one client `RpcRequest`.
@@ -240,7 +244,7 @@ impl ServerWorld {
         let now_ts = Self::now_unix_secs();
         let now_i64 = now_ts as i64;
 
-        if req.method == "ping" || req.method == "user.ping" {
+        if matches!(req.method.as_str(), "ping" | "user.ping" | "tmUser.ping") {
             return HandledRpc {
                 caller_envelopes: vec![S2cEnvelope::ping().with_time(now_i64)],
                 peer_envelopes: Vec::new(),
@@ -450,6 +454,9 @@ impl ServerWorld {
                                             Some(&self.data_store),
                                         ),
                                     );
+                                    if let Some(raffle_st) = import_raffle_state_from_profile(&prof) {
+                                        guard.gameplay.raffle.import_state(resolved_uid, raffle_st);
+                                    }
                                     if !prof.copy_progress.is_empty() {
                                         let cp_dto = player_json_to_dto(&PlayerJson::Object(
                                             prof.copy_progress,
@@ -484,6 +491,13 @@ impl ServerWorld {
             return Self::err_reply(req, "user_not_logged_in", now_i64);
         };
 
+        let (norm_world_method, req_is_tm) = normalize_player_method(&req.method);
+        if req_is_tm || req.method.starts_with("timeMachine") {
+            session.is_tm = true;
+        } else if req.method == "user.getUser" {
+            session.is_tm = false;
+        }
+
         // Check `PlayerStore`-backed progression, bag, hero, squad, arming, forge & extended RPCs
         let WorldInner {
             ref mut store,
@@ -493,7 +507,10 @@ impl ServerWorld {
         if let Some(player_res) =
             try_handle_player_rpc(store, gameplay, &self.data_store, uid, req, now_ts)
         {
-            if req.method == "formation.getOtherPositionInfo" {
+            if matches!(
+                norm_world_method.as_str(),
+                "formation.getOtherPositionInfo" | "formation.getOtherServerPositionInfo"
+            ) {
                 if let Err(ref code) = player_res {
                     if code == "target_player_not_found" {
                         if let Some(target_uid) = req.args.first().and_then(Value::as_i64) {
@@ -518,9 +535,7 @@ impl ServerWorld {
                     if !session.session_token.is_empty() {
                         main_env = main_env.with_token(session.session_token.clone());
                     }
-                    let mut caller_envelopes = Vec::with_capacity(1 + ok.caller_pushes.len());
-                    caller_envelopes.push(main_env);
-                    caller_envelopes.extend(ok.caller_pushes);
+                    let caller_envelopes = assemble_ordered_caller_envelopes(main_env, ok.caller_pushes);
                     HandledRpc {
                         caller_envelopes,
                         peer_envelopes: ok.peer_pushes,
@@ -530,7 +545,8 @@ impl ServerWorld {
             };
         }
 
-        match req.method.as_str() {
+        match norm_world_method.as_str() {
+            "user.enter" => Self::ok_reply(req, session, Value::String("ok".into()), now_i64),
             "user.getUser" => {
                 let Some(profile) = guard.store.get_player(uid) else {
                     return Self::err_reply(req, "player_missing", now_i64);
@@ -604,26 +620,40 @@ impl ServerWorld {
                 let Some(profile) = guard.store.get_player(uid) else {
                     return Self::err_reply(req, "player_missing", now_i64);
                 };
-                // `FormationData:parseData` iterates `pairs(toarray(data["formation"]))` and
-                // `FormationItem:addArmature` requires every hid in `formation` to exist in `allHeros` (no `0`s!).
-                // Battle grid cells follow `attack_sep_list = {3, 6, 9, 2, 5, 8}`.
+                // `FormationPanel.lua:20` ONLY renders the 6 visible cells `pos_list = {2, 3, 5, 6, 8, 9}`
+                // (`DEFAULT_CELLS = [3, 6, 9, 2, 5, 8]`), and every hid must exist in `allHeros`!
                 const DEFAULT_CELLS: [u8; 6] = [3, 6, 9, 2, 5, 8];
-                let mut grid_entries: Vec<(String, Value)> = profile
-                    .formation
-                    .grid_formation
-                    .iter()
-                    .filter(|(_, &hid)| hid > 0 && profile.heroes.contains_key(&hid))
-                    .map(|(cell, &hid)| (cell.to_string(), u64_to_amf3(hid)))
-                    .collect();
-                if grid_entries.is_empty() {
+                let mut used_cells: BTreeMap<u8, u64> = BTreeMap::new();
+                let mut unplaced_hids: Vec<u64> = Vec::new();
+                for (&cell, &hid) in &profile.formation.grid_formation {
+                    if hid > 0 && profile.heroes.contains_key(&hid) {
+                        if is_valid_battle_grid_cell(cell) && !used_cells.contains_key(&cell) {
+                            used_cells.insert(cell, hid);
+                        } else {
+                            unplaced_hids.push(hid);
+                        }
+                    }
+                }
+                for hid in unplaced_hids {
+                    if let Some(&free_cell) =
+                        DEFAULT_CELLS.iter().find(|c| !used_cells.contains_key(c))
+                    {
+                        used_cells.insert(free_cell, hid);
+                    }
+                }
+                if used_cells.is_empty() {
                     for (idx, slot) in (1..=6u8).enumerate() {
                         if let Some(&hid) = profile.formation.position.get(&slot) {
                             if hid > 0 && profile.heroes.contains_key(&hid) {
-                                grid_entries.push((DEFAULT_CELLS[idx].to_string(), u64_to_amf3(hid)));
+                                used_cells.insert(DEFAULT_CELLS[idx], hid);
                             }
                         }
                     }
                 }
+                let grid_entries: Vec<(String, Value)> = used_cells
+                    .into_iter()
+                    .map(|(cell, hid)| (cell.to_string(), u64_to_amf3(hid)))
+                    .collect();
                 let formation_val = if grid_entries.is_empty() {
                     Value::empty_array()
                 } else {
@@ -761,48 +791,11 @@ impl ServerWorld {
                 Self::ok_reply(req, session, Value::empty_array(), now_i64)
             }
 
-            "dota.getInfo" => {
-                let ret_val = Value::map([
-                    ("normal_layer", Value::Int(0)),
-                    ("normal_max_layer", Value::Int(0)),
-                    ("is_open", Value::Int(0)),
-                    ("defeat_num", Value::Int(0)),
-                    ("normal_reset_num", Value::Int(0)),
-                    ("normal_buy_attack_num", Value::Int(0)),
-                    ("normal_buy_attack_num_used", Value::Int(0)),
-                    ("normal_max_attack_layer", Value::Int(0)),
-                    ("elite_attack_num", Value::Int(3)),
-                    ("elite_max_layer", Value::Int(0)),
-                    ("elite_buy_attack_num", Value::Int(0)),
-                    ("elite_cur_layer", Value::Int(0)),
-                    ("purgatory_max_layer", Value::Int(0)),
-                    ("purgatory_buy_time", Value::Int(0)),
-                    ("purgatory_attack_time", Value::Int(0)),
-                    ("purgatory_last_layer", Value::Int(1)),
-                ]);
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
 
-            "achievements.getShowAchievements" => {
-                let ret_val = Value::map([
-                    ("point", Value::Int(0)),
-                    ("achievements", Value::empty_array()),
-                ]);
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
 
-            "discover.getRewardCity" => {
-                let ret_val = Value::map([
-                    ("reward", Value::empty_array()),
-                    ("pass_city", Value::empty_array()),
-                    ("kill_num", Value::empty_array()),
-                    ("elite_max_layer", Value::Int(0)),
-                    ("elite_cur_layer", Value::Int(0)),
-                    ("elite_attack_num", Value::Int(3)),
-                    ("elite_buy_attack_num", Value::Int(0)),
-                ]);
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
+
+
+
 
             "praise.getPraiseInfo" => {
                 let ret_val = Value::map([
@@ -824,15 +817,7 @@ impl ServerWorld {
                 Self::ok_reply(req, session, ret_val, now_i64)
             }
 
-            "awakeCopy.getAwakeCopyInfo" => {
-                let ret_val = Value::map([
-                    ("pass_str", Value::empty_array()),
-                    ("last_attack_num", Value::Int(3)),
-                    ("last_help_num", Value::Int(3)),
-                    ("buy_num", Value::Int(0)),
-                ]);
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
+
 
             "activityRechargeRebate.getInfo" => Self::ok_reply(
                 req,
@@ -907,21 +892,7 @@ impl ServerWorld {
                 Self::ok_reply(req, session, ret_val, now_i64)
             }
 
-            "dailytask.getInfo" => {
-                let level = guard
-                    .store
-                    .get_player(uid)
-                    .map(|p| p.level as i32)
-                    .unwrap_or(1);
-                let ret_val = Value::map([
-                    ("super_checkin_score", Value::Int(0)),
-                    ("active_point", Value::Int(0)),
-                    ("level", Value::Int(level)),
-                    ("va_receive_point", Value::empty_array()),
-                    ("dailytask", Value::empty_array()),
-                ]);
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
+
 
             "friend.getFriendInfo" => {
                 let ret_val = Value::map([
@@ -958,11 +929,7 @@ impl ServerWorld {
                 Self::ok_reply(req, session, ret_val, now_i64)
             }
 
-            "recruitment.getInfo" => {
-                let ret_val =
-                    Value::map([("reward", Value::empty_array()), ("num", Value::Int(0))]);
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
+
 
             "firstGift.getRechargeGold" => Self::ok_reply(req, session, Value::Int(0), now_i64),
 
@@ -1064,11 +1031,15 @@ impl ServerWorld {
                     if let Some(gp_state) = guard.gameplay.players.get(&uid).cloned() {
                         let copy_prog =
                             dto_to_player_json(&guard.gameplay.copy.export_player_progress(uid));
+                        let raffle_opt = guard.gameplay.raffle.export_state(uid);
                         let pid_opt = guard.store.get_player(uid).map(|p| p.pid.clone());
                         let _ = guard.store.mutate_player(uid, now_ts, |profile| {
                             sync_gameplay_back_to_profile(&gp_state, profile, now_ts);
                             if let PlayerJson::Object(cp_map) = copy_prog {
                                 profile.copy_progress = cp_map;
+                            }
+                            if let Some(ref rst) = raffle_opt {
+                                export_raffle_state_to_profile(rst, profile);
                             }
                             Ok(())
                         });
@@ -1078,7 +1049,6 @@ impl ServerWorld {
                     }
                 }
 
-                let mut caller_envelopes = Vec::with_capacity(1 + outcome.client_pushes.len());
                 let main_env = if outcome.response.err == "ok" {
                     S2cEnvelope::ok_response(
                         &req.callback_name,
@@ -1089,14 +1059,16 @@ impl ServerWorld {
                 }
                 .with_token(session.session_token.clone())
                 .with_time(now_i64);
-                caller_envelopes.push(main_env);
 
-                for cp in outcome.client_pushes {
-                    caller_envelopes.push(
+                let converted_pushes: Vec<S2cEnvelope> = outcome
+                    .client_pushes
+                    .into_iter()
+                    .map(|cp| {
                         S2cEnvelope::push(cp.callback_name, dto_to_amf3(&cp.ret, true))
-                            .with_time(cp.time as i64),
-                    );
-                }
+                            .with_time(cp.time as i64)
+                    })
+                    .collect();
+                let caller_envelopes = assemble_ordered_caller_envelopes(main_env, converted_pushes);
 
                 let peer_envelopes = outcome
                     .peer_pushes
@@ -1165,6 +1137,31 @@ impl ServerWorld {
     }
 }
 
+/// Orders S2C caller envelopes per **B-09** & **B-12**:
+/// - Pre-response pushes (`re.[tm]Hero.new`, `[tm]Bag.update`, `sc.recruitment.addnum`, etc.) are sent **BEFORE** `main_env`
+///   so `HerosData` & `BagData` have newly created `hid`s/`item_id`s populated before Lua `callback(ret.ret, args)` runs!
+/// - Post-response pushes (`[tm]User.updateUser`) are sent **AFTER** `main_env` so `SpendManager` / callbacks never double-apply Gold/Copper!
+fn assemble_ordered_caller_envelopes(
+    main_env: S2cEnvelope,
+    pushes: Vec<S2cEnvelope>,
+) -> Vec<S2cEnvelope> {
+    let mut out = Vec::with_capacity(1 + pushes.len());
+    let mut post_pushes = Vec::new();
+    for p in pushes {
+        if matches!(
+            p.callback_name.as_deref(),
+            Some("user.updateUser" | "tmUser.updateUser")
+        ) {
+            post_pushes.push(p);
+        } else {
+            out.push(p);
+        }
+    }
+    out.push(main_env);
+    out.extend(post_pushes);
+    out
+}
+
 fn gp_register_and_role(
     profile: &PlayerProfile,
     data_store: &GameDataStore,
@@ -1175,6 +1172,9 @@ fn gp_register_and_role(
         profile,
         Some(data_store),
     ));
+    if let Some(raffle_st) = import_raffle_state_from_profile(profile) {
+        gameplay.raffle.import_state(profile.uid, raffle_st);
+    }
     if !profile.copy_progress.is_empty() {
         let cp_dto = player_json_to_dto(&PlayerJson::Object(profile.copy_progress.clone()));
         gameplay.copy.import_player_progress(profile.uid, &cp_dto);

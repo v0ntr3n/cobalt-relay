@@ -276,6 +276,7 @@ impl BagCategory {
             1_700_001..=1_800_000 => Self::BingShuFrag,
             1_850_001..=1_900_000 => Self::JobSkillFrag,
             3_100_001..=3_200_000 => Self::ArmFrag,
+            3_200_001..=3_300_000 => Self::TreasFrag,
             3_300_001..=3_400_000 => Self::AwakeFrag,
             3_400_001..=3_500_000 => Self::PetFrag,
             3_500_001..=3_600_000 => Self::GodArmFrag,
@@ -293,6 +294,7 @@ impl BagCategory {
             4_700_001..=4_800_000 => Self::SoulStoneFrag,
             4_800_001..=4_900_000 => Self::SoulJade,
             4_900_001..=5_000_000 => Self::SoulJadeFrag,
+            5_200_001..=5_300_000 => Self::WareHouse,
             5_300_001..=5_400_000 => Self::PloyFrag,
             5_400_001..=5_500_000 => Self::TopAnimal,
             5_500_001..=5_600_000 => Self::TopAnimalFrag,
@@ -381,6 +383,16 @@ impl BagState {
             slots: BTreeMap::new(),
             grid_max,
             next_item_id: 90_000_001,
+        }
+    }
+
+    pub fn next_item_id(&self) -> u64 {
+        self.next_item_id
+    }
+
+    pub fn set_next_item_id(&mut self, next_id: u64) {
+        if next_id > self.next_item_id {
+            self.next_item_id = next_id;
         }
     }
 

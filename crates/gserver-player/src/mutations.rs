@@ -371,10 +371,10 @@ pub struct ExploreSoulOutcome {
 // Internal Data-Driven Helpers
 // ============================================================================
 
-fn lookup_item_db_row<'a>(
-    store: &'a gserver_data::GameDataStore,
+fn lookup_item_db_row(
+    store: &gserver_data::GameDataStore,
     tid: u32,
-) -> Option<&'a gserver_data::JsonValue> {
+) -> Option<&gserver_data::JsonValue> {
     let dir = store.export_dir()?;
     let id64 = u64::from(tid);
     for (db, tbl) in [
@@ -1389,6 +1389,7 @@ impl PlayerProfile {
         self.apply_bag_item_use_plan(template_id, count, plan, &mut bag_deltas, now_ts)
     }
 
+    #[allow(clippy::type_complexity)]
     fn plan_bag_item_use(
         &self,
         tid: u32,
@@ -1531,6 +1532,7 @@ impl PlayerProfile {
         Ok((triplets, required_extra_items))
     }
 
+    #[allow(clippy::type_complexity)]
     fn apply_bag_item_use_plan(
         &mut self,
         tid: u32,
@@ -2049,7 +2051,7 @@ impl PlayerProfile {
                         class == ItemClass::Spirit
                     }
                     RefineryDecomposeKind::GodArm => class == ItemClass::GodArm,
-                    RefineryDecomposeKind::GodAnimal => class == ItemClass::GodAnimal,
+                    RefineryDecomposeKind::GodAnimal => matches!(class, ItemClass::GodAnimal | ItemClass::TopAnimal),
                     RefineryDecomposeKind::Brochures => class == ItemClass::Brochure,
                     RefineryDecomposeKind::YanWu => class == ItemClass::YanWu,
                     RefineryDecomposeKind::SoulSkill => class == ItemClass::SoulSkill,
@@ -2633,7 +2635,7 @@ impl PlayerProfile {
         })
     }
 
-    fn resolve_item_frag_recipe(
+    pub fn resolve_item_frag_recipe(
         frag_tid: u32,
         data_store: Option<&gserver_data::GameDataStore>,
     ) -> Result<(u32, u32)> {
@@ -2662,14 +2664,14 @@ impl PlayerProfile {
         let (class, _) = classify_template_id(frag_tid)?;
         let (aim, need) = match class {
             ItemClass::ArmFragment => {
-                let offset = (frag_tid - 3_100_000).min(79_999).max(1);
+                let offset = (frag_tid - 3_100_000).clamp(1, 79_999);
                 (100_000 + offset, 20)
             }
             ItemClass::TreasureFragment => {
                 let offset = if frag_tid >= 400_000_001 {
                     ((frag_tid - 400_000_000) % 19_999).max(1)
                 } else {
-                    (frag_tid - 3_200_000).min(19_999).max(1)
+                    (frag_tid - 3_200_000).clamp(1, 19_999)
                 };
                 (180_000 + offset, 20)
             }
@@ -3311,8 +3313,8 @@ impl PlayerProfile {
                 7 => 8,
                 _ => 3,
             };
-            if !sanitized.contains_key(&preferred) {
-                sanitized.insert(preferred, hid);
+            if let std::collections::btree_map::Entry::Vacant(e) = sanitized.entry(preferred) {
+                e.insert(hid);
             } else {
                 for g in DEFAULT_SQUAD_TO_GRID {
                     if let std::collections::btree_map::Entry::Vacant(e) = sanitized.entry(g) {
@@ -3329,9 +3331,9 @@ impl PlayerProfile {
 
     /// Unlock a LittleFriend (`partner`) slot `1..=6` (`formation.openPartner`), deducting optional Gold.
     pub fn open_partner(&mut self, slot: u8, gold_cost: u64, now_ts: u64) -> Result<()> {
-        if !(1..=6).contains(&slot) {
+        if !(1..=12).contains(&slot) {
             return Err(PlayerError::InvalidFormationSlot(format!(
-                "partner slot must be in 1..=6, got {slot}"
+                "partner slot must be in 1..=12, got {slot}"
             )));
         }
         if gold_cost > 0 {
@@ -3354,9 +3356,9 @@ impl PlayerProfile {
 
     /// Set or clear (`hid == 0`) a LittleFriend (`partner`) slot `1..=6` (`formation.setPartner`).
     pub fn set_partner_slot(&mut self, slot: u8, hid: u64) -> Result<Option<u64>> {
-        if !(1..=6).contains(&slot) {
+        if !(1..=12).contains(&slot) {
             return Err(PlayerError::InvalidFormationSlot(format!(
-                "partner slot must be in 1..=6, got {slot}"
+                "partner slot must be in 1..=12, got {slot}"
             )));
         }
         if hid == 0 {
@@ -3392,9 +3394,9 @@ impl PlayerProfile {
         };
         let mut removed = Vec::new();
         for s in targets {
-            if !(1..=6).contains(&s) {
+            if !(1..=12).contains(&s) {
                 return Err(PlayerError::InvalidFormationSlot(format!(
-                    "partner slot must be in 1..=6, got {s}"
+                    "partner slot must be in 1..=12, got {s}"
                 )));
             }
             if let Some(val) = self.formation.partner.get_mut(&s) {
@@ -4504,7 +4506,7 @@ impl PlayerProfile {
             return Ok((wash, delta));
         }
 
-        let steps = times.max(1).min(10);
+        let steps = times.clamp(1, 10);
         if use_gold {
             self.consume_currency(CurrencyType::Gold, u64::from(steps) * 10, now_ts)?;
         } else if self.inventory.count_by_template(10_017) >= u64::from(steps) {
@@ -4551,16 +4553,15 @@ impl PlayerProfile {
                 }
             }
         }
-        for entry in self
+        for it in self
             .formation
             .godanimal
             .values_mut()
             .chain(self.formation.topanimal.values_mut())
+            .flatten()
         {
-            if let Some(it) = entry {
-                if it.item_id == item_id {
-                    return Ok((it, false));
-                }
+            if it.item_id == item_id {
+                return Ok((it, false));
             }
         }
         if let Some((_, it)) = self.inventory.get_mut_by_item_id(item_id) {
@@ -4571,7 +4572,7 @@ impl PlayerProfile {
         )))
     }
 
-    fn peek_item_anywhere(&self, item_id: u64) -> Result<(BagItem, bool)> {
+    pub fn peek_item_anywhere(&self, item_id: u64) -> Result<(BagItem, bool)> {
         for m in self.formation.arming.values() {
             for it in m.values() {
                 if it.item_id == item_id {
@@ -4586,16 +4587,15 @@ impl PlayerProfile {
                 }
             }
         }
-        for entry in self
+        for it in self
             .formation
             .godanimal
             .values()
             .chain(self.formation.topanimal.values())
+            .flatten()
         {
-            if let Some(it) = entry {
-                if it.item_id == item_id {
-                    return Ok((it.clone(), false));
-                }
+            if it.item_id == item_id {
+                return Ok((it.clone(), false));
             }
         }
         if let Some((_, it)) = self.inventory.get_by_item_id(item_id) {
@@ -5241,7 +5241,7 @@ impl PlayerProfile {
         let steps = if one_key {
             let by_coin = (self.currency(CurrencyType::AwakeArmCoin) / 100) as u32;
             let by_cop = (self.currency(CurrencyType::Copper) / 5_000) as u32;
-            by_coin.min(by_cop).min(5).max(1)
+            by_coin.min(by_cop).clamp(1, 5)
         } else {
             1
         };

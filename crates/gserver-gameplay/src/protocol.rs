@@ -21,10 +21,13 @@ pub mod rpc {
     pub const CITY_ENTER: &str = "city.enter";
     pub const CITY_LEAVE: &str = "city.leave";
     pub const CITY_GET_ENTER_LIST: &str = "city.getEnterList";
+    pub const CITY_ENTER_SHADOW_INFO: &str = "city.enterShadowInfo";
     pub const TOWN_MOVE: &str = "town.move";
     pub const ROYALCITY_ENTER: &str = "imperialcity.enter";
     pub const ROYALCITY_LEAVE: &str = "imperialcity.leave";
     pub const ROYALCITY_MOVE: &str = "imperialcity.move";
+    pub const IMPERIALCITY_HOST: &str = "imperialcity.getImperialCityHost";
+    pub const IMPERIALCITY_LOGIN: &str = "imperialcity.login";
     pub const CASTLE_GET_INFO: &str = "castle.getInfo";
     pub const HALL_GET_INFO: &str = "hall.getInfo";
     pub const MARKET_GET_INFO: &str = "market.getInfo";
@@ -44,6 +47,7 @@ pub mod rpc {
     pub const CHAT_GET_CROSS_TEAM_LAST: &str = "chat.getCrossGuildTeamLastMsgs";
     pub const CHAT_SEND_COUNTRY: &str = "chat.sendCountry";
     pub const CHAT_GET_COUNTRY_LAST: &str = "chat.getCountryLastMsgs";
+    pub const CHAT_GET_LAST_MAIN_POP: &str = "chat.getLastMainPop";
     pub const TM_CHAT_SEND_CROSS_GUILD: &str = "tmChat.sendCrossGuild";
     pub const TM_CHAT_GET_CROSS_GUILD_LAST: &str = "tmChat.getCrossGuildLastMsgs";
 
@@ -51,7 +55,10 @@ pub mod rpc {
     pub const MAIL_GET_LIST: &str = "mail.getMailBoxList";
     pub const MAIL_READ_ALL: &str = "mail.readAllMail";
     pub const MAIL_SEND: &str = "mail.sendMail";
+    pub const MAIL_DRAW_ITEMS: &str = "mail.drawMailItems";
+    pub const MAIL_DRAW_ALL_ITEMS: &str = "mail.drawAllMailItems";
     pub const REWARD_GET_LIST: &str = "reward.getRewardList";
+    pub const REWARD_RECEIVE: &str = "reward.receiveReward";
     pub const REWARD_RECEIVE_BY_RID_ARR: &str = "reward.receiveByRidArr";
     pub const REWARD_GIFT_BY_CODE: &str = "reward.giftByCode";
 
@@ -74,6 +81,8 @@ pub mod rpc {
     pub const RAFFLE_RECEIVE_LUCK_HOT: &str = "raffle.receiveHotLuckHeroGift";
     pub const RAFFLE_RECEIVE_LUCK_RED: &str = "raffle.receiveRedLuckHeroGift";
     pub const RAFFLE_REFRESH_HOT: &str = "raffle.refreshHotByHand";
+    pub const RECRUITMENT_GET_INFO: &str = "recruitment.getInfo";
+    pub const RECRUITMENT_RECEIVE_REWARD: &str = "recruitment.receiveActiveReward";
 
     // PvE Campaign Copy & Battle Record
     pub const COPY_GET_LIST: &str = "copy.getList";
@@ -85,24 +94,36 @@ pub mod rpc {
     pub const COPY_RESET_ATK: &str = "copy.resetAtk";
     pub const COPY_ONE_KEY_RESET_ATK: &str = "copy.oneKeyResetAtk";
     pub const COPY_FETCH_PRIZE: &str = "copy.fetchPrize";
+    pub const COPY_GET_PRIZE: &str = "copy.getPrize";
     pub const COPY_FETCH_BOX_REWARD: &str = "copy.fetchBoxReward";
     pub const COPY_FETCH_FRESHER_REWARD: &str = "copy.fetchFresherReward";
+    pub const COPY_GET_FAMOUS_PASS_TIMES: &str = "copy.getFamousPassTimes";
     pub const COPY_GET_STRONGH_RECORD: &str = "copy.getStronghRecord";
     pub const BATTLE_GET_RECORD: &str = "battle.getRecord";
 
     // Arena
     pub const ARENA_GET_BASE_DATA: &str = "arena.getBaseData";
+    pub const ARENA_GET_ARENA_INFO: &str = "arena.getArenaInfo";
     pub const ARENA_ENTER: &str = "arena.enterArena";
     pub const ARENA_LEAVE: &str = "arena.leaveArena";
+    pub const ARENA_GET_RANK_LIST: &str = "arena.getRankList";
     pub const ARENA_CHALLENGE: &str = "arena.challenge";
     pub const ARENA_QUICK_CHALLENGE: &str = "arena.quickChallenge";
+    pub const ARENA_SWEEP: &str = "arena.sweep";
     pub const ARENA_BUY_TIMES: &str = "arena.buyChallengeTimes";
+    pub const ARENA_FETCH_REWARD: &str = "arena.fetchReward";
     pub const ARENA_FETCH_NUM_REWARD: &str = "arena.fetchChallengeNumReward";
 
     // Sign, Online & Activity
     pub const SIGN_GET_INFO: &str = "sign.getInfo";
     pub const SIGN_TODAY: &str = "sign.signToday";
+    pub const SIGN_GAIN_NORMAL: &str = "sign.gainNormalSignReward";
+    pub const SIGN_GAIN_ACC: &str = "sign.gainAccSignReward";
     pub const SIGN_GAIN_VIP: &str = "sign.gainVipSignReward";
+    pub const SIGN_GAIN_RECHARGE: &str = "sign.gainRechargeSignReward";
+    pub const SUPER_CHECKIN_GET_INFO: &str = "superCheckin.getInfo";
+    pub const SUPER_CHECKIN_SIGN: &str = "superCheckin.sign";
+    pub const SUPER_CHECKIN_FETCH: &str = "superCheckin.fetchReward";
     pub const ONLINE_GET_INFO: &str = "online.getInfo";
     pub const ONLINE_FETCH: &str = "online.fetch";
     pub const OPEN_ONLINE_GET_INFO: &str = "openOnline.getInfo";
@@ -116,20 +137,27 @@ pub mod rpc {
 /// and `town.*` do NOT carry the `re.` prefix!
 pub mod push {
     pub const USER_UPDATE: &str = "user.updateUser";
+    pub const TM_USER_UPDATE: &str = "tmUser.updateUser";
     pub const USER_COPPER_OVER_MAX: &str = "re.user.copperOverMax";
     pub const SERVER_NOTIFY: &str = "SERVER_NOTIFY";
     pub const BAG_UPDATE: &str = "bag.update";
+    pub const TM_BAG_UPDATE: &str = "tmBag.update";
     pub const HERO_NEW: &str = "re.hero.new";
+    pub const TM_HERO_NEW: &str = "re.tmHero.new";
     pub const CHAT_GET_MSG: &str = "re.chat.getMsg";
     pub const TM_CHAT_GET_MSG: &str = "re.tmChat.getMsg";
     pub const MAIL_NEW: &str = "re.mail.newMail";
+    pub const TM_MAIL_NEW: &str = "tmRe.mail.newMail";
     pub const REWARD_NEW: &str = "re.reward.new";
+    pub const TM_REWARD_NEW: &str = "re.tmReward.new";
     pub const SHOP_OPEN: &str = "shop.open";
+    pub const TM_SHOP_OPEN: &str = "tmShop.open";
     pub const TOWN_ADD_PLAYER: &str = "town.addPlayer";
     pub const TOWN_DEL_PLAYER: &str = "town.delPlayer";
     pub const TOWN_MOVE: &str = "town.move";
     pub const TOWN_UPDATE: &str = "town.update";
     pub const ARENA_DATA_REFRESH: &str = "re.arena.dataRefresh";
+    pub const TM_ARENA_DATA_REFRESH: &str = "tmRe.arena.dataRefresh";
     pub const ACTIVITY_NEW_CONF: &str = "re.activity.newConf";
 }
 
@@ -282,31 +310,93 @@ impl From<String> for DtoValue {
     }
 }
 
-/// Decoded client RPC request (`{ method, args, token, callback = { callbackName } }`).
+/// Decoded client RPC request (`{ method, args, token, callback = { callbackName } }`),
+/// preserving Lua 0-indexed `args[0]`, named map entries (`{ boxId = 1 }`), and raw AMF3 `args`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RpcRequest {
     pub method: String,
     pub args: Vec<DtoValue>,
     pub callback_name: String,
     pub token: String,
+    pub arg_zero: Option<DtoValue>,
+    pub named_args: Vec<(String, DtoValue)>,
+    pub raw_args: Option<DtoValue>,
 }
 
 impl RpcRequest {
     pub fn new(method: impl Into<String>, args: Vec<DtoValue>, req_id: u32) -> Self {
         let method_str = method.into();
         let callback_name = format!("{method_str}_{req_id}");
+        let raw_args = Some(DtoValue::Array(args.clone()));
         Self {
             method: method_str,
             args,
             callback_name,
             token: req_id.to_string(),
+            arg_zero: None,
+            named_args: Vec::new(),
+            raw_args,
         }
     }
 
+    /// Returns Lua 0-indexed `args[0]` when sent via associative key `"0"`.
+    pub fn arg_zero(&self) -> Option<&DtoValue> {
+        self.arg_zero
+            .as_ref()
+            .or_else(|| self.raw_args.as_ref().and_then(|r| r.get("0")))
+    }
+
+    /// Looks up a Lua argument using exact 0-based / 1-based Lua table indexing:
+    /// - `lua_idx == 0`: returns Lua `args[0]` (`arg_zero` / `raw_args["0"]`).
+    /// - `lua_idx >= 1`: returns Lua `args[lua_idx]` (`args[lua_idx - 1]` or `raw_args[tostring(lua_idx)]`).
+    pub fn arg_at_lua0(&self, lua_idx: usize) -> Option<&DtoValue> {
+        if lua_idx == 0 {
+            return self.arg_zero();
+        }
+        if let Some(v) = self.args.get(lua_idx - 1) {
+            if !matches!(v, DtoValue::Null) {
+                return Some(v);
+            }
+        }
+        let key = lua_idx.to_string();
+        self.raw_args
+            .as_ref()
+            .and_then(|r| r.get(&key))
+            .or_else(|| self.args.get(lua_idx - 1))
+    }
+
+    /// Looks up a named/associative argument on `args` (e.g. `boxId`, `brid`, `token`).
+    pub fn named_arg(&self, key: &str) -> Option<&DtoValue> {
+        self.named_args
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v)
+            .or_else(|| self.raw_args.as_ref().and_then(|r| r.get(key)))
+    }
+
     pub fn to_dto(&self) -> DtoValue {
+        let args_dto = match &self.raw_args {
+            Some(raw) => raw.clone(),
+            None if self.arg_zero.is_none() && self.named_args.is_empty() => {
+                DtoValue::Array(self.args.clone())
+            }
+            None => {
+                let mut m = BTreeMap::new();
+                if let Some(z) = &self.arg_zero {
+                    m.insert("0".to_owned(), z.clone());
+                }
+                for (idx, v) in self.args.iter().enumerate() {
+                    m.insert((idx + 1).to_string(), v.clone());
+                }
+                for (k, v) in &self.named_args {
+                    m.insert(k.clone(), v.clone());
+                }
+                DtoValue::Map(m)
+            }
+        };
         DtoValue::map([
             ("method", DtoValue::from(self.method.as_str())),
-            ("args", DtoValue::Array(self.args.clone())),
+            ("args", args_dto),
             ("token", DtoValue::from(self.token.as_str())),
             (
                 "callback",
@@ -402,16 +492,25 @@ impl PushPacket {
 
 /// Bundles an RPC response + 0..N live pushes into a `multi = 1` batch envelope
 /// supported natively by `Network:onRead` (`flag[3] != 0`).
+///
+/// State-sync pushes (`re.[tm]Hero.new`, `[tm]Bag.update`, `sc.recruitment.addnum`) are placed
+/// **BEFORE** `response` (`B-09`), while `[tm]User.updateUser` is placed **AFTER** `response` (`B-12`).
 pub fn bundle_multi_envelope(
     response: &RpcResponse,
     pushes: &[PushPacket],
     time: u64,
 ) -> DtoValue {
     let mut items = Vec::with_capacity(1 + pushes.len());
-    items.push(response.to_dto());
+    let mut post_items = Vec::new();
     for p in pushes {
-        items.push(p.to_dto());
+        if matches!(p.callback_name.as_str(), "user.updateUser" | "tmUser.updateUser") {
+            post_items.push(p.to_dto());
+        } else {
+            items.push(p.to_dto());
+        }
     }
+    items.push(response.to_dto());
+    items.extend(post_items);
     DtoValue::map([
         ("err", DtoValue::from("ok")),
         ("ret", DtoValue::Array(items)),

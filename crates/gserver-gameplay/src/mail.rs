@@ -637,6 +637,11 @@ impl MailAndRewardCenter {
                 m.is_read = true;
             }
         }
+        if let Some(list) = self.tm_mails.get_mut(&uid) {
+            if let Some(m) = list.iter_mut().find(|m| m.mid == mid) {
+                m.is_read = true;
+            }
+        }
         let reward_arr = DtoValue::Array(items.into_iter().map(RewardEntry::to_triplet_dto).collect());
         let ret = DtoValue::map([
             ("ret", DtoValue::from("ok")),
@@ -684,6 +689,13 @@ impl MailAndRewardCenter {
             drawn_mut.insert(mid);
         }
         if let Some(list) = self.mails.get_mut(&uid) {
+            for m in list {
+                if mids.contains(&m.mid) {
+                    m.is_read = true;
+                }
+            }
+        }
+        if let Some(list) = self.tm_mails.get_mut(&uid) {
             for m in list {
                 if mids.contains(&m.mid) {
                     m.is_read = true;

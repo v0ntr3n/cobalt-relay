@@ -1026,15 +1026,13 @@ impl PlayerProfile {
                 }
             }
         }
-        for entry in self.formation.godanimal.values() {
-            if let Some(item) = entry {
-                let reinf = item
-                    .va_item_text
-                    .get("reinforce_level")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(1);
-                total_fc = total_fc.saturating_add(400 + reinf * 50);
-            }
+        for item in self.formation.godanimal.values().flatten() {
+            let reinf = item
+                .va_item_text
+                .get("reinforce_level")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1);
+            total_fc = total_fc.saturating_add(400 + reinf * 50);
         }
         self.fc = total_fc;
         if self.fc > self.fight_force_max {

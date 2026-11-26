@@ -1669,6 +1669,31 @@ impl HeroLegendRaffleEngine {
         ])
     }
 
+    pub fn buy_token(
+        &mut self,
+        player: &mut PlayerState,
+        num: u32,
+        now_ts: u64,
+    ) -> Result<(DtoValue, Vec<PushPacket>), &'static str> {
+        if num == 0 || num > 100_000 {
+            return Err("invalid_buy_num");
+        }
+        let cost = i64::from(num);
+        if player.gold < cost {
+            return Err("not_enough_gold");
+        }
+        player.gold -= cost;
+        player.legend_book_coin = player.legend_book_coin.saturating_add(u64::from(num));
+        let push = PlayerState::build_user_update_push(
+            [
+                ("gold", DtoValue::from(player.gold)),
+                ("legend_book_coin", DtoValue::from(player.legend_book_coin)),
+            ],
+            now_ts,
+        );
+        Ok((DtoValue::from("ok"), vec![push]))
+    }
+
     pub fn raffle(
         &mut self,
         player: &mut PlayerState,
@@ -2359,6 +2384,10 @@ impl SecondaryRaffleHub {
                 self.hero_legend.get_info(player.uid, now_ts),
                 Vec::new(),
             ))),
+            "heroLegendRaffle.buyToken" | "tmHeroLegendRaffle.buyToken" => {
+                let num = args.first().and_then(DtoValue::as_u32).unwrap_or(1);
+                Some(self.hero_legend.buy_token(player, num, now_ts))
+            }
             "heroLegendRaffle.raffle" | "tmHeroLegendRaffle.raffle" => {
                 let times = args.first().and_then(DtoValue::as_u32).unwrap_or(1);
                 Some(self.hero_legend.raffle(player, times, now_ts))
@@ -2417,19 +2446,19 @@ impl SecondaryRaffleHub {
                 ))
             }
 
-            "activityTopAnimalRecruit.getInfo" => {
+            "activityTopAnimalRecruit.getInfo" | "tmActivityTopAnimalRecruit.getInfo" => {
                 Some(Ok((self.festival.top_animal_get_info(player.uid), Vec::new())))
             }
-            "activityTopAnimalRecruit.raffle" => {
+            "activityTopAnimalRecruit.raffle" | "tmActivityTopAnimalRecruit.raffle" => {
                 let pos = args.first().and_then(DtoValue::as_u32).unwrap_or(1);
                 let is_ten = args.get(1).and_then(DtoValue::as_bool).unwrap_or(false);
                 Some(self.festival.top_animal_raffle(player, pos, is_ten, now_ts))
             }
-            "activityTopAnimalRecruit.openBox" => {
+            "activityTopAnimalRecruit.openBox" | "tmActivityTopAnimalRecruit.openBox" => {
                 let box_id = extract_box_id_arg(args).unwrap_or(1);
                 Some(self.festival.top_animal_open_box(player, box_id, now_ts))
             }
-            "activityTopAnimalRecruit.getTaskReward" => {
+            "activityTopAnimalRecruit.getTaskReward" | "tmActivityTopAnimalRecruit.getTaskReward" => {
                 let tid = args.first().and_then(DtoValue::as_u32).unwrap_or(1);
                 Some(self.festival.claim_task_reward(
                     player,
@@ -2438,18 +2467,18 @@ impl SecondaryRaffleHub {
                     now_ts,
                 ))
             }
-            "activityTopAnimalRecruit.useVoucher" => Some(Ok((DtoValue::from("ok"), Vec::new()))),
+            "activityTopAnimalRecruit.useVoucher" | "tmActivityTopAnimalRecruit.useVoucher" => Some(Ok((DtoValue::from("ok"), Vec::new()))),
 
-            "raffleArm.getInfo" => Some(Ok((self.limit_arm.get_info(player.uid), Vec::new()))),
-            "raffleArm.raffle" => {
+            "raffleArm.getInfo" | "tmRaffleArm.getInfo" => Some(Ok((self.limit_arm.get_info(player.uid), Vec::new()))),
+            "raffleArm.raffle" | "tmRaffleArm.raffle" => {
                 let num = args.first().and_then(DtoValue::as_u32).unwrap_or(1);
                 Some(self.limit_arm.raffle(player, num, now_ts))
             }
-            "raffleArm.getBoxReward" => {
+            "raffleArm.getBoxReward" | "tmRaffleArm.getBoxReward" => {
                 let idx = args.first().and_then(DtoValue::as_u32).unwrap_or(0);
                 Some(self.limit_arm.get_box_reward(player, idx, now_ts))
             }
-            "raffleArm.reciveRankReward" | "raffleArm.enter" | "raffleArm.leave" => {
+            "raffleArm.reciveRankReward" | "raffleArm.enter" | "raffleArm.leave" | "tmRaffleArm.reciveRankReward" | "tmRaffleArm.enter" | "tmRaffleArm.leave" => {
                 Some(Ok((DtoValue::from("ok"), Vec::new())))
             }
             _ => None,
@@ -3591,6 +3620,7 @@ impl ShopEngine {
     }
 
     /// Executes a single refresh step, returning `(cos_type, bag_deltas, user_delta_opt)`.
+    #[allow(clippy::type_complexity)]
     fn step_one_refresh(
         &mut self,
         player: &mut PlayerState,
@@ -3841,10 +3871,11 @@ impl ShopEngine {
             // `refresh_mode == 2` means free/token only (no Gold spend)
             let sheet_has_free = self.ensure_sheet_ext(player.uid, shop_type, false, now_ts).free_num > 0;
             let has_token = player.bag.count_by_tid(SHOP_REFRESH_TOKEN_TID) >= 1;
-            if !sheet_has_free && !has_token {
-                if refresh_mode == 2 || gold_spent_refresh + 20 > gold_limit || player.gold < 20 {
-                    break;
-                }
+            if !sheet_has_free
+                && !has_token
+                && (refresh_mode == 2 || gold_spent_refresh + 20 > gold_limit || player.gold < 20)
+            {
+                break;
             }
             let before_gold = player.gold;
             let Ok((ct, bdeltas, ufield)) = self.step_one_refresh(player, shop_type, false, now_ts) else {

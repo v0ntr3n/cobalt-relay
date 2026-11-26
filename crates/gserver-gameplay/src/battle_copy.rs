@@ -2867,7 +2867,7 @@ impl DotaTowerEngine {
                 st.purgatory_max_layer = st.purgatory_max_layer.max(layer_id);
             }
         }
-        let pushes = grant_rewards_to_player(
+        let mut pushes = grant_rewards_to_player(
             player,
             &[
                 RewardEntry::Copper(50_000 + i64::from(layer_id) * 5_000),
@@ -2875,6 +2875,9 @@ impl DotaTowerEngine {
             ],
             now_ts,
         )?;
+        if let Some(field) = player.add_currency_by_price_type(10, 500 + u64::from(layer_id) * 50) {
+            pushes.push(PlayerState::build_user_update_push([field], now_ts));
+        }
         Ok((DtoValue::from("ok"), pushes))
     }
 
@@ -2888,11 +2891,14 @@ impl DotaTowerEngine {
         st.is_open = 1;
         st.normal_layer = (st.normal_layer + 1).min(Self::MAX_NORMAL_LAYER);
         st.normal_max_layer = st.normal_max_layer.max(st.normal_layer);
-        let pushes = grant_rewards_to_player(
+        let mut pushes = grant_rewards_to_player(
             player,
             &[RewardEntry::Gold(30), RewardEntry::Item { tid: 30002, qty: 1 }],
             now_ts,
         )?;
+        if let Some(field) = player.add_currency_by_price_type(10, 1_000) {
+            pushes.push(PlayerState::build_user_update_push([field], now_ts));
+        }
         Ok((DtoValue::from("ok"), pushes))
     }
 
@@ -2924,7 +2930,10 @@ impl DotaTowerEngine {
                 st.purgatory_attack_time += 1;
             }
         }
-        let pushes = grant_rewards_to_player(player, &[RewardEntry::Copper(60_000)], now_ts)?;
+        let mut pushes = grant_rewards_to_player(player, &[RewardEntry::Copper(60_000)], now_ts)?;
+        if let Some(field) = player.add_currency_by_price_type(10, 500) {
+            pushes.push(PlayerState::build_user_update_push([field], now_ts));
+        }
         Ok((DtoValue::from("ok"), pushes))
     }
 

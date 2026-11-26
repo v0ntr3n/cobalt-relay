@@ -418,12 +418,13 @@ pub fn validate_response_for_method(
                     "FightProxy:parseBattleInfo requires non-empty `arrTeam1['1'].arrHero` map",
                 )),
             }
-            match ret.get_field("userInfo").and_then(Amf3Value::as_array) {
-                Some(u) if u.len() >= 2 => {}
+            match ret.get_field("userInfo") {
+                Some(Amf3Value::Map(m)) if m.contains_key("1") && m.contains_key("2") => {}
+                Some(Amf3Value::Array(u)) if u.len() >= 2 => {}
                 _ => errs.push(LuaSchemaViolation::new(
                     method,
                     "ret.userInfo",
-                    "FightProxy:parseBattleInfo requires 2-element `userInfo` array",
+                    "FightProxy:parseBattleInfo requires `userInfo` table with keys '1' & '2' (or 2-element array)",
                 )),
             }
         }

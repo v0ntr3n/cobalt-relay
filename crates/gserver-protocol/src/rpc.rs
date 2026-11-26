@@ -183,6 +183,7 @@ impl RpcRequest {
         encode_c2s_lcpacket(&amf3_bytes, compress)
     }
 
+    #[allow(clippy::type_complexity)]
     fn normalize_args_field(
         raw_field: Option<&Value>,
     ) -> (Vec<Value>, Option<Value>, Vec<(String, Value)>, Option<Value>) {

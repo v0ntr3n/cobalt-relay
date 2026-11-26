@@ -264,16 +264,15 @@ impl FormationState {
         {
             return true;
         }
-        for entry in self
+        for it in self
             .godanimal
             .values()
             .chain(self.topanimal.values())
             .chain(self.protection.values())
+            .flatten()
         {
-            if let Some(it) = entry {
-                if it.item_id == item_id {
-                    return true;
-                }
+            if it.item_id == item_id {
+                return true;
             }
         }
         false
