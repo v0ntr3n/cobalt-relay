@@ -77,8 +77,8 @@ id,days,ware_buy_type,des_spec,reward\n\
 pub const CSV_SINGLE_RECHARGE: &str = "\
 id,lv_range,recharge_class,charge_require,recharge_num,ware_buy_type,discount,recharge_reward_1,recharge_reward_2,recharge_reward_3\n\
 id,lv_range,recharge_class,charge_require,recharge_num,ware_buy_type,discount,recharge_reward_1,recharge_reward_2,recharge_reward_3\n\
-0,array,array,array,array,0,array,array,array,array\n\
-1,\"0,200\",\"1|2|3,1|2|3\",\"6,30,98\",\"3,3,3\",1,\"300,350,400\",\"2|0|100,4|16012|2\",\"2|0|300,4|22102|5\",\"2|0|888,4|28002|2\"";
+0,array,array,array,array,array,array,array,array,array\n\
+1,\"0,200\",\"1|2|3,1|2|3\",\"6,30,98\",\"3,3,3\",\"1,1,1\",\"300,350,400\",\"2|0|100,4|16012|2\",\"2|0|300,4|22102|5\",\"2|0|888,4|28002|2\"";
 
 /// CSV for `"activity_recharge"` (`ActivityRechargeItem.lua`, `ActivityRechargeCell.lua`).
 pub const CSV_ACCUM_RECHARGE: &str = "\

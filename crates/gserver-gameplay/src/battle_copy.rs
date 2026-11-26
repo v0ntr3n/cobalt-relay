@@ -139,29 +139,29 @@ pub fn decode_zlib_amf3(blob: &[u8]) -> Result<DtoValue, &'static str> {
 // Section 1: Battle Engine (`serverData` & `fightReport`)
 // ============================================================================
 
-/// Authentic monster `htid`s (`> 20000` in `monster.db`) verified from `copy/strongh.json` (`icon_id`),
-/// guaranteeing `UnitFactory:createUnit` routes to `MonsterReader:getRowById` and never crashes `HeroReader`!
+/// Authentic monster `htid`s (`>= 100_001` in `monster.db` table `monster`),
+/// guaranteeing `UnitFactory:creatUnit` routes to `MonsterReader:getRowById` and resolves real rows!
 pub const VALID_MONSTER_HTIDS: &[u32] = &[
-    20_022, // Quân Hoàng Cân
-    20_009, // Vu Cát
-    20_006, // Tả Từ
-    20_023, // Bùi Nguyên Thiệu
-    20_004, // Hoa Hùng
-    20_005, // Lữ Bố Boss
-    20_007, // Đổng Trác
-    20_008, // Trương Giác
-    20_010, // Trương Bảo
-    20_011, // Trương Lương
-    20_012, // Viên Thuật
-    20_013, // Viên Thiệu
-    20_015, // Nhan Lương
-    20_016, // Văn Xú
-    20_017, // Hạ Hầu Đ惇
-    20_018, // Điển Vi
-    20_019, // Hứa Chử
-    20_020, // Tào Nhân
-    20_021, // Quân Khăn Vàng Tinh Anh
-    20_024, // Thiết Kỵ Tây Lương
+    1_010_111, // Chapter 1 Stronghold 101
+    1_010_113,
+    1_010_115,
+    1_010_117,
+    1_010_119,
+    1_020_111, // Chapter 1 Stronghold 102
+    1_020_113,
+    1_020_115,
+    1_030_111, // Chapter 1 Stronghold 103
+    1_030_113,
+    1_040_111, // Chapter 1 Stronghold 104
+    1_040_113,
+    1_050_111, // Chapter 1 Stronghold 105
+    1_050_113,
+    100_001,   // Opening battle monsters
+    100_002,
+    100_003,
+    100_004,
+    500_101,   // Special / Boss monsters
+    600_101,
 ];
 
 fn is_valid_hero_template_id(htid: u32) -> bool {
@@ -171,15 +171,15 @@ fn is_valid_hero_template_id(htid: u32) -> bool {
             || gserver_data::find_inherited_tier_skill_entry(htid).is_some())
 }
 
-/// Resolves authentic monster `htid` pairs (`> 20000` in `monster.db`) for a campaign stronghold.
+/// Resolves authentic monster `htid` pairs (`>= 100_001` in `monster.db` table `monster`) for a campaign stronghold.
 pub fn stage_monster_htids(copy_id: u32) -> (u32, u32) {
     match copy_id {
-        100_001 => (20_005, 20_004),
-        100_101 => (20_022, 20_021),
-        100_102 => (20_009, 20_022),
-        100_103 => (20_022, 20_024),
-        100_105 => (20_023, 20_022),
-        100_106 => (20_006, 20_009),
+        100_001 => (100_001, 100_002),
+        100_101 => (1_010_111, 1_010_113),
+        100_102 => (1_020_111, 1_020_113),
+        100_103 => (1_030_111, 1_030_113),
+        100_105 => (1_050_111, 1_050_113),
+        100_106 => (1_040_111, 1_040_113),
         _ => {
             let idx1 = (copy_id as usize) % VALID_MONSTER_HTIDS.len();
             let idx2 = (idx1 + 1) % VALID_MONSTER_HTIDS.len();
@@ -277,9 +277,9 @@ impl CombatUnit {
 
     pub fn monster(hid: u64, htid: u32, position: u32, level: u32) -> Self {
         // Preserve valid hero templates (e.g. Arena NPC guards 310 / PvP protagonist 2),
-        // preserve valid monster IDs (> 20000), and remap any invalid <=20000 non-hero ID
-        // (such as legacy 5001..5010) to a verified monster.db ID > 20000!
-        let safe_htid = if is_valid_hero_template_id(htid) || htid > 20_000 {
+        // preserve valid monster.db IDs (>= 100_001), and remap any invalid < 100_001 non-hero ID
+        // (such as legacy 5001..5010 or strongh icon_ids 20_001..20_024) to a verified monster.db ID!
+        let safe_htid = if is_valid_hero_template_id(htid) || htid >= 100_001 {
             htid
         } else {
             VALID_MONSTER_HTIDS[(htid as usize) % VALID_MONSTER_HTIDS.len()]
@@ -3251,7 +3251,7 @@ impl WorldBossAndRebelEngine {
 
         let brid = copy_engine.alloc_brid();
         let t1 = extract_player_combat_units(player);
-        let t2 = vec![CombatUnit::monster(95_000_001, 20_008, 0, player.level.max(1))];
+        let t2 = vec![CombatUnit::monster(95_000_001, 500_101, 0, player.level.max(1))];
         let u1 = build_user_battle_dto(
             player.uid,
             &player.uname,
@@ -3379,7 +3379,7 @@ impl WorldBossAndRebelEngine {
     ) -> Result<(DtoValue, Vec<PushPacket>), &'static str> {
         let brid = copy_engine.alloc_brid();
         let t1 = extract_player_combat_units(player);
-        let t2 = vec![CombatUnit::monster(95_100_001, 20_008, 0, 50)];
+        let t2 = vec![CombatUnit::monster(95_100_001, 500_101, 0, 50)];
         let u1 = build_user_battle_dto(
             player.uid,
             &player.uname,
@@ -3487,7 +3487,7 @@ impl DiscoverEngine {
             ("city_id", DtoValue::from(city_id)),
             ("cur_hp", DtoValue::from(10_000i64)),
             ("max_hp", DtoValue::from(10_000i64)),
-            ("monster_id", DtoValue::from(20_022u32)),
+            ("monster_id", DtoValue::from(1_010_111u32)),
             ("attack_times", DtoValue::from(0u32)),
             ("kill_num", DtoValue::from(0u32)),
             ("is_pass", DtoValue::from(u32::from(is_pass))),
@@ -3506,7 +3506,7 @@ impl DiscoverEngine {
         }
         let brid = copy_engine.alloc_brid();
         let t1 = extract_player_combat_units(player);
-        let t2 = vec![CombatUnit::monster(96_000_001, 20_022, 0, player.level.max(1))];
+        let t2 = vec![CombatUnit::monster(96_000_001, 1_010_111, 0, player.level.max(1))];
         let u1 = build_user_battle_dto(
             player.uid,
             &player.uname,
@@ -3540,7 +3540,7 @@ impl DiscoverEngine {
                     "new",
                     DtoValue::map([
                         ("cur_hp", DtoValue::from(10_000i64)),
-                        ("monster_id", DtoValue::from(20_022u32)),
+                        ("monster_id", DtoValue::from(1_010_111u32)),
                     ]),
                 ),
             ]),
@@ -3667,7 +3667,7 @@ impl DevilCopyEngine {
         }
         let brid = copy_engine.alloc_brid();
         let t1 = extract_player_combat_units(player);
-        let t2 = vec![CombatUnit::monster(97_000_001, 20_005, 0, stage_id * 10)];
+        let t2 = vec![CombatUnit::monster(97_000_001, 600_101, 0, stage_id * 10)];
         let u1 = build_user_battle_dto(
             player.uid,
             &player.uname,
@@ -3695,7 +3695,7 @@ impl DevilCopyEngine {
         }
         let brid = copy_engine.alloc_brid();
         let t1 = extract_player_combat_units(player);
-        let t2 = vec![CombatUnit::monster(97_000_002, 20_005, 0, stage_id)];
+        let t2 = vec![CombatUnit::monster(97_000_002, 600_101, 0, stage_id)];
         let u1 = build_user_battle_dto(
             player.uid,
             &player.uname,
@@ -3820,7 +3820,7 @@ impl SoaringCopyEngine {
         }
         let brid = copy_engine.alloc_brid();
         let t1 = extract_player_combat_units(player);
-        let t2 = vec![CombatUnit::monster(98_000_001, 20_006, 0, stage_id * 10)];
+        let t2 = vec![CombatUnit::monster(98_000_001, 600_102, 0, stage_id * 10)];
         let u1 = build_user_battle_dto(
             player.uid,
             &player.uname,
@@ -3848,7 +3848,7 @@ impl SoaringCopyEngine {
         }
         let brid = copy_engine.alloc_brid();
         let t1 = extract_player_combat_units(player);
-        let t2 = vec![CombatUnit::monster(98_000_002, 20_006, 0, stage_id)];
+        let t2 = vec![CombatUnit::monster(98_000_002, 600_102, 0, stage_id)];
         let u1 = build_user_battle_dto(
             player.uid,
             &player.uname,
