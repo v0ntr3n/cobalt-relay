@@ -630,10 +630,11 @@ mod tests {
         );
         let rewards = list_out.response.ret.as_array().unwrap();
         assert_eq!(rewards.len(), 1);
-        // Verify `va_reward[1]` nested array schema expected by `RewardPanel.lua` line 153!
+        // Verify `va_reward = [triplets_array, metadata_map]` expected by `RewardPanel.lua` & `RewardProxy.lua`!
         let va_reward = rewards[0].get("va_reward").and_then(DtoValue::as_array).unwrap();
-        assert_eq!(va_reward.len(), 1);
+        assert_eq!(va_reward.len(), 2);
         assert_eq!(va_reward[0].as_array().unwrap().len(), 2);
+        assert!(va_reward[1].as_map().is_some());
 
         let gold_before = eng.players[&1001].gold;
         let claim1 = eng.dispatch(
@@ -865,13 +866,18 @@ mod tests {
         assert!(sim.is_win);
         assert_eq!(sim.appraisal, 50, "FightProxy:isSuccessFight requires appraisal == 50");
         assert_eq!(sim.server_attack_dto.get("brid").and_then(DtoValue::as_u64), Some(888));
-        assert_eq!(
-            sim.server_attack_dto
-                .get("userInfo")
+        let user_info = sim
+            .server_attack_dto
+            .get("userInfo")
+            .and_then(DtoValue::as_map)
+            .expect("FightProxy requires string-keyed Map userInfo");
+        assert!(user_info.contains_key("1") && user_info.contains_key("2"));
+        assert!(
+            !sim.server_attack_dto
+                .get("arrSeed")
                 .and_then(DtoValue::as_array)
                 .unwrap()
-                .len(),
-            2
+                .is_empty()
         );
         let report_decoded = decode_amf3(&sim.to_amf3_report_bytes()).unwrap();
         assert_eq!(report_decoded.get("appraisal").and_then(DtoValue::as_u64), Some(50));
@@ -950,6 +956,19 @@ mod tests {
         );
         assert_eq!(sbox.response.ret.as_str(), Some("ok"));
 
+        let _ = eng.dispatch(
+            1001,
+            &RpcRequest::new(
+                rpc::COPY_PASS,
+                vec![
+                    DtoValue::from(1001u32),
+                    DtoValue::from(100102u32),
+                    DtoValue::Map(Default::default()),
+                ],
+                50,
+            ),
+            NOW,
+        );
         let cprize = eng.dispatch(
             1001,
             &RpcRequest::new(
