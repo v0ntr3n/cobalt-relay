@@ -572,3 +572,362 @@ fn test_25_babeltime_cell_plaintext_and_corrupted_header_errors() {
     let err_key = decrypt_babeltime_cell(bad_key_hex).expect_err("invalid key_index must fail");
     assert_eq!(err_key.status, DecryptStatus::InvalidKeyIndex);
 }
+
+// 26. Programmatic validation report across all 801 `timeMachine_hero` rows & `curated_templates.json`
+#[test]
+fn test_26_validate_all_801_hero_skill_mappings_summary_report() {
+    let report = gserver_data::validate_embedded_hero_skill_mappings();
+    assert_eq!(report.total_templates_inspected, 801);
+    assert_eq!(report.valid_normal_skill_count, 799);
+    assert_eq!(report.valid_rage_skill_count, 799);
+    assert_eq!(report.fully_valid_hero_count, 799);
+    assert_eq!(report.missing_or_invalid_template_count, 2);
+    assert_eq!(report.missing_or_invalid_skill_ref_count, 4);
+    assert_eq!(report.fallback_template_count, 2);
+    assert_eq!(report.fallback_skill_slot_count, 4);
+    assert_eq!(report.validated_skill_set_size, 2270);
+
+    // Exactly 2 templates in `timeMachine_hero` explicitly have null `com_atk`/`angry_atk`:
+    // htid=667 (`Chân-Thủy Kính`, is_show=false) and htid=1002 (`Ma Long`, event dragon).
+    let missing_ids: Vec<u32> = report
+        .missing_or_invalid_details
+        .iter()
+        .map(|d| d.htid)
+        .collect();
+    assert_eq!(missing_ids, vec![667, 1002]);
+    for d in &report.missing_or_invalid_details {
+        assert_eq!(
+            d.normal_error,
+            Some(gserver_data::SkillIdValidationError::Missing)
+        );
+        assert_eq!(
+            d.rage_error,
+            Some(gserver_data::SkillIdValidationError::Missing)
+        );
+        assert_eq!(
+            d.resolved_normal_skill_id,
+            gserver_data::FALLBACK_NORMAL_SKILL_ID
+        );
+        assert_eq!(
+            d.resolved_rage_skill_id,
+            gserver_data::FALLBACK_RAGE_SKILL_ID
+        );
+    }
+
+    // 100% of curated protagonists (`1..=36`) and curated hero tiers (330 distinct htids) are valid
+    assert_eq!(report.curated_protagonist_templates_count, 2);
+    assert_eq!(report.curated_protagonist_htids_inspected, 36);
+    assert_eq!(report.curated_protagonist_valid_normal_count, 36);
+    assert_eq!(report.curated_protagonist_valid_rage_count, 36);
+    assert_eq!(report.curated_hero_templates_count, 59);
+    assert_eq!(report.curated_hero_tier_htids_inspected, 330);
+    assert_eq!(report.curated_hero_tier_valid_normal_count, 330);
+    assert_eq!(report.curated_hero_tier_valid_rage_count, 330);
+
+    // Verify `HERO_SKILL_ENTRIES` and `VALIDATED_SKILL_IDS` are strictly sorted for binary search
+    let entries = gserver_data::all_hero_skill_entries();
+    assert!(entries.windows(2).all(|w| w[0].htid < w[1].htid));
+    let skill_ids = gserver_data::all_validated_skill_ids();
+    assert!(skill_ids.windows(2).all(|w| w[0] < w[1]));
+}
+
+// 27. Table-driven representative hero & multi-tier skill resolution test
+#[test]
+fn test_27_table_driven_authentic_hero_and_tier_battle_skills() {
+    // (htid, awake_rank, expected_normal, expected_rage, label)
+    let cases: &[(u32, u32, u32, u32, &str)] = &[
+        // Protagonist chains (`1..=36`)
+        (1, 0, 102, 101, "Nam Chủ Tướng starter"),
+        (2, 0, 104, 103, "Nữ Chủ Tướng starter"),
+        (13, 0, 320, 323, "Nam Chủ Tướng Red"),
+        (14, 0, 322, 324, "Nữ Chủ Tướng Red"),
+        (17, 0, 335, 333, "Nam Chủ Tướng Gold"),
+        (18, 0, 336, 334, "Nữ Chủ Tướng Gold"),
+        (21, 0, 335, 339, "Nam Chủ Tướng Dark-Gold"),
+        (23, 0, 337, 339, "Nam Chủ Tướng Dark-Gold II"),
+        (25, 0, 341, 343, "Nam Chủ Tướng Purple-Gold"),
+        (29, 0, 345, 347, "Nam Chủ Tướng Color-Gold"),
+        (33, 0, 349, 351, "Nam Chủ Tướng Nirvana-Gold"),
+        (35, 0, 349, 351, "Nam Chủ Tướng Nirvana-Gold II"),
+        (36, 0, 350, 352, "Nữ Chủ Tướng Nirvana-Gold II"),
+        // Base & promoted famous Three Kingdoms heroes
+        (101, 0, 10102, 10101, "Trương Liêu base"),
+        (
+            101,
+            5,
+            5210102,
+            5210101,
+            "Trương Liêu awakened (awake_rank=5)",
+        ),
+        (601, 0, 5210102, 5210101, "Chân-Trương Liêu"),
+        (1101, 0, 10102, 10101, "Trương Liêu Red"),
+        (2101, 0, 5310102, 5310101, "Thánh-Trương Liêu (Gold)"),
+        (3101, 0, 5410102, 5410101, "Thần-Trương Liêu (Dark-Gold)"),
+        (4101, 0, 5510102, 5510101, "Ma-Trương Liêu (Purple-Gold)"),
+        (5101, 0, 5610102, 5610101, "Tiên-Trương Liêu (Color-Gold)"),
+        (6101, 0, 5610102, 5610101, "Tray-Gold Trương Liêu inherited"),
+        (8101, 0, 5610102, 5610101, "Iron-Gold Trương Liêu inherited"),
+        (102, 0, 10202, 10201, "Tư Mã Ý"),
+        (103, 0, 10302, 10301, "Quách Gia base"),
+        (1103, 0, 110302, 110301, "Quách Gia Red evolved"),
+        (7103, 0, 5610302, 5610301, "Gild-Gold Quách Gia inherited"),
+        (106, 0, 10602, 10601, "Tào Tháo"),
+        (201, 0, 20102, 20101, "Triệu Vân base"),
+        (2201, 0, 5320102, 5320101, "Thánh-Triệu Vân"),
+        (5201, 0, 5620102, 5620101, "Tiên-Triệu Vân"),
+        (202, 0, 20202, 20201, "Gia Cát Lượng"),
+        (204, 0, 20402, 20401, "Quan Vũ"),
+        (301, 0, 30102, 30101, "Chu Du"),
+        (310, 0, 31002, 31001, "Tiểu Kiều"),
+        (312, 0, 31202, 31201, "Tôn Quyền"),
+        (401, 0, 40102, 40101, "Lữ Bố"),
+        (5401, 0, 5640102, 5640101, "Tiên-Lữ Bố"),
+        (402, 0, 40202, 40201, "Tả Từ"),
+        (406, 0, 40602, 40601, "Điêu Thuyền"),
+        (426, 0, 42602, 42601, "Tân Hiến Anh starter vanguard"),
+        (901, 0, 90102, 90101, "Thủy Kính"),
+        // Non-trivial irregular IDs proving table lookup vs arithmetic formula
+        (154, 0, 600502, 600501, "Vương Lãng (Blue gacha)"),
+        (168, 0, 5402, 5401, "Hạ Hầu Ân (Green gacha)"),
+    ];
+
+    for &(htid, awake_rank, exp_normal, exp_rage, label) in cases {
+        let res = gserver_data::resolve_hero_battle_skills_with_awake(htid, awake_rank);
+        assert!(
+            !res.used_any_fallback(),
+            "{label} (htid={htid}) must not use fallback"
+        );
+        assert_ne!(
+            res.normal_skill_id, 1001,
+            "{label} normal skill must not be generic 1001"
+        );
+        assert_ne!(
+            res.rage_skill_id, 2001,
+            "{label} rage skill must not be generic 2001"
+        );
+        assert_eq!(res.normal_skill_id, exp_normal, "{label} com_atk mismatch");
+        assert_eq!(res.rage_skill_id, exp_rage, "{label} angry_atk mismatch");
+        assert!(gserver_data::is_validated_skill_id(res.normal_skill_id));
+        assert!(gserver_data::is_validated_skill_id(res.rage_skill_id));
+    }
+
+    // Verify ProtagonistTemplate and HeroTemplate struct fields match embedded skill table
+    for p in PROTAGONISTS {
+        let sh = gserver_data::resolve_hero_battle_skills(p.starter_htid);
+        assert_eq!(
+            (p.com_atk, p.angry_atk),
+            (sh.normal_skill_id, sh.rage_skill_id)
+        );
+    }
+    for h in HEROES {
+        let bh = gserver_data::resolve_hero_battle_skills(h.htid);
+        assert_eq!(
+            (h.com_atk, h.angry_atk),
+            (bh.normal_skill_id, bh.rage_skill_id)
+        );
+    }
+}
+
+// 28. Explicit validation of missing, zero, negative, overflow, unvalidated, and fallback diagnostics
+#[test]
+fn test_28_skill_validation_edge_cases_and_fallback_diagnostics() {
+    use gserver_data::{
+        hero_skill_fallback_slot_count, hero_skill_fallback_template_count,
+        monster_default_skill_unit_count, resolve_hero_battle_skills,
+        resolve_unit_or_monster_battle_skills, validate_raw_skill_id, HeroSkillFallbackReason,
+        HeroSkillResolutionSource, SkillIdValidationError, FALLBACK_NORMAL_SKILL_ID,
+        FALLBACK_RAGE_SKILL_ID,
+    };
+
+    assert_eq!(
+        validate_raw_skill_id(None),
+        Err(SkillIdValidationError::Missing)
+    );
+    assert_eq!(
+        validate_raw_skill_id(Some(0)),
+        Err(SkillIdValidationError::Zero)
+    );
+    assert_eq!(
+        validate_raw_skill_id(Some(-7)),
+        Err(SkillIdValidationError::Negative(-7))
+    );
+    assert_eq!(
+        validate_raw_skill_id(Some(i64::from(u32::MAX) + 5)),
+        Err(SkillIdValidationError::OutOfRange(i64::from(u32::MAX) + 5))
+    );
+    assert_eq!(
+        validate_raw_skill_id(Some(999_999)),
+        Err(SkillIdValidationError::Unvalidated(999_999))
+    );
+    assert_eq!(validate_raw_skill_id(Some(20102)), Ok(20102));
+
+    let before_tpl = hero_skill_fallback_template_count();
+    let before_slots = hero_skill_fallback_slot_count();
+
+    let zero_res = resolve_hero_battle_skills(0);
+    assert!(zero_res.used_any_fallback());
+    assert_eq!(
+        zero_res.source,
+        HeroSkillResolutionSource::Fallback(HeroSkillFallbackReason::ZeroOrInvalidHtid { htid: 0 })
+    );
+    assert_eq!(
+        (zero_res.normal_skill_id, zero_res.rage_skill_id),
+        (FALLBACK_NORMAL_SKILL_ID, FALLBACK_RAGE_SKILL_ID)
+    );
+
+    let unknown_res = resolve_hero_battle_skills(20_008);
+    assert!(unknown_res.used_any_fallback());
+    assert_eq!(
+        unknown_res.source,
+        HeroSkillResolutionSource::Fallback(HeroSkillFallbackReason::UnknownHeroTemplate {
+            htid: 20_008
+        })
+    );
+
+    let malong_res = resolve_hero_battle_skills(1002);
+    assert!(malong_res.used_any_fallback());
+    assert_eq!(
+        malong_res.source,
+        HeroSkillResolutionSource::Fallback(HeroSkillFallbackReason::InvalidSkillReference {
+            htid: 1002,
+            normal_error: Some(SkillIdValidationError::Missing),
+            rage_error: Some(SkillIdValidationError::Missing),
+        })
+    );
+
+    assert!(hero_skill_fallback_template_count() >= before_tpl + 3);
+    assert!(hero_skill_fallback_slot_count() >= before_slots + 6);
+
+    // Monster vs Hero unit resolution
+    let before_mon = monster_default_skill_unit_count();
+    assert_eq!(resolve_unit_or_monster_battle_skills(310), (31002, 31001));
+    assert_eq!(
+        resolve_unit_or_monster_battle_skills(5001),
+        (FALLBACK_NORMAL_SKILL_ID, FALLBACK_RAGE_SKILL_ID)
+    );
+    assert!(monster_default_skill_unit_count() > before_mon);
+}
+
+// 29. Runtime `GameDataStore` JSON table loading & validation for custom/invalid skill rows
+#[test]
+fn test_29_runtime_game_data_store_hero_skill_loading_and_validation() {
+    use gserver_data::{
+        HeroSkillFallbackReason, HeroSkillResolutionSource, SkillIdValidationError,
+        FALLBACK_NORMAL_SKILL_ID, FALLBACK_RAGE_SKILL_ID,
+    };
+
+    let tmp_dir: PathBuf =
+        std::env::temp_dir().join(format!("gserver_skill_loader_test_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&tmp_dir);
+    fs::create_dir_all(tmp_dir.join("timeMachine_hero")).unwrap();
+    fs::create_dir_all(tmp_dir.join("skill")).unwrap();
+
+    let manifest = r#"{
+      "format_version": 1,
+      "generator": "gserver-data/export_db_to_json.py",
+      "database_count": 2,
+      "table_count": 2,
+      "databases": [
+        {"database": "timeMachine_hero", "source_file": "timeMachine_hero.db", "file_encrypted": false, "table_count": 1},
+        {"database": "skill", "source_file": "skill.db", "file_encrypted": false, "table_count": 1}
+      ],
+      "tables": [
+        {"database": "timeMachine_hero", "table": "timeMachine_hero", "relative_path": "timeMachine_hero/timeMachine_hero.json", "row_count": 4, "column_count": 4},
+        {"database": "skill", "table": "skill", "relative_path": "skill/skill.json", "row_count": 2, "column_count": 1}
+      ]
+    }"#;
+    fs::write(tmp_dir.join("manifest.json"), manifest).unwrap();
+
+    let skill_json = r#"{
+      "database": "skill",
+      "table": "skill",
+      "columns": [{"name": "name", "kind": "scalar"}],
+      "row_count": 2,
+      "rows": [
+        {"id": 990002, "name": "Custom Mod Normal Skill"},
+        {"id": 990001, "name": "Custom Mod Rage Skill"}
+      ]
+    }"#;
+    fs::write(tmp_dir.join("skill/skill.json"), skill_json).unwrap();
+
+    let tm_hero_json = r#"{
+      "database": "timeMachine_hero",
+      "table": "timeMachine_hero",
+      "columns": [
+        {"name": "name", "kind": "scalar"},
+        {"name": "com_atk", "kind": "scalar"},
+        {"name": "angry_atk", "kind": "scalar"}
+      ],
+      "row_count": 4,
+      "rows": [
+        {"id": 201, "name": "Triệu Vân", "com_atk": 20102, "angry_atk": 20101},
+        {"id": 9501, "name": "Custom Mod Hero", "com_atk": 990002, "angry_atk": 990001},
+        {"id": 9502, "name": "Zero & Negative Hero", "com_atk": 0, "angry_atk": -5},
+        {"id": 9503, "name": "UnvalidatedRageHero", "com_atk": 20102, "angry_atk": 888888}
+      ]
+    }"#;
+    fs::write(
+        tmp_dir.join("timeMachine_hero/timeMachine_hero.json"),
+        tm_hero_json,
+    )
+    .unwrap();
+
+    let store = GameDataStore::from_export_dir(&tmp_dir).expect("load runtime skill store");
+    assert!(store.contains_skill_id(990002));
+    assert!(store.contains_skill_id(20102));
+    assert!(!store.contains_skill_id(0));
+    assert!(!store.contains_skill_id(888888));
+
+    // Custom mod hero resolves custom validated skills from `skill/skill.json`
+    let mod_res = store.resolve_hero_battle_skills(9501, 0);
+    assert!(!mod_res.used_any_fallback());
+    assert_eq!(
+        (mod_res.normal_skill_id, mod_res.rage_skill_id),
+        (990002, 990001)
+    );
+    assert_eq!(
+        mod_res.source,
+        HeroSkillResolutionSource::ExportedDbRow {
+            htid: 9501,
+            awakened_override: false,
+        }
+    );
+
+    // Zero & negative skills fall back cleanly with exact error diagnostics
+    let bad_zero_neg = store.resolve_hero_battle_skills(9502, 0);
+    assert!(bad_zero_neg.used_normal_fallback && bad_zero_neg.used_rage_fallback);
+    assert_eq!(
+        (bad_zero_neg.normal_skill_id, bad_zero_neg.rage_skill_id),
+        (FALLBACK_NORMAL_SKILL_ID, FALLBACK_RAGE_SKILL_ID)
+    );
+    assert_eq!(
+        bad_zero_neg.source,
+        HeroSkillResolutionSource::Fallback(HeroSkillFallbackReason::InvalidSkillReference {
+            htid: 9502,
+            normal_error: Some(SkillIdValidationError::Zero),
+            rage_error: Some(SkillIdValidationError::Negative(-5)),
+        })
+    );
+
+    // Partial fallback: valid com_atk preserved (`20102`), invalid angry_atk falls back (`2001`)
+    let partial = store.resolve_hero_battle_skills(9503, 0);
+    assert!(!partial.used_normal_fallback && partial.used_rage_fallback);
+    assert_eq!(partial.normal_skill_id, 20102);
+    assert_eq!(partial.rage_skill_id, FALLBACK_RAGE_SKILL_ID);
+
+    // Non-overridden embedded hero `401` (Lữ Bố) still works seamlessly
+    let lubu = store.resolve_hero_battle_skills(401, 0);
+    assert_eq!((lubu.normal_skill_id, lubu.rage_skill_id), (40102, 40101));
+
+    let report = store.validate_hero_skill_mappings();
+    assert_eq!(report.total_templates_inspected, 4);
+    assert_eq!(report.valid_normal_skill_count, 3);
+    assert_eq!(report.valid_rage_skill_count, 2);
+    assert_eq!(report.fully_valid_hero_count, 2);
+    assert_eq!(report.missing_or_invalid_template_count, 2);
+    assert_eq!(report.missing_or_invalid_skill_ref_count, 3);
+    assert_eq!(report.fallback_template_count, 2);
+    assert_eq!(report.fallback_skill_slot_count, 3);
+
+    let _ = fs::remove_dir_all(&tmp_dir);
+}

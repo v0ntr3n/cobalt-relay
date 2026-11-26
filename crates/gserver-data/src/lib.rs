@@ -11,11 +11,12 @@
 //!    - Supports in-place header-stripping decryption, byte-slice decryption, symmetric
 //!      encryption for roundtrip verification, and SQLite `babeltime` hex-cell decryption
 //!      matching `CConfigManager.cpp` (`CTable::getRowById`).
-//! 2. **Authentic Extracted Starter & Core Templates**:
-//!    - Zero-allocation `const` tables (`PROTAGONISTS`, `HEROES`, `ITEMS`, `GEAR_SUITS`,
-//!      `TOWNS`, `BAG_LIMITS`, `LEVEL_EXP_CURVES`) plus embedded `curated_templates.json`
-//!      extracted from the real `vnsg2` client SQLite `.db` files so private servers never
-//!      send invalid `utid`, `htid`, `item_template_id`, `town_id`, or `exp_id` values.
+//! 2. **Authentic Extracted Starter, Core & Battle Skill Templates**:
+//!    - Zero-allocation `const` tables (`PROTAGONISTS`, `HEROES`, `HERO_SKILL_ENTRIES`,
+//!      `VALIDATED_SKILL_IDS`, `ITEMS`, `GEAR_SUITS`, `TOWNS`, `BAG_LIMITS`, `LEVEL_EXP_CURVES`)
+//!      plus embedded `curated_templates.json` extracted from the real `vnsg2` client SQLite
+//!      `.db` files so private servers never send invalid `utid`, `htid`, `arrSkill`,
+//!      `item_template_id`, `town_id`, or `exp_id` values.
 //! 3. **Runtime Client `database/` Export Directory Loader**:
 //!    - Companion `tools/export_db_to_json.py` decrypts and exports any client `database/`
 //!      folder into structured JSON tables + `manifest.json`, which [`ExportedDatabaseDir`]
@@ -24,6 +25,8 @@
 pub mod bt_decrypt;
 pub mod bt_row;
 pub mod generated_consts;
+pub mod generated_hero_skills;
+pub mod hero_skills;
 pub mod json;
 pub mod loader;
 pub mod templates;
@@ -40,6 +43,17 @@ pub use generated_consts::{
     BAG_LIMITS, CURRENT_VERSION_LEVEL_LIMIT, DEFAULT_STARTER_TOWN_ID, GEAR_SUITS,
     GLOBAL_ENERGY_LIMIT, GLOBAL_STAMINA_LIMIT, HEROES, ITEMS, LEVEL_EXP_CURVES, LUOYANG_TOWN_ID,
     PROTAGONISTS, TOWNS,
+};
+pub use generated_hero_skills::{HERO_SKILL_ENTRIES, VALIDATED_SKILL_IDS};
+pub use hero_skills::{
+    all_hero_skill_entries, all_validated_skill_ids, find_inherited_tier_skill_entry,
+    hero_skill_entry_by_htid, hero_skill_fallback_slot_count, hero_skill_fallback_template_count,
+    is_validated_skill_id, monster_default_skill_unit_count, resolve_hero_battle_skills,
+    resolve_hero_battle_skills_with_awake, resolve_unit_or_monster_battle_skills,
+    validate_embedded_hero_skill_mappings, validate_raw_skill_id, validate_raw_skill_id_with_extra,
+    HeroSkillEntry, HeroSkillFallbackReason, HeroSkillResolutionSource, HeroSkillValidationReport,
+    InvalidHeroSkillDetail, ResolvedHeroBattleSkills, SkillIdValidationError,
+    AWAKE_SKILL_CHANGE_RANK, FALLBACK_NORMAL_SKILL_ID, FALLBACK_RAGE_SKILL_ID,
 };
 pub use json::{parse_json, JsonError, JsonValue};
 pub use loader::{ExportedDatabaseDir, ExportedTable, GameDataStore, LoaderError, TableManifestEntry};

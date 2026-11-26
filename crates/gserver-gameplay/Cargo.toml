@@ -6,3 +6,4 @@ description = "Zero-dependency pure-Rust gameplay & GM command engine for GServe
 license = "MIT"
 
 [dependencies]
+gserver-data = { path = "../gserver-data" }

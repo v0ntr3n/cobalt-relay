@@ -334,13 +334,20 @@ pub struct HeroInstance {
 
 impl HeroInstance {
     pub fn from_template(hid: u64, htid: u32, level: u32) -> Self {
-        let country = match htid / 100 {
-            1 | 101 => 1, // Wei
-            2 | 102 => 2, // Shu
-            3 | 103 => 3, // Wu
-            4 | 104 => 4, // Qun
-            _ => (htid % 4) + 1,
-        };
+        Self::from_template_with_awake(hid, htid, level, 0)
+    }
+
+    pub fn from_template_with_awake(hid: u64, htid: u32, level: u32, awake_rank: u32) -> Self {
+        let country = gserver_data::hero_skill_entry_by_htid(htid)
+            .filter(|e| e.country > 0)
+            .map(|e| u32::from(e.country))
+            .unwrap_or_else(|| match htid / 100 {
+                1 | 101 => 1, // Wei
+                2 | 102 => 2, // Shu
+                3 | 103 => 3, // Wu
+                4 | 104 => 4, // Qun
+                _ => (htid % 4) + 1,
+            });
         let quality = if htid >= 20_000 {
             6 // Red
         } else if (105..=418).contains(&htid) && (htid % 100) < 20 {
@@ -357,6 +364,7 @@ impl HeroInstance {
         let pdef = 110 * q_mult + lv * 28 * q_mult;
         let mdef = 110 * q_mult + lv * 28 * q_mult;
         let speed = 100 + q_mult * 15 + lv * 2;
+        let resolved_skills = gserver_data::resolve_hero_battle_skills_with_awake(htid, awake_rank);
         Self {
             hid,
             htid,
@@ -364,7 +372,7 @@ impl HeroInstance {
             exp: 0,
             evolve_level: 0,
             upgrade_level: 0,
-            awake_rank: 0,
+            awake_rank,
             awake_level: 0,
             dress_id: 0,
             country,
@@ -375,19 +383,22 @@ impl HeroInstance {
             pdef,
             mdef,
             speed,
-            normal_skill_id: 1001,
-            rage_skill_id: 2001,
+            normal_skill_id: resolved_skills.normal_skill_id,
+            rage_skill_id: resolved_skills.rage_skill_id,
         }
     }
 
     pub fn recalculate_stats(&mut self) {
-        let fresh = Self::from_template(self.hid, self.htid, self.level);
+        let fresh =
+            Self::from_template_with_awake(self.hid, self.htid, self.level, self.awake_rank);
         self.max_hp = fresh.max_hp;
         self.cur_hp = fresh.max_hp;
         self.atk = fresh.atk;
         self.pdef = fresh.pdef;
         self.mdef = fresh.mdef;
         self.speed = fresh.speed;
+        self.normal_skill_id = fresh.normal_skill_id;
+        self.rage_skill_id = fresh.rage_skill_id;
     }
 
     pub fn fight_force(&self) -> u64 {

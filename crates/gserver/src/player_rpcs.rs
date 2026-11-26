@@ -21,7 +21,11 @@ use gserver_player::{
 };
 use gserver_protocol::{RpcRequest, S2cEnvelope, Value};
 
-use crate::bridge::{dto_to_amf3, player_json_to_amf3, profile_to_gameplay_state, u64_to_amf3};
+use gserver_data::GameDataStore;
+
+use crate::bridge::{
+    dto_to_amf3, player_json_to_amf3, profile_to_gameplay_state_with_store, u64_to_amf3,
+};
 
 pub struct PlayerRpcSuccess {
     pub ret: Value,
@@ -150,9 +154,14 @@ fn build_new_heroes_env(
     Some(S2cEnvelope::push("re.hero.new", Value::map(entries)).with_time(now_i64))
 }
 
-fn resync_gameplay(store: &PlayerStore, gameplay: &mut GameplayEngine, uid: u64) {
+fn resync_gameplay_with_store(
+    store: &PlayerStore,
+    gameplay: &mut GameplayEngine,
+    data_store: &GameDataStore,
+    uid: u64,
+) {
     if let Some(profile) = store.get_player(uid) {
-        let mut gp = profile_to_gameplay_state(profile);
+        let mut gp = profile_to_gameplay_state_with_store(profile, Some(data_store));
         if let Some(prev) = gameplay.players.get(&uid) {
             gp.online_accum_secs = prev.online_accum_secs;
             gp.chat_ban_until = prev.chat_ban_until;
@@ -255,6 +264,7 @@ fn write_u32_set_to_va(profile: &mut PlayerProfile, key: &str, vals: &[u32]) {
 pub fn try_handle_player_rpc(
     store: &mut PlayerStore,
     gameplay: &mut GameplayEngine,
+    data_store: &GameDataStore,
     uid: u64,
     req: &RpcRequest,
     now_ts: u64,
@@ -302,7 +312,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let mut peer_pushes = Vec::new();
             if let Some(gp) = gameplay.players.get(&uid) {
                 for (target_uid, pkt) in gameplay.town.sync_player_appearance(gp, now_ts) {
@@ -343,7 +353,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             let push = build_user_update_env(updated, now_i64);
             Some(Ok(PlayerRpcSuccess {
@@ -375,7 +385,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             Some(Ok(PlayerRpcSuccess {
                 ret: Value::String("ok".into()),
@@ -400,7 +410,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             Some(Ok(PlayerRpcSuccess {
                 ret: Value::String("ok".into()),
@@ -425,7 +435,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             Some(Ok(PlayerRpcSuccess {
                 ret: Value::String("ok".into()),
@@ -481,7 +491,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             let mut pushes = vec![build_user_update_env(updated, now_i64)];
             if let Some(bp) = build_bag_update_env(&added_items, &[], now_i64) {
@@ -544,7 +554,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             Some(Ok(PlayerRpcSuccess {
                 ret: Value::map([
@@ -595,7 +605,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let out = outcome_opt.expect("set above");
             let updated = store.get_player(uid).expect("exists");
             let mut upserted = out.granted_items.clone();
@@ -657,7 +667,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let out = outcome_opt.expect("set above");
             let updated = store.get_player(uid).expect("exists");
             let mut upserted = out.granted_items.clone();
@@ -735,7 +745,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             let mut pushes = vec![build_user_update_env(updated, now_i64)];
             if let Some(bp) = build_bag_update_env(&upserted, &removed, now_i64) {
@@ -802,7 +812,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             let mut upserted = Vec::new();
             let mut removed = Vec::new();
@@ -875,7 +885,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             let mut upserted = crafted.clone();
             let mut removed = Vec::new();
@@ -955,7 +965,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let out = out_opt.expect("set above");
             let updated = store.get_player(uid).expect("exists");
             Some(Ok(PlayerRpcSuccess {
@@ -977,7 +987,12 @@ pub fn try_handle_player_rpc(
             if hid <= 0 {
                 return Some(Err("invalid_hid".to_string()));
             }
-            let skill_id = req.args.get(1).and_then(Value::as_i64).unwrap_or(1001).max(1) as u32;
+            let explicit_skill_id = req
+                .args
+                .get(1)
+                .and_then(Value::as_i64)
+                .filter(|&v| v > 0)
+                .and_then(|v| u32::try_from(v).ok());
             let mut new_star_lv = 1u32;
             let res = store.mutate_player(uid, now_ts, |p| {
                 if !p.heroes.contains_key(&(hid as u64)) {
@@ -985,6 +1000,11 @@ pub fn try_handle_player_rpc(
                 }
                 p.consume_currency(CurrencyType::Copper, 2_000, now_ts)?;
                 let hero = p.heroes.get_mut(&(hid as u64)).expect("checked");
+                let skill_id = explicit_skill_id.unwrap_or_else(|| {
+                    data_store
+                        .resolve_hero_battle_skills(hero.htid, hero.awake_rank)
+                        .normal_skill_id
+                });
                 if !hero.talent.contains(&skill_id) {
                     hero.talent.push(skill_id);
                 }
@@ -996,7 +1016,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             Some(Ok(PlayerRpcSuccess {
                 ret: Value::map([
@@ -1033,7 +1053,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             Some(Ok(PlayerRpcSuccess {
                 ret: Value::map([
@@ -1061,7 +1081,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             Some(Ok(PlayerRpcSuccess {
                 ret: Value::map([
@@ -1151,7 +1171,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             Some(Ok(PlayerRpcSuccess {
                 ret: Value::String("ok".into()),
@@ -1173,7 +1193,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             Some(Ok(PlayerRpcSuccess {
                 ret: Value::String("ok".into()),
@@ -1195,7 +1215,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             Some(Ok(PlayerRpcSuccess {
                 ret: Value::String("ok".into()),
                 caller_pushes: Vec::new(),
@@ -1355,7 +1375,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             let upserted: Vec<BagItem> = returned_item.into_iter().collect();
             let removed = if upserted.iter().any(|i| i.gid == bag_gid) {
@@ -1441,7 +1461,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             removed.retain(|g| !upserted.iter().any(|u| u.gid == *g));
             let mut pushes = vec![build_user_update_env(updated, now_i64)];
@@ -1475,7 +1495,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let bag_item = bag_item_opt.expect("set above");
             let updated = store.get_player(uid).expect("exists");
             let mut pushes = vec![build_user_update_env(updated, now_i64)];
@@ -1534,7 +1554,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             Some(Ok(PlayerRpcSuccess {
                 ret: Value::String("ok".into()),
@@ -1642,7 +1662,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             let mut pushes = vec![build_user_update_env(updated, now_i64)];
             if let Some(bp) = build_bag_update_env(&bag_upserted, &[], now_i64) {
@@ -1679,7 +1699,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             Some(Ok(PlayerRpcSuccess {
                 ret: Value::map([
@@ -1700,7 +1720,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             let info = dto_to_amf3(&gameplay.raffle.get_info(uid, now_ts), true);
             Some(Ok(PlayerRpcSuccess {
@@ -1770,7 +1790,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             Some(Ok(PlayerRpcSuccess {
                 ret: Value::map([
@@ -1862,7 +1882,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             Some(Ok(PlayerRpcSuccess {
                 ret: Value::map([
@@ -1894,7 +1914,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             Some(Ok(PlayerRpcSuccess {
                 ret: Value::String("ok".into()),
@@ -1932,7 +1952,7 @@ pub fn try_handle_player_rpc(
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
-            resync_gameplay(store, gameplay, uid);
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
             let updated = store.get_player(uid).expect("exists");
             Some(Ok(PlayerRpcSuccess {
                 ret: Value::String("ok".into()),

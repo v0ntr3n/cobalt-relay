@@ -33,6 +33,7 @@ pub struct SnapshotArenaPlayer {
     pub level: u32,
     pub fight_force: u64,
     pub position: u32,
+    pub htid: u32,
 }
 
 impl BxhSnapshot {
@@ -193,12 +194,22 @@ impl BxhSnapshot {
                                 .to_string();
                             let level = json_as_u64(entry.get("level")).unwrap_or(1) as u32;
                             let fc = json_as_u64(entry.get("fight_force")).unwrap_or(10_000);
+                            let htid = json_as_u64(entry.get("htid"))
+                                .or_else(|| json_as_u64(entry.get("utid")))
+                                .or_else(|| {
+                                    self.players_by_uid.get(&uid).and_then(|p| {
+                                        json_as_u64(p.get("htid"))
+                                            .or_else(|| json_as_u64(p.get("utid")))
+                                    })
+                                })
+                                .unwrap_or(310) as u32;
                             out.push(SnapshotArenaPlayer {
                                 uid,
                                 uname,
                                 level,
                                 fight_force: fc,
                                 position: pos,
+                                htid,
                             });
                         }
                     }
@@ -221,12 +232,22 @@ impl BxhSnapshot {
                                 .to_string();
                             let level = json_as_u64(entry.get("level")).unwrap_or(1) as u32;
                             let fc = json_as_u64(entry.get("fight_force")).unwrap_or(10_000);
+                            let htid = json_as_u64(entry.get("htid"))
+                                .or_else(|| json_as_u64(entry.get("utid")))
+                                .or_else(|| {
+                                    self.players_by_uid.get(&uid).and_then(|p| {
+                                        json_as_u64(p.get("htid"))
+                                            .or_else(|| json_as_u64(p.get("utid")))
+                                    })
+                                })
+                                .unwrap_or(310) as u32;
                             out.push(SnapshotArenaPlayer {
                                 uid,
                                 uname,
                                 level,
                                 fight_force: fc,
                                 position: pos,
+                                htid,
                             });
                         }
                     }

@@ -21,6 +21,9 @@ version = "0.1.0"
 [[package]]
 name = "gserver-gameplay"
 version = "0.1.0"
+dependencies = [
+ "gserver-data",
+]
 
 [[package]]
 name = "gserver-http"
@@ -29,6 +32,9 @@ version = "0.1.0"
 [[package]]
 name = "gserver-player"
 version = "0.1.0"
+dependencies = [
+ "gserver-data",
+]
 
 [[package]]
 name = "gserver-protocol"

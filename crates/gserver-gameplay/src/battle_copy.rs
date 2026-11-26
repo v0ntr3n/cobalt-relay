@@ -34,6 +34,27 @@ pub struct CombatUnit {
 
 impl CombatUnit {
     pub fn from_hero(hero: &HeroInstance, position: u32) -> Self {
+        let canonical =
+            gserver_data::resolve_hero_battle_skills_with_awake(hero.htid, hero.awake_rank);
+        let has_stale_fallback = hero.normal_skill_id == gserver_data::FALLBACK_NORMAL_SKILL_ID
+            && hero.rage_skill_id == gserver_data::FALLBACK_RAGE_SKILL_ID
+            && !canonical.used_any_fallback();
+        let normal_skill_id = if !has_stale_fallback
+            && hero.normal_skill_id > 0
+            && gserver_data::is_validated_skill_id(hero.normal_skill_id)
+        {
+            hero.normal_skill_id
+        } else {
+            canonical.normal_skill_id
+        };
+        let rage_skill_id = if !has_stale_fallback
+            && hero.rage_skill_id > 0
+            && gserver_data::is_validated_skill_id(hero.rage_skill_id)
+        {
+            hero.rage_skill_id
+        } else {
+            canonical.rage_skill_id
+        };
         Self {
             hid: hero.hid,
             htid: hero.htid,
@@ -50,8 +71,8 @@ impl CombatUnit {
             cur_rage: 2,
             max_rage: 4,
             rage_cost: 4,
-            normal_skill_id: hero.normal_skill_id,
-            rage_skill_id: hero.rage_skill_id,
+            normal_skill_id,
+            rage_skill_id,
             damage_dealt: 0,
         }
     }
@@ -59,12 +80,18 @@ impl CombatUnit {
     pub fn monster(hid: u64, htid: u32, position: u32, level: u32) -> Self {
         let lv = i64::from(level.max(1));
         let max_hp = 800 + lv * 260;
+        let (normal_skill_id, rage_skill_id) =
+            gserver_data::resolve_unit_or_monster_battle_skills(htid);
+        let country = gserver_data::hero_skill_entry_by_htid(htid)
+            .filter(|e| e.country > 0)
+            .map(|e| u32::from(e.country))
+            .unwrap_or(4);
         Self {
             hid,
             htid,
             position: position.min(5),
             level: level.max(1),
-            country: 4,
+            country,
             dress_id: 0,
             max_hp,
             cur_hp: max_hp,
@@ -75,8 +102,8 @@ impl CombatUnit {
             cur_rage: 1,
             max_rage: 4,
             rage_cost: 4,
-            normal_skill_id: 1001,
-            rage_skill_id: 2001,
+            normal_skill_id,
+            rage_skill_id,
             damage_dealt: 0,
         }
     }
@@ -426,7 +453,9 @@ pub fn extract_player_combat_units(player: &PlayerState) -> Vec<CombatUnit> {
         }
     }
     if units.is_empty() {
-        units.push(CombatUnit::monster(10_000_001, player.utid, 0, player.level));
+        let fallback_protagonist =
+            HeroInstance::from_template(10_000_001, player.utid, player.level);
+        units.push(CombatUnit::from_hero(&fallback_protagonist, 0));
     }
     units
 }
@@ -956,6 +985,7 @@ pub struct ArenaCompetitor {
     pub fight_force: u64,
     pub position: u32,
     pub is_npc: bool,
+    pub lead_htid: u32,
 }
 
 impl ArenaCompetitor {
@@ -986,11 +1016,16 @@ impl Default for ArenaEngine {
 }
 
 impl ArenaEngine {
+    const GUARD_HTIDS: [u32; 15] = [
+        401, 201, 101, 301, 204, 106, 312, 406, 107, 207, 304, 403, 116, 314, 310,
+    ];
+
     pub fn new() -> Self {
         let mut ladder = BTreeMap::new();
         let mut uid_to_pos = BTreeMap::new();
         for pos in 1..=15u32 {
             let npc_uid = u64::from(pos);
+            let lead_htid = Self::GUARD_HTIDS[(pos - 1) as usize];
             let comp = ArenaCompetitor {
                 uid: npc_uid,
                 uname: format!("ArenaGuard_{pos}"),
@@ -998,6 +1033,7 @@ impl ArenaEngine {
                 fight_force: 3_000 + u64::from(16 - pos) * 1_200,
                 position: pos,
                 is_npc: true,
+                lead_htid,
             };
             ladder.insert(pos, comp);
             uid_to_pos.insert(npc_uid, pos);
@@ -1010,17 +1046,48 @@ impl ArenaEngine {
         }
     }
 
+    fn resolve_player_lead_htid(player: &PlayerState) -> u32 {
+        player
+            .roster
+            .formation
+            .iter()
+            .copied()
+            .find(|&hid| hid != 0)
+            .and_then(|hid| player.roster.heroes.get(&hid))
+            .map(|h| h.htid)
+            .filter(|&htid| htid > 0)
+            .unwrap_or_else(|| player.utid.max(1))
+    }
+
     /// Replaces the default NPC ladder with real snapshot competitors `(uid, uname, level, fight_force, position)`.
     pub fn seed_competitors(&mut self, entries: Vec<(u64, String, u32, u64, u32)>) {
+        let expanded = entries
+            .into_iter()
+            .map(|(uid, uname, level, fight_force, position)| {
+                let fallback_htid =
+                    Self::GUARD_HTIDS[((position.max(1) - 1) as usize) % Self::GUARD_HTIDS.len()];
+                (uid, uname, level, fight_force, position, fallback_htid)
+            })
+            .collect();
+        self.seed_competitors_with_htid(expanded);
+    }
+
+    /// Replaces the default NPC ladder with real snapshot competitors including `lead_htid`.
+    pub fn seed_competitors_with_htid(&mut self, entries: Vec<(u64, String, u32, u64, u32, u32)>) {
         if entries.is_empty() {
             return;
         }
         self.ladder.clear();
         self.uid_to_pos.clear();
-        for (uid, uname, level, fight_force, position) in entries {
+        for (uid, uname, level, fight_force, position, lead_htid) in entries {
             if position == 0 {
                 continue;
             }
+            let resolved_htid = if lead_htid > 0 && gserver_data::is_valid_hero_htid(lead_htid) {
+                lead_htid
+            } else {
+                Self::GUARD_HTIDS[((position - 1) as usize) % Self::GUARD_HTIDS.len()]
+            };
             let comp = ArenaCompetitor {
                 uid,
                 uname,
@@ -1028,6 +1095,7 @@ impl ArenaEngine {
                 fight_force,
                 position,
                 is_npc: true,
+                lead_htid: resolved_htid,
             };
             self.ladder.insert(position, comp);
             self.uid_to_pos.insert(uid, position);
@@ -1035,11 +1103,13 @@ impl ArenaEngine {
     }
 
     pub fn ensure_registered(&mut self, player: &PlayerState) -> u32 {
+        let lead_htid = Self::resolve_player_lead_htid(player);
         if let Some(&pos) = self.uid_to_pos.get(&player.uid) {
             if let Some(entry) = self.ladder.get_mut(&pos) {
                 entry.uname = player.uname.clone();
                 entry.level = player.level;
                 entry.fight_force = player.fight_force();
+                entry.lead_htid = lead_htid;
             }
             return pos;
         }
@@ -1051,6 +1121,7 @@ impl ArenaEngine {
             fight_force: player.fight_force(),
             position: next_pos,
             is_npc: false,
+            lead_htid,
         };
         self.ladder.insert(next_pos, comp);
         self.uid_to_pos.insert(player.uid, next_pos);
@@ -1115,9 +1186,14 @@ impl ArenaEngine {
 
         let brid = copy_engine.alloc_brid();
         let t1 = extract_player_combat_units(player);
+        let def_htid = if defender.lead_htid > 0 {
+            defender.lead_htid
+        } else {
+            310
+        };
         let t2 = vec![CombatUnit::monster(
             defender.uid.max(800_001),
-            310,
+            def_htid,
             0,
             defender.level,
         )];

@@ -17,7 +17,7 @@ impl Gender {
         match utid {
             1 => Ok(Gender::Male),
             2 => Ok(Gender::Female),
-            _ if (1..=28).contains(&utid) => {
+            _ if gserver_data::is_protagonist_htid(utid) => {
                 if utid % 2 == 1 {
                     Ok(Gender::Male)
                 } else {
@@ -460,9 +460,20 @@ impl HeroInstance {
         }
     }
 
-    /// `current_config.db` defines protagonist template IDs as `1..=28` (male odd `1..27`, female even `2..28`).
+    /// `timeMachine_current_config.db` defines protagonist template IDs as `1..=36` (male odd `1..35`, female even `2..36`).
     pub const fn is_protagonist(&self) -> bool {
-        self.htid >= 1 && self.htid <= 28
+        self.htid >= 1 && self.htid <= 36
+    }
+
+    /// Resolves authentic `(normal_skill_id, rage_skill_id)` (`com_atk`, `angry_atk`) from `gserver-data`.
+    pub fn resolved_battle_skills(&self) -> gserver_data::ResolvedHeroBattleSkills {
+        gserver_data::resolve_hero_battle_skills_with_awake(self.htid, self.awake_rank)
+    }
+
+    /// Returns `(normal_skill_id, rage_skill_id)` for this hero instance.
+    pub fn battle_skill_ids(&self) -> (u32, u32) {
+        let res = self.resolved_battle_skills();
+        (res.normal_skill_id, res.rage_skill_id)
     }
 
     /// Exact `HeroInfo:init(data)` wire dictionary (`HeroInfo.lua`), plus classic `soul` / `talent` / `equip` compatibility keys.

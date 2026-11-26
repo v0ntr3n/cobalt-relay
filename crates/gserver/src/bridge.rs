@@ -44,9 +44,7 @@ pub fn player_json_to_amf3(val: &PlayerJson) -> Value {
         PlayerJson::UInt(u) => u64_to_amf3(*u),
         PlayerJson::Float(f) => Value::Double(*f),
         PlayerJson::Str(s) => Value::String(s.clone()),
-        PlayerJson::Array(arr) => {
-            Value::dense_array(arr.iter().map(player_json_to_amf3).collect())
-        }
+        PlayerJson::Array(arr) => Value::dense_array(arr.iter().map(player_json_to_amf3).collect()),
         PlayerJson::Object(map) => {
             if map.is_empty() {
                 Value::empty_array()
@@ -217,6 +215,15 @@ pub fn to_gameplay_request(req: &gserver_protocol::RpcRequest) -> GameplayRpcReq
 
 /// Hydrates a `GameplayEngine` `PlayerState` from a persistent `PlayerProfile`.
 pub fn profile_to_gameplay_state(profile: &PlayerProfile) -> GameplayPlayer {
+    profile_to_gameplay_state_with_store(profile, None)
+}
+
+/// Hydrates a `GameplayEngine` `PlayerState` from a persistent `PlayerProfile`,
+/// optionally resolving hero battle skills via a runtime [`gserver_data::GameDataStore`].
+pub fn profile_to_gameplay_state_with_store(
+    profile: &PlayerProfile,
+    data_store: Option<&gserver_data::GameDataStore>,
+) -> GameplayPlayer {
     let mut gp = GameplayPlayer::new(profile.uid, profile.uname.clone(), profile.utid);
     gp.pid = profile.pid.clone();
     gp.level = profile.level;
@@ -261,6 +268,11 @@ pub fn profile_to_gameplay_state(profile: &PlayerProfile) -> GameplayPlayer {
         gh.awake_level = hero.awake_level;
         gh.dress_id = hero.dress_id;
         gh.recalculate_stats();
+        if let Some(ds) = data_store {
+            let resolved = ds.resolve_hero_battle_skills(hero.htid, hero.awake_rank);
+            gh.normal_skill_id = resolved.normal_skill_id;
+            gh.rage_skill_id = resolved.rage_skill_id;
+        }
         gp.roster.heroes.insert(hid, gh);
     }
     gp.roster.set_next_hid(max_hid.max(profile.next_hid) + 1);
