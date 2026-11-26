@@ -160,16 +160,21 @@ impl StrictWireClient {
         loop {
             while let Some(frame) = self.rx.next_frame().expect("decode S2C 8B frame") {
                 let batch = decode_s2c_frame_batch(&frame).expect("decode S2C envelope batch");
+                let mut matched: Option<S2cEnvelope> = None;
                 for env in batch.items {
                     if let Some(ref tok) = env.token {
                         if !tok.is_empty() && tok != "0" {
                             self.token = tok.clone();
                         }
                     }
-                    if env.callback_name.as_deref() == Some(cb_name.as_str()) {
-                        return env;
+                    if matched.is_none() && env.callback_name.as_deref() == Some(cb_name.as_str()) {
+                        matched = Some(env);
+                    } else {
+                        self.queued_pushes.push(env);
                     }
-                    self.queued_pushes.push(env);
+                }
+                if let Some(found) = matched {
+                    return found;
                 }
             }
             let n = self
@@ -204,6 +209,14 @@ impl StrictWireClient {
     }
 
     fn drain_pushes(&mut self) -> Vec<S2cEnvelope> {
+        while let Some(frame) = self
+            .rx
+            .next_frame()
+            .expect("decode buffered S2C push frame")
+        {
+            let batch = decode_s2c_frame_batch(&frame).expect("decode buffered push batch");
+            self.queued_pushes.extend(batch.items);
+        }
         let _ = self
             .stream
             .set_read_timeout(Some(Duration::from_millis(80)));
@@ -388,6 +401,21 @@ fn parse_copper(user_ret: &Value) -> u64 {
                 .or_else(|| v.as_i64().map(|n| n as u64))
         })
         .expect("numeric copper in user.getUser")
+}
+
+fn sum_bag_template_count(bag_ret: &Value, sub_bag: &str, target_tid: i64) -> i64 {
+    let Some(Value::Object(map)) = bag_ret.get_field(sub_bag) else {
+        return 0;
+    };
+    let mut total = 0i64;
+    for (_, slot) in map.iter() {
+        let tid = slot.get_field("item_template_id").and_then(Value::as_i64);
+        let num = slot.get_field("item_num").and_then(Value::as_i64);
+        if tid == Some(target_tid) {
+            total += num.unwrap_or(0);
+        }
+    }
+    total
 }
 
 #[test]
@@ -1726,6 +1754,340 @@ fn strict_all_12_domains_gameplay_security_and_wal_recovery() {
     server2.shutdown();
 }
 
+#[test]
+fn issue_3_flow_a_copy_battle_and_flow_b_act_star_gift_claim_live_e2e() {
+    let tmp = TempDirGuard::new("issue3_flows");
+    let cfg = DaemonConfig::strict_all(tmp.path.clone());
+    let server = RunningServer::start(cfg.clone()).expect("start strict RunningServer");
+    let (http_addr, tcp_addr) = (server.http_addr, server.tcp_addr);
+
+    let login_and_enter = |http: SocketAddr,
+                           tcp: SocketAddr,
+                           dev: &str,
+                           utid: i32,
+                           uname: &str,
+                           existing_uid: Option<u64>|
+     -> (StrictWireClient, String, u64) {
+        let (pid, hash, _) = strict_auth_guest(http, dev);
+        let mut cli = StrictWireClient::connect(tcp);
+        let login_env = cli.call_rpc(
+            "user.login",
+            vec![Value::map([
+                ("AMF", Value::Int(3)),
+                ("pid", Value::String(pid.clone())),
+                ("qid", Value::String(pid.clone())),
+                ("hash", Value::String(hash)),
+                ("serverID", Value::String("game2900161".into())),
+            ])],
+            true,
+        );
+        assert_eq!(login_env.err, "ok");
+        let uid = if let Some(u) = existing_uid {
+            u
+        } else {
+            let cu = cli.call_rpc(
+                "user.createUser",
+                vec![Value::Int(utid), Value::String(uname.into())],
+                false,
+            );
+            assert_eq!(cu.err, "ok");
+            cli.call_rpc("user.getUserBeforLogin", vec![], false)
+                .ret
+                .get_field("uid")
+                .and_then(Value::as_i64)
+                .unwrap() as u64
+        };
+        assert_eq!(
+            cli.call_rpc("user.userLogin", vec![Value::Int(uid as i32)], false)
+                .ret
+                .as_str(),
+            Some("ok")
+        );
+        (cli, pid, uid)
+    };
+
+    // Client A (promoted to Lv.35 + deployed companion) & Client B (stays at starter Lv.10)
+    let (mut client_a, _pid_a, uid_a) =
+        login_and_enter(http_addr, tcp_addr, "issue3_player_alpha", 1, "ChiếnThầnA6", None);
+    let (mut client_b, _pid_b, _uid_b) =
+        login_and_enter(http_addr, tcp_addr, "issue3_player_beta", 2, "TânThủB1", None);
+
+    assert_eq!(
+        client_a
+            .call_rpc("chat.sendWorld", vec![Value::Int(1), Value::String("/level 35".into())], false)
+            .err,
+        "ok"
+    );
+    let comp_hero = client_a.call_rpc("exchange.composeHero", vec![Value::Int(50_101), Value::Int(1)], false);
+    assert_eq!(comp_hero.err, "ok");
+    let comp_hid = comp_hero.ret.get_field("hid").and_then(Value::as_i64).unwrap() as i32;
+    assert_eq!(
+        client_a
+            .call_rpc("formation.setHeroToPosition", vec![Value::Int(comp_hid), Value::Int(2)], false)
+            .err,
+        "ok"
+    );
+    let _ = client_a.drain_pushes();
+
+    // === FLOW A: Copy Battle (`copy.attack` + `copy.pass`) Live E2E ===
+    for (ch_id, cp_id) in [(0, 0), (1001, 200_101)] {
+        assert_eq!(
+            client_a.call_rpc("copy.attack", vec![Value::Int(ch_id), Value::Int(cp_id)], false).err,
+            "invalid_copy_stage"
+        );
+    }
+
+    let pre_user = client_a.call_rpc("user.getUser", vec![], false).ret;
+    let pre_exec = pre_user.get_field("execution").and_then(Value::as_i64).unwrap();
+    let pre_exp = pre_user.get_field("exp").and_then(Value::as_i64).unwrap();
+    let pre_copper = parse_copper(&pre_user) as i64;
+    let pre_soul = pre_user.get_field("hero_soul").and_then(Value::as_i64).unwrap();
+    let pre_gold = pre_user.get_field("gold").and_then(Value::as_i64).unwrap();
+    let pre_bag = client_a.call_rpc("bag.bagInfo", vec![], false).ret;
+    let pre_17002 = sum_bag_template_count(&pre_bag, "item", 17_002);
+    let pre_16012 = sum_bag_template_count(&pre_bag, "item", 16_012);
+
+    let atk_args = vec![Value::Int(1001), Value::Int(100_101)];
+    let atk = client_a.call_rpc("copy.attack", atk_args.clone(), false);
+    assert_eq!(atk.err, "ok");
+    assert_catalog_valid("copy.attack", &atk_args, &atk);
+    assert_eq!(atk.ret.get_field("ret").and_then(Value::as_str), Some("ok"));
+    let brid = atk.ret.get_field("brid").and_then(Value::as_i64).unwrap();
+    assert!(brid > 0);
+    assert_eq!(atk.ret.get_field("appraisal").and_then(Value::as_i64), Some(50));
+
+    let atk_drop = atk.ret.get_field("drop").expect("drop dictionary");
+    assert_eq!(atk_drop.get_field("copper").and_then(Value::as_i64), Some(1750));
+    assert_eq!(atk_drop.get_field("soul").and_then(Value::as_i64), Some(60));
+    assert_eq!(
+        atk_drop.get_field("item").and_then(|m| m.get_field("17002")).and_then(Value::as_i64),
+        Some(1)
+    );
+
+    let battle_info = atk.ret.get_field("battleInfo").expect("battleInfo");
+    assert_eq!(battle_info.get_field("isPVP").and_then(Value::as_i64), Some(0));
+    for team_key in ["arrTeam1", "arrTeam2"] {
+        let Value::Object(heroes) = battle_info
+            .get_field(team_key)
+            .and_then(|t| t.get_field("1"))
+            .and_then(|t| t.get_field("arrHero"))
+            .expect("arrHero")
+        else {
+            panic!("expected {team_key}.1.arrHero object");
+        };
+        if team_key == "arrTeam1" {
+            assert_eq!(heroes.iter().count(), 3);
+        }
+        for (_, unit) in heroes.iter() {
+            let Value::Array { dense: skills, .. } = unit.get_field("arrSkill").expect("arrSkill")
+            else {
+                panic!("expected arrSkill array");
+            };
+            assert_eq!(skills.len(), 2);
+            let Value::Array { dense: s0, .. } = &skills[0] else { panic!("skill 0") };
+            let Value::Array { dense: s1, .. } = &skills[1] else { panic!("skill 1") };
+            let htid = unit.get_field("htid").and_then(Value::as_i64).unwrap_or(0);
+            if team_key == "arrTeam1" {
+                let resolved = gserver_data::resolve_hero_battle_skills(htid as u32);
+                let expected = match htid {
+                    1 => (102, 101),
+                    2 => (104, 103),
+                    101 => (10102, 10101),
+                    401 => (40102, 40101),
+                    406 => (40602, 40601),
+                    426 => (42602, 42601),
+                    _ => (resolved.normal_skill_id as i64, resolved.rage_skill_id as i64),
+                };
+                assert!(!resolved.used_normal_fallback && !resolved.used_rage_fallback);
+                assert_eq!((s0[0].as_i64(), s1[0].as_i64()), (Some(expected.0), Some(expected.1)));
+                assert_ne!(s0[0].as_i64(), Some(1001));
+                assert_ne!(s1[0].as_i64(), Some(2001));
+                assert_ne!(s0[0].as_i64(), Some(1201));
+            } else {
+                assert_eq!((s0[0].as_i64(), s1[0].as_i64()), (Some(1001), Some(2001)));
+            }
+        }
+    }
+
+    let raw_fight_ret = zlib_decompress(atk.ret.get_field("fightRet").and_then(Value::as_bytes).unwrap()).unwrap();
+    let (fight_report, _) = amf3::decode(&raw_fight_ret).unwrap();
+    assert_eq!(fight_report.get_field("brid").and_then(Value::as_i64), Some(brid));
+    assert_eq!(fight_report.get_field("appraisal").and_then(Value::as_i64), Some(50));
+    if let Some(Value::Array { dense: rq, .. }) = fight_report.get_field("rageQueue") {
+        for step in rq {
+            let rq_sid = step.get_field("skillId").and_then(Value::as_i64).unwrap_or(0);
+            assert!(
+                rq_sid > 0 && rq_sid != 1201 && gserver_data::is_validated_skill_id(rq_sid as u32),
+                "unexpected rageQueue skillId {rq_sid}"
+            );
+        }
+    }
+    let rec_env = client_a.call_rpc("battle.getRecord", vec![Value::Int(brid as i32)], false);
+    assert_eq!(rec_env.err, "ok");
+    let (rec_amf, _) = amf3::decode(&zlib_decompress(rec_env.ret.as_bytes().unwrap()).unwrap()).unwrap();
+    assert_eq!(rec_amf.get_field("appraisal").and_then(Value::as_i64), Some(50));
+
+    let _ = client_a.drain_pushes();
+    let pass_args = vec![Value::Int(1001), Value::Int(100_101), Value::empty_array()];
+    let pass_env = client_a.call_rpc("copy.pass", pass_args.clone(), false);
+    assert_eq!(pass_env.err, "ok");
+    assert_catalog_valid("copy.pass", &pass_args, &pass_env);
+    assert_eq!(pass_env.ret.get_field("battle_result").and_then(Value::as_i64), Some(1));
+    assert_eq!(pass_env.ret.get_field("star").and_then(Value::as_i64), Some(3));
+    assert_eq!(pass_env.ret.get_field("exp").and_then(Value::as_i64), Some(2100));
+    let pass_pushes = client_a.drain_pushes();
+    assert!(pass_pushes.iter().any(|p| p.callback_name.as_deref() == Some("user.updateUser")));
+    assert!(pass_pushes.iter().any(|p| p.callback_name.as_deref() == Some("bag.update")));
+
+    assert_eq!(client_a.call_rpc("copy.attack", vec![Value::Int(1001), Value::Int(100_105)], false).err, "ok");
+    assert_eq!(
+        client_a.call_rpc("copy.pass", vec![Value::Int(1001), Value::Int(100_105), Value::empty_array()], false).err,
+        "ok"
+    );
+    assert_eq!(client_a.call_rpc("copy.fetchPrize", vec![Value::Int(1001), Value::Int(0)], false).err, "ok");
+    assert_eq!(
+        client_a.call_rpc("copy.fetchPrize", vec![Value::Int(1001), Value::Int(0)], false).err,
+        "prize_already_claimed"
+    );
+
+    let mid_user = client_a.call_rpc("user.getUser", vec![], false).ret;
+    assert_eq!(mid_user.get_field("execution").and_then(Value::as_i64), Some(pre_exec - 12));
+    assert_eq!(mid_user.get_field("exp").and_then(Value::as_i64), Some(pre_exp + 4200));
+    assert_eq!(parse_copper(&mid_user) as i64, pre_copper + 1750 + 2750);
+    assert_eq!(mid_user.get_field("hero_soul").and_then(Value::as_i64), Some(pre_soul + 60 + 100));
+    assert_eq!(mid_user.get_field("gold").and_then(Value::as_i64), Some(pre_gold + 100));
+    let mid_bag = client_a.call_rpc("bag.bagInfo", vec![], false).ret;
+    assert_eq!(sum_bag_template_count(&mid_bag, "item", 17_002), pre_17002 + 2);
+    assert_eq!(sum_bag_template_count(&mid_bag, "item", 16_012), pre_16012 + 1);
+
+    let copy_list = client_a.call_rpc("copy.getList", vec![Value::Int(1)], false);
+    assert_eq!(copy_list.err, "ok");
+    assert_catalog_valid("copy.getList", &[Value::Int(1)], &copy_list);
+    let c1001 = copy_list.ret.get_field("copyData").and_then(|cd| cd.get_field("1001")).unwrap();
+    assert_eq!(c1001.get_field("star").and_then(Value::as_i64), Some(6));
+    assert_eq!(c1001.get_field("pass_strongh").and_then(Value::as_i64), Some(2));
+    assert_eq!(c1001.get_field("prize").and_then(Value::as_i64), Some(1));
+    assert!(copy_list.ret.get_field("copyData").and_then(|cd| cd.get_field("1002")).is_some());
+
+    // === FLOW B: ActStar Gift Claim (`activityStarPlayOpen.receiveGift`) Live E2E ===
+    let star_init = client_a.call_rpc("activityStarPlayOpen.getInfo", vec![], false);
+    assert_eq!(star_init.err, "ok");
+    assert_catalog_valid("activityStarPlayOpen.getInfo", &[], &star_init);
+    assert!(matches!(star_init.ret, Value::Array { ref dense, ref assoc } if dense.is_empty() && assoc.is_empty()));
+
+    for bad_id in [0, -1, 99] {
+        assert_eq!(
+            client_a.call_rpc("activityStarPlayOpen.receiveGift", vec![Value::Int(bad_id)], false).err,
+            "invalid_gift_id"
+        );
+    }
+    assert_eq!(
+        client_b.call_rpc("activityStarPlayOpen.receiveGift", vec![Value::Int(3)], false).err,
+        "level_not_enough"
+    );
+    for locked_id in [5, 6] {
+        assert_eq!(
+            client_a.call_rpc("activityStarPlayOpen.receiveGift", vec![Value::Int(locked_id)], false).err,
+            "level_not_enough"
+        );
+    }
+
+    let pre_star_gold = mid_user.get_field("gold").and_then(Value::as_i64).unwrap();
+    let pre_star_copper = parse_copper(&mid_user) as i64;
+    let pre_10010 = sum_bag_template_count(&mid_bag, "item", 10_010);
+    let pre_22202 = sum_bag_template_count(&mid_bag, "item", 22_202);
+    let pre_50406 = sum_bag_template_count(&mid_bag, "soul", 50_406);
+
+    let _ = client_a.drain_pushes();
+    let g1 = client_a.call_rpc("activityStarPlayOpen.receiveGift", vec![Value::Int(1)], false);
+    assert_eq!(g1.err, "ok");
+    assert_catalog_valid("activityStarPlayOpen.receiveGift", &[Value::Int(1)], &g1);
+    assert_eq!(g1.ret.get_field("id").and_then(Value::as_i64), Some(1));
+    let Value::Array { dense: g1_rw, .. } = g1.ret.get_field("reward").unwrap() else { panic!("reward") };
+    assert_eq!(g1_rw.len(), 4);
+    let star_pushes = client_a.drain_pushes();
+    assert!(star_pushes.iter().any(|p| p.callback_name.as_deref() == Some("user.updateUser")));
+    assert!(star_pushes.iter().any(|p| p.callback_name.as_deref() == Some("bag.update")));
+
+    let g4 = client_a.call_rpc("activityStarPlayOpen.receiveGift", vec![Value::Int(4)], false);
+    assert_eq!(g4.err, "ok");
+    assert_catalog_valid("activityStarPlayOpen.receiveGift", &[Value::Int(4)], &g4);
+
+    for dup_id in [1, 4] {
+        assert_eq!(
+            client_a.call_rpc("activityStarPlayOpen.receiveGift", vec![Value::Int(dup_id)], false).err,
+            "already_claimed"
+        );
+    }
+
+    let post_star_user = client_a.call_rpc("user.getUser", vec![], false).ret;
+    assert_eq!(post_star_user.get_field("gold").and_then(Value::as_i64), Some(pre_star_gold + 188 + 588));
+    assert_eq!(parse_copper(&post_star_user) as i64, pre_star_copper + 50_000 + 200_000);
+    let post_star_bag = client_a.call_rpc("bag.bagInfo", vec![], false).ret;
+    assert_eq!(sum_bag_template_count(&post_star_bag, "item", 10_010), pre_10010 + 20);
+    assert_eq!(sum_bag_template_count(&post_star_bag, "item", 22_202), pre_22202 + 3);
+    assert_eq!(sum_bag_template_count(&post_star_bag, "soul", 50_406), pre_50406 + 35);
+
+    // === Fresh TCP Reconnect + Cold WAL Server Restart Verification ===
+    drop(client_a);
+    drop(client_b);
+    let (mut reconn_client, _, _) =
+        login_and_enter(http_addr, tcp_addr, "issue3_player_alpha", 1, "ChiếnThầnA6", Some(uid_a));
+    let reconn_star = reconn_client.call_rpc("activityStarPlayOpen.getInfo", vec![], false);
+    assert_eq!(reconn_star.err, "ok");
+    assert_catalog_valid("activityStarPlayOpen.getInfo", &[], &reconn_star);
+    assert_eq!(reconn_star.ret.get_field("1"), Some(&Value::Bool(true)));
+    assert_eq!(reconn_star.ret.get_field("4"), Some(&Value::Bool(true)));
+    assert!(reconn_star.ret.get_field("2").is_none());
+    drop(reconn_client);
+
+    server.shutdown();
+    let server2 = RunningServer::start(cfg).expect("cold restart RunningServer");
+    let (mut cold_client, _, _) = login_and_enter(
+        server2.http_addr,
+        server2.tcp_addr,
+        "issue3_player_alpha",
+        1,
+        "ChiếnThầnA6",
+        Some(uid_a),
+    );
+    let cold_user = cold_client.call_rpc("user.getUser", vec![], false).ret;
+    assert_eq!(cold_user.get_field("execution").and_then(Value::as_i64), Some(pre_exec - 12));
+    assert_eq!(cold_user.get_field("exp").and_then(Value::as_i64), Some(pre_exp + 4200));
+    assert_eq!(cold_user.get_field("gold").and_then(Value::as_i64), Some(pre_star_gold + 188 + 588));
+
+    let cold_copy_list = cold_client.call_rpc("copy.getList", vec![Value::Int(1)], false).ret;
+    let cold_c1001 = cold_copy_list.get_field("copyData").and_then(|cd| cd.get_field("1001")).unwrap();
+    assert_eq!(cold_c1001.get_field("star").and_then(Value::as_i64), Some(6));
+    assert_eq!(cold_c1001.get_field("pass_strongh").and_then(Value::as_i64), Some(2));
+    assert_eq!(cold_c1001.get_field("prize").and_then(Value::as_i64), Some(1));
+    assert!(cold_copy_list.get_field("copyData").and_then(|cd| cd.get_field("1002")).is_some());
+    let cold_copy_chap = cold_client.call_rpc("copy.getCopy", vec![Value::Int(1001)], false).ret;
+    assert_eq!(
+        cold_copy_chap.get_field("va_copy").and_then(|vc| vc.get_field("100105")).and_then(|s| s.get_field("normal_star")).and_then(Value::as_i64),
+        Some(3)
+    );
+
+    let cold_star = cold_client.call_rpc("activityStarPlayOpen.getInfo", vec![], false);
+    assert_eq!(cold_star.err, "ok");
+    assert_eq!(cold_star.ret.get_field("1"), Some(&Value::Bool(true)));
+    assert_eq!(cold_star.ret.get_field("4"), Some(&Value::Bool(true)));
+    assert_eq!(
+        cold_client.call_rpc("activityStarPlayOpen.receiveGift", vec![Value::Int(1)], false).err,
+        "already_claimed"
+    );
+    assert_eq!(
+        cold_client.call_rpc("activityStarPlayOpen.receiveGift", vec![Value::Int(5)], false).err,
+        "level_not_enough"
+    );
+    let cold_bag = cold_client.call_rpc("bag.bagInfo", vec![], false).ret;
+    assert_eq!(sum_bag_template_count(&cold_bag, "item", 17_002), pre_17002 + 2);
+    assert_eq!(sum_bag_template_count(&cold_bag, "item", 10_010), pre_10010 + 20);
+    assert_eq!(sum_bag_template_count(&cold_bag, "soul", 50_406), pre_50406 + 35);
+
+    drop(cold_client);
+    server2.shutdown();
+}
 
 #[test]
 fn cross_repo_kestrel_canvas_cpp_client_against_strict_gserver() {

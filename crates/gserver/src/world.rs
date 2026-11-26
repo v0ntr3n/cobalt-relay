@@ -18,9 +18,9 @@ use gserver_rpc_catalog::bootstrap::{
 };
 
 use crate::bridge::{
-    catalog_amf3_to_protocol, dto_to_amf3, player_json_to_amf3,
-    profile_to_gameplay_state_with_store, sync_gameplay_back_to_profile, to_gameplay_request,
-    u64_to_amf3,
+    catalog_amf3_to_protocol, dto_to_amf3, dto_to_player_json, player_json_to_amf3,
+    player_json_to_dto, profile_to_gameplay_state_with_store, sync_gameplay_back_to_profile,
+    to_gameplay_request, u64_to_amf3,
 };
 use crate::bxh_snapshot::BxhSnapshot;
 use crate::config::DaemonConfig;
@@ -442,23 +442,30 @@ impl ServerWorld {
                         if status_str == "ok" {
                             session.logged_in_uid = Some(resolved_uid);
                             if !guard.gameplay.players.contains_key(&resolved_uid) {
-                                let gp_opt = guard.store.get_player(resolved_uid).map(|p| {
-                                    profile_to_gameplay_state_with_store(p, Some(&self.data_store))
-                                });
-                                if let Some(gp) = gp_opt {
-                                    guard.gameplay.register_player(gp);
+                                let prof_opt = guard.store.get_player(resolved_uid).cloned();
+                                if let Some(prof) = prof_opt {
+                                    guard.gameplay.register_player(
+                                        profile_to_gameplay_state_with_store(
+                                            &prof,
+                                            Some(&self.data_store),
+                                        ),
+                                    );
+                                    if !prof.copy_progress.is_empty() {
+                                        let cp_dto = player_json_to_dto(&PlayerJson::Object(
+                                            prof.copy_progress,
+                                        ));
+                                        guard
+                                            .gameplay
+                                            .copy
+                                            .import_player_progress(resolved_uid, &cp_dto);
+                                    }
                                 }
                             }
                         }
                         return Self::ok_reply(req, session, Value::String(status_str), now_i64);
                     }
                     Err(_) => {
-                        return Self::ok_reply(
-                            req,
-                            session,
-                            Value::String("fail".into()),
-                            now_i64,
-                        );
+                        return Self::ok_reply(req, session, Value::String("fail".into()), now_i64);
                     }
                 }
             }
@@ -661,7 +668,7 @@ impl ServerWorld {
                 Self::ok_reply(req, session, ret_val, now_i64)
             }
 
-            "copy.getCopy" => {
+            "copy.getCopy" | "timeMachineCopy.getCopy" => {
                 let chap_id = req
                     .args
                     .first()
@@ -675,15 +682,26 @@ impl ServerWorld {
                 let mut va_copy_entries: Vec<(String, Value)> = Vec::new();
                 if let Some(info_map) = gp_dto.get("va_copy_info").and_then(|v| v.as_map()) {
                     for (stage_k, rec) in info_map {
-                        let stars = rec.get("star").and_then(|s| s.as_i64()).unwrap_or(3).max(1);
+                        let raw_stars = rec.get("star").and_then(|s| s.as_i64()).unwrap_or(0);
+                        let stars = if stage_k == &first_stage && raw_stars == 0 {
+                            3
+                        } else {
+                            raw_stars
+                        };
+                        let reset_num = rec.get("reset_num").and_then(|r| r.as_i64()).unwrap_or(0);
+                        let box_status =
+                            rec.get("box_status").and_then(|b| b.as_i64()).unwrap_or(0);
                         va_copy_entries.push((
                             stage_k.clone(),
                             Value::map([
-                                ("reset", Value::Int(0)),
+                                ("reset", Value::Int(reset_num as i32)),
                                 ("normal_star", Value::Int(stars as i32)),
                                 ("star_status", Value::Int(0)),
-                                ("pass", Value::Int(1)),
-                                ("box_reward", Value::Int(0)),
+                                ("pass", Value::Int(if stars > 0 { 1 } else { 0 })),
+                                (
+                                    "box_reward",
+                                    Value::Int(if box_status >= 2 { 1 } else { 0 }),
+                                ),
                             ]),
                         ));
                     }
@@ -929,11 +947,6 @@ impl ServerWorld {
 
             "envelopRain.getInfo" => Self::ok_reply(req, session, Value::Bool(false), now_i64),
 
-            "activityStarPlaySignOpen.getInfo" => {
-                let ret_val = Value::map([("maked", Value::empty_array())]);
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
-
             "job.getInfo" => {
                 let ret_val = Value::map([
                     ("job", Value::Int(1)),
@@ -946,10 +959,8 @@ impl ServerWorld {
             }
 
             "recruitment.getInfo" => {
-                let ret_val = Value::map([
-                    ("reward", Value::empty_array()),
-                    ("num", Value::Int(0)),
-                ]);
+                let ret_val =
+                    Value::map([("reward", Value::empty_array()), ("num", Value::Int(0))]);
                 Self::ok_reply(req, session, ret_val, now_i64)
             }
 
@@ -1051,9 +1062,14 @@ impl ServerWorld {
                 // Persist state changes back to `PlayerStore` (CRC32 WAL + atomic player JSON)
                 if outcome.response.err == "ok" {
                     if let Some(gp_state) = guard.gameplay.players.get(&uid).cloned() {
+                        let copy_prog =
+                            dto_to_player_json(&guard.gameplay.copy.export_player_progress(uid));
                         let pid_opt = guard.store.get_player(uid).map(|p| p.pid.clone());
                         let _ = guard.store.mutate_player(uid, now_ts, |profile| {
                             sync_gameplay_back_to_profile(&gp_state, profile, now_ts);
+                            if let PlayerJson::Object(cp_map) = copy_prog {
+                                profile.copy_progress = cp_map;
+                            }
                             Ok(())
                         });
                         if let Some(ref pid) = pid_opt {
@@ -1159,6 +1175,10 @@ fn gp_register_and_role(
         profile,
         Some(data_store),
     ));
+    if !profile.copy_progress.is_empty() {
+        let cp_dto = player_json_to_dto(&PlayerJson::Object(profile.copy_progress.clone()));
+        gameplay.copy.import_player_progress(profile.uid, &cp_dto);
+    }
     roles_by_pid
         .entry(profile.pid.clone())
         .or_default()

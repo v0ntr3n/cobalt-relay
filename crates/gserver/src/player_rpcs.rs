@@ -24,7 +24,8 @@ use gserver_protocol::{RpcRequest, S2cEnvelope, Value};
 use gserver_data::GameDataStore;
 
 use crate::bridge::{
-    dto_to_amf3, player_json_to_amf3, profile_to_gameplay_state_with_store, u64_to_amf3,
+    dto_to_amf3, dto_to_player_json, player_json_to_amf3, profile_to_gameplay_state_with_store,
+    u64_to_amf3,
 };
 
 pub struct PlayerRpcSuccess {
@@ -259,6 +260,95 @@ fn read_u32_set_from_va(profile: &PlayerProfile, key: &str) -> Vec<u32> {
 fn write_u32_set_to_va(profile: &mut PlayerProfile, key: &str, vals: &[u32]) {
     let arr = vals.iter().map(|&n| PlayerJson::from(n)).collect();
     let _ = profile.set_user_config(key, PlayerJson::Array(arr));
+}
+
+/// Configured `starPlay_gift` (`Quà Điêu Thuyền` / `ActStarCodeData.lua` + `ActCodeCell.lua`) tier.
+struct ActStarGiftTier {
+    id: u32,
+    req_level: u32,
+    gold: u64,
+    copper: u64,
+    /// Authentic `vnsg2` `(item_template_id, count)` rewards granted into `BagData` (`GainItemListInfoPanel`).
+    items: &'static [(u32, u32)],
+}
+
+const ACT_STAR_GIFT_TIERS: &[ActStarGiftTier] = &[
+    // Tier 1 (Lv.1): 188 Gold + 50,000 Copper + Tiến Cấp Đơn (10010 x20) + Mảnh Điêu Thuyền (50406 x10)
+    ActStarGiftTier {
+        id: 1,
+        req_level: 1,
+        gold: 188,
+        copper: 50_000,
+        items: &[(10_010, 20), (50_406, 10)],
+    },
+    // Tier 2 (Lv.10): 288 Gold + 100,000 Copper + Thể Lực Đơn (22102 x2) + Mảnh Điêu Thuyền (50406 x15)
+    ActStarGiftTier {
+        id: 2,
+        req_level: 10,
+        gold: 288,
+        copper: 100_000,
+        items: &[(22_102, 2), (50_406, 15)],
+    },
+    // Tier 3 (Lv.20): 388 Gold + 150,000 Copper + Chiêu Mộ Lệnh-Cao (16012 x3) + Mảnh Điêu Thuyền (50406 x20)
+    ActStarGiftTier {
+        id: 3,
+        req_level: 20,
+        gold: 388,
+        copper: 150_000,
+        items: &[(16_012, 3), (50_406, 20)],
+    },
+    // Tier 4 (Lv.30): 588 Gold + 200,000 Copper + Hoạt Lực Đơn (22202 x3) + Mảnh Điêu Thuyền (50406 x25)
+    ActStarGiftTier {
+        id: 4,
+        req_level: 30,
+        gold: 588,
+        copper: 200_000,
+        items: &[(22_202, 3), (50_406, 25)],
+    },
+    // Tier 5 (Lv.40): 888 Gold + 300,000 Copper + Sách EXP-Trung (17002 x10) + Mảnh Điêu Thuyền (50406 x30)
+    ActStarGiftTier {
+        id: 5,
+        req_level: 40,
+        gold: 888,
+        copper: 300_000,
+        items: &[(17_002, 10), (50_406, 30)],
+    },
+    // Tier 6 (Lv.50): 1,288 Gold + 500,000 Copper + Quà Hoàng Kim (30003 x2) + Mảnh Tranh Điêu Thuyền (15201 x5)
+    ActStarGiftTier {
+        id: 6,
+        req_level: 50,
+        gold: 1_288,
+        copper: 500_000,
+        items: &[(30_003, 2), (15_201, 5)],
+    },
+    // Tier 7 (Lv.60): 1,888 Gold + 800,000 Copper + Quà Đồ Tím (31001 x1) + Đồ Chơi Điêu Thuyền (14085 x5)
+    ActStarGiftTier {
+        id: 7,
+        req_level: 60,
+        gold: 1_888,
+        copper: 800_000,
+        items: &[(31_001, 1), (14_085, 5)],
+    },
+];
+
+const ACT_STAR_SIGN_LEVELS: &[u32] = &[5, 10, 20, 30, 40, 50, 60];
+
+fn parse_positive_u32_arg(val: Option<&Value>) -> Option<u32> {
+    let v = val?;
+    if let Some(n) = v.as_i64() {
+        if n > 0 {
+            return u32::try_from(n).ok();
+        }
+        return None;
+    }
+    if let Some(s) = v.as_str() {
+        if let Ok(n) = s.trim().parse::<u32>() {
+            if n > 0 {
+                return Some(n);
+            }
+        }
+    }
+    None
 }
 
 pub fn try_handle_player_rpc(
@@ -1209,9 +1299,7 @@ pub fn try_handle_player_rpc(
             if !(1..=6).contains(&sa) || !(1..=6).contains(&sb) {
                 return Some(Err("invalid_formation_slot".to_string()));
             }
-            let res = store.mutate_player(uid, now_ts, |p| {
-                p.swap_squad_slots(sa as u8, sb as u8)
-            });
+            let res = store.mutate_player(uid, now_ts, |p| p.swap_squad_slots(sa as u8, sb as u8));
             if let Err(e) = res {
                 return Some(Err(map_player_err(e)));
             }
@@ -1742,11 +1830,18 @@ pub fn try_handle_player_rpc(
             let Some(gp) = gameplay.players.get_mut(&uid) else {
                 return Some(Err("user_not_found".to_string()));
             };
-            match gameplay.copy.reset_attack_count(gp, chap_id, copy_id, now_ts) {
+            match gameplay
+                .copy
+                .reset_attack_count(gp, chap_id, copy_id, now_ts)
+            {
                 Ok((ret_dto, pushes_dto)) => {
                     let gp_clone = gp.clone();
+                    let copy_prog = dto_to_player_json(&gameplay.copy.export_player_progress(uid));
                     let _ = store.mutate_player(uid, now_ts, |p| {
                         crate::bridge::sync_gameplay_back_to_profile(&gp_clone, p, now_ts);
+                        if let PlayerJson::Object(cp_map) = copy_prog {
+                            p.copy_progress = cp_map;
+                        }
                         Ok(())
                     });
                     let caller_pushes = pushes_dto
@@ -1957,6 +2052,210 @@ pub fn try_handle_player_rpc(
             Some(Ok(PlayerRpcSuccess {
                 ret: Value::String("ok".into()),
                 caller_pushes: vec![build_user_update_env(updated, now_i64)],
+                peer_pushes: Vec::new(),
+                refresh_roles_pid: None,
+            }))
+        }
+
+        // ====================================================================
+        // ActStar Event (`Quà Điêu Thuyền` — `ActStarCodeData.lua` / `ActStarProxy.lua` / `ActCodeCell.lua`)
+        // ====================================================================
+        "activityStarPlayOpen.getInfo" | "tmActivityStarPlayOpen.getInfo" => {
+            let Some(profile) = store.get_player(uid) else {
+                return Some(Err("player_missing".to_string()));
+            };
+            let ret = if profile.act_star_claimed.is_empty() {
+                Value::empty_array()
+            } else {
+                Value::map(
+                    profile
+                        .act_star_claimed
+                        .iter()
+                        .map(|&id| (id.to_string(), Value::Bool(true))),
+                )
+            };
+            Some(Ok(PlayerRpcSuccess {
+                ret,
+                caller_pushes: Vec::new(),
+                peer_pushes: Vec::new(),
+                refresh_roles_pid: None,
+            }))
+        }
+
+        "activityStarPlayOpen.receiveGift" | "tmActivityStarPlayOpen.receiveGift" => {
+            let Some(gift_id) = parse_positive_u32_arg(req.args.first()) else {
+                return Some(Err("invalid_gift_id".to_string()));
+            };
+            let Some(tier) = ACT_STAR_GIFT_TIERS.iter().find(|t| t.id == gift_id) else {
+                return Some(Err("invalid_gift_id".to_string()));
+            };
+            let Some(cur) = store.get_player(uid) else {
+                return Some(Err("player_missing".to_string()));
+            };
+            if cur.act_star_claimed.contains(&gift_id) {
+                return Some(Err("already_claimed".to_string()));
+            }
+            if cur.level < tier.req_level {
+                return Some(Err("level_not_enough".to_string()));
+            }
+
+            let mut added_items: Vec<BagItem> = Vec::new();
+            let res = store.mutate_player(uid, now_ts, |p| {
+                if p.act_star_claimed.contains(&gift_id) {
+                    return Err(PlayerError::InvalidParameter("already_claimed".into()));
+                }
+                if p.level < tier.req_level {
+                    return Err(PlayerError::InvalidParameter("level_not_enough".into()));
+                }
+                if tier.gold > 0 {
+                    p.grant_currency(CurrencyType::Gold, tier.gold, now_ts);
+                }
+                if tier.copper > 0 {
+                    p.grant_currency(CurrencyType::Copper, tier.copper, now_ts);
+                }
+                for &(tid, count) in tier.items {
+                    let added = p.add_item(tid, count, now_ts)?;
+                    added_items.extend(added);
+                }
+                p.act_star_claimed.push(gift_id);
+                p.act_star_claimed.sort_unstable();
+                p.act_star_claimed.dedup();
+                Ok(())
+            });
+            if let Err(e) = res {
+                return Some(Err(map_player_err(e)));
+            }
+
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
+            let updated = store.get_player(uid).expect("exists");
+            let mut pushes = vec![build_user_update_env(updated, now_i64)];
+            if let Some(bp) = build_bag_update_env(&added_items, &[], now_i64) {
+                pushes.push(bp);
+            }
+
+            // Build `GainItemListInfoPanel` / `RewardManager:addRewardsByFixTb` `[type, id, num]` triplets
+            // alongside `CopyProxy:groupDrops`-compatible `drop` dictionary!
+            let mut reward_triplets: Vec<Value> = Vec::new();
+            if tier.gold > 0 {
+                reward_triplets.push(Value::dense_array(vec![
+                    Value::Int(2),
+                    Value::Int(0),
+                    u64_to_amf3(tier.gold),
+                ]));
+            }
+            if tier.copper > 0 {
+                reward_triplets.push(Value::dense_array(vec![
+                    Value::Int(1),
+                    Value::Int(0),
+                    u64_to_amf3(tier.copper),
+                ]));
+            }
+            let mut item_drop_entries: Vec<(String, Value)> = Vec::new();
+            for &(tid, count) in tier.items {
+                reward_triplets.push(Value::dense_array(vec![
+                    Value::Int(4),
+                    Value::Int(tid as i32),
+                    Value::Int(count as i32),
+                ]));
+                item_drop_entries.push((tid.to_string(), Value::Int(count as i32)));
+            }
+
+            Some(Ok(PlayerRpcSuccess {
+                ret: Value::map([
+                    ("ret", Value::String("ok".into())),
+                    ("id", Value::Int(gift_id as i32)),
+                    ("reward", Value::dense_array(reward_triplets)),
+                    (
+                        "drop",
+                        Value::map([
+                            ("gold", u64_to_amf3(tier.gold)),
+                            ("copper", u64_to_amf3(tier.copper)),
+                            ("item", Value::map(item_drop_entries)),
+                        ]),
+                    ),
+                ]),
+                caller_pushes: pushes,
+                peer_pushes: Vec::new(),
+                refresh_roles_pid: None,
+            }))
+        }
+
+        "activityStarPlaySignOpen.getInfo" | "tmActivityStarPlaySignOpen.getInfo" => {
+            let Some(profile) = store.get_player(uid) else {
+                return Some(Err("player_missing".to_string()));
+            };
+            let maked = if profile.act_star_sign_claimed.is_empty() {
+                Value::empty_array()
+            } else {
+                Value::map(
+                    profile
+                        .act_star_sign_claimed
+                        .iter()
+                        .map(|&lv| (lv.to_string(), Value::Bool(true))),
+                )
+            };
+            Some(Ok(PlayerRpcSuccess {
+                ret: Value::map([("maked", maked)]),
+                caller_pushes: Vec::new(),
+                peer_pushes: Vec::new(),
+                refresh_roles_pid: None,
+            }))
+        }
+
+        "activityStarPlaySignOpen.receiveReward" | "tmActivityStarPlaySignOpen.receiveReward" => {
+            let Some(req_lv) = parse_positive_u32_arg(req.args.first()) else {
+                return Some(Err("invalid_level_tier".to_string()));
+            };
+            if !ACT_STAR_SIGN_LEVELS.contains(&req_lv) {
+                return Some(Err("invalid_level_tier".to_string()));
+            }
+            let Some(cur) = store.get_player(uid) else {
+                return Some(Err("player_missing".to_string()));
+            };
+            if cur.act_star_sign_claimed.contains(&req_lv) {
+                return Some(Err("already_claimed".to_string()));
+            }
+            if cur.level < req_lv {
+                return Some(Err("level_not_enough".to_string()));
+            }
+
+            let mut added_items: Vec<BagItem> = Vec::new();
+            let res = store.mutate_player(uid, now_ts, |p| {
+                p.grant_currency(CurrencyType::Gold, 100, now_ts);
+                let added = p.add_item(17_002, 5, now_ts)?;
+                added_items.extend(added);
+                p.act_star_sign_claimed.push(req_lv);
+                p.act_star_sign_claimed.sort_unstable();
+                p.act_star_sign_claimed.dedup();
+                Ok(())
+            });
+            if let Err(e) = res {
+                return Some(Err(map_player_err(e)));
+            }
+
+            resync_gameplay_with_store(store, gameplay, data_store, uid);
+            let updated = store.get_player(uid).expect("exists");
+            let mut pushes = vec![build_user_update_env(updated, now_i64)];
+            if let Some(bp) = build_bag_update_env(&added_items, &[], now_i64) {
+                pushes.push(bp);
+            }
+            Some(Ok(PlayerRpcSuccess {
+                ret: Value::map([
+                    ("ret", Value::String("ok".into())),
+                    ("lv", Value::Int(req_lv as i32)),
+                    (
+                        "reward",
+                        Value::dense_array(vec![
+                            Value::dense_array(vec![Value::Int(2), Value::Int(0), Value::Int(100)]),
+                            Value::dense_array(vec![
+                                Value::Int(4),
+                                Value::Int(17_002),
+                                Value::Int(5),
+                            ]),
+                        ]),
+                    ),
+                ]),
+                caller_pushes: pushes,
                 peer_pushes: Vec::new(),
                 refresh_roles_pid: None,
             }))
