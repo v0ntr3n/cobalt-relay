@@ -295,7 +295,7 @@ mod tests {
         let push_pkt = crate::player::BagState::build_update_push(&d3, NOW).unwrap();
         assert_eq!(push_pkt.callback_name, push::BAG_UPDATE);
         let first_arg = &push_pkt.ret.as_array().unwrap()[0];
-        let deleted_slot = first_arg.get("3000001").unwrap().as_map().unwrap();
+        let deleted_slot = first_arg.get("30001").unwrap().as_map().unwrap();
         assert!(deleted_slot.is_empty(), "deleted gid must push empty map");
     }
 
@@ -630,10 +630,11 @@ mod tests {
         );
         let rewards = list_out.response.ret.as_array().unwrap();
         assert_eq!(rewards.len(), 1);
-        // Verify `va_reward[1]` nested array schema expected by `RewardPanel.lua` line 153!
+        // Verify `va_reward = [triplets_array, metadata_map]` expected by `RewardPanel.lua` & `RewardProxy.lua`!
         let va_reward = rewards[0].get("va_reward").and_then(DtoValue::as_array).unwrap();
-        assert_eq!(va_reward.len(), 1);
+        assert_eq!(va_reward.len(), 2);
         assert_eq!(va_reward[0].as_array().unwrap().len(), 2);
+        assert!(va_reward[1].as_map().is_some());
 
         let gold_before = eng.players[&1001].gold;
         let claim1 = eng.dispatch(
@@ -700,21 +701,24 @@ mod tests {
     #[test]
     fn test_21_tavern_divine_multi_raffle_first_ten_and_orange_pity() {
         let mut eng = make_engine_with_two_players();
+        eng.players.get_mut(&1001).unwrap().vip = 5;
         let out = eng.dispatch(
             1001,
             &RpcRequest::new(rpc::RAFFLE_MULTI, vec![DtoValue::from(2u32)], 1),
             NOW,
         );
         assert_eq!(out.response.err, "ok");
-        // First 10-pull costs 900 gold (10_000 -> 9_100)
+        // First 10-pull at VIP >= 5 costs 900 gold (10_000 -> 9_100)
         assert_eq!(eng.players[&1001].gold, 9_100);
-        let heroes = out.response.ret.get("heroes").and_then(DtoValue::as_array).unwrap();
-        assert_eq!(heroes.len(), 10);
-        // At least the 10th pull must be quality 5 (Orange)!
-        assert!(heroes
-            .iter()
-            .any(|h| h.get("quality").and_then(DtoValue::as_u64) == Some(5)));
-        assert!(out.response.ret.get("luck").and_then(DtoValue::as_u64).unwrap() >= 100);
+        let rewards = out.response.ret.get("reward").and_then(DtoValue::as_array).unwrap();
+        assert_eq!(rewards.len(), 10);
+        // At least the 10th pull must be quality 5 (Orange) in the player's roster!
+        assert!(eng.players[&1001]
+            .roster
+            .heroes
+            .values()
+            .any(|h| h.quality == 5));
+        assert!(out.response.ret.get("senior_luck_num").and_then(DtoValue::as_u64).unwrap() >= 100);
 
         // Second 10-pull costs 2850 gold (9_100 -> 6_250)
         let out2 = eng.dispatch(
@@ -862,13 +866,18 @@ mod tests {
         assert!(sim.is_win);
         assert_eq!(sim.appraisal, 50, "FightProxy:isSuccessFight requires appraisal == 50");
         assert_eq!(sim.server_attack_dto.get("brid").and_then(DtoValue::as_u64), Some(888));
-        assert_eq!(
-            sim.server_attack_dto
-                .get("userInfo")
+        let user_info = sim
+            .server_attack_dto
+            .get("userInfo")
+            .and_then(DtoValue::as_map)
+            .expect("FightProxy requires string-keyed Map userInfo");
+        assert!(user_info.contains_key("1") && user_info.contains_key("2"));
+        assert!(
+            !sim.server_attack_dto
+                .get("arrSeed")
                 .and_then(DtoValue::as_array)
                 .unwrap()
-                .len(),
-            2
+                .is_empty()
         );
         let report_decoded = decode_amf3(&sim.to_amf3_report_bytes()).unwrap();
         assert_eq!(report_decoded.get("appraisal").and_then(DtoValue::as_u64), Some(50));
@@ -947,6 +956,19 @@ mod tests {
         );
         assert_eq!(sbox.response.ret.as_str(), Some("ok"));
 
+        let _ = eng.dispatch(
+            1001,
+            &RpcRequest::new(
+                rpc::COPY_PASS,
+                vec![
+                    DtoValue::from(1001u32),
+                    DtoValue::from(100102u32),
+                    DtoValue::Map(Default::default()),
+                ],
+                50,
+            ),
+            NOW,
+        );
         let cprize = eng.dispatch(
             1001,
             &RpcRequest::new(

@@ -48,19 +48,26 @@ pub enum PlayerError {
         bag_type: &'static str,
         max_grids: u32,
     },
+    /// Sub-bag or hero bag has reached its maximum expansion purchase count (`buy_storage_limit`).
+    BagExpandLimitReached {
+        bag_type: &'static str,
+        max_open_times: u32,
+    },
     /// Hero roster has reached `200 + 10 * hero_bag_buy_times`.
     HeroBagFull { max_heroes: u32 },
     /// Invalid squad, battle grid, partner, buddy, or equipment slot index.
     InvalidFormationSlot(String),
-    /// Duplicate hero template (`htid`) cannot appear twice across squad + partner slots.
+    /// Duplicate hero template (`htid`) cannot appear twice across squad + partner + buddy slots.
     DuplicateHeroTemplateInSquad { htid: u32 },
     /// Protagonist hero (`utid` / `htid` in protagonist set) must remain in the active squad.
     ProtagonistCannotBeRemoved { hid: u64 },
-    /// Item class does not match the target equipment slot (`1..=9`).
+    /// Item class does not match the target equipment slot (`1..=9` or sub-system slot).
     EquipTypeMismatch {
         slot_type: u8,
         item_template_id: u32,
     },
+    /// Item or hero is locked or currently deployed and cannot be decomposed/reborn/consumed.
+    ResourceLockedOrDeployed(String),
 }
 
 impl fmt::Display for PlayerError {
@@ -101,12 +108,19 @@ impl fmt::Display for PlayerError {
                 bag_type,
                 max_grids,
             } => write!(f, "sub-bag '{bag_type}' is full (max_grids={max_grids})"),
+            PlayerError::BagExpandLimitReached {
+                bag_type,
+                max_open_times,
+            } => write!(
+                f,
+                "sub-bag '{bag_type}' reached expansion limit (max_open_times={max_open_times})"
+            ),
             PlayerError::HeroBagFull { max_heroes } => {
                 write!(f, "hero bag is full (max_heroes={max_heroes})")
             }
             PlayerError::InvalidFormationSlot(msg) => write!(f, "invalid formation slot: {msg}"),
             PlayerError::DuplicateHeroTemplateInSquad { htid } => {
-                write!(f, "duplicate hero template htid={htid} in squad/partner")
+                write!(f, "duplicate hero template htid={htid} in squad/partner/buddy")
             }
             PlayerError::ProtagonistCannotBeRemoved { hid } => {
                 write!(f, "protagonist hero hid={hid} cannot be removed or sacrificed")
@@ -118,6 +132,9 @@ impl fmt::Display for PlayerError {
                 f,
                 "item tid={item_template_id} cannot be equipped in arming slot type {slot_type}"
             ),
+            PlayerError::ResourceLockedOrDeployed(msg) => {
+                write!(f, "resource locked or deployed: {msg}")
+            }
         }
     }
 }

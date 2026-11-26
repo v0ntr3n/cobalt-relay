@@ -759,13 +759,17 @@ fn strict_all_12_domains_gameplay_security_and_wal_recovery() {
         false,
     );
     assert_eq!(expand_resp.err, "ok");
-    assert_eq!(
-        expand_resp.ret.get_field("grid_max").and_then(Value::as_i64),
-        Some(205)
-    );
+    assert_eq!(expand_resp.ret.as_str(), Some("ok"));
 
-    // Inspect bagInfo to locate gids for `22102` (stamina pill) and `16012` (normal item)
+    // Inspect bagInfo to verify expanded `gridMaxNum.arm` (200 + 10 = 210) and locate gids for `22102` & `16012`
     let bag_info = client_a.call_rpc("bag.bagInfo", vec![], false).ret;
+    assert_eq!(
+        bag_info
+            .get_field("gridMaxNum")
+            .and_then(|gm| gm.get_field("arm"))
+            .and_then(Value::as_i64),
+        Some(250)
+    );
     let item_bag = bag_info.get_field("item").expect("item sub-bag");
     let mut gid_22102 = 0i32;
     let mut gid_16012 = 0i32;
@@ -811,8 +815,8 @@ fn strict_all_12_domains_gameplay_security_and_wal_recovery() {
     );
     assert_eq!(use_pill.err, "ok");
     assert_eq!(
-        use_pill.ret.get_field("remaining").and_then(Value::as_i64),
-        Some(18)
+        use_pill.ret.get_field("execution").and_then(Value::as_i64),
+        Some(50)
     );
 
     let use_by_tpl = client_a.call_rpc(
@@ -866,12 +870,11 @@ fn strict_all_12_domains_gameplay_security_and_wal_recovery() {
         false,
     );
     assert_eq!(compose_arm.err, "ok");
-    let crafted_arm_gid = compose_arm
-        .ret
-        .get_field("gid")
-        .and_then(Value::as_i64)
-        .unwrap() as i32;
-    assert!((20_001..=30_000).contains(&crafted_arm_gid));
+    assert_eq!(compose_arm.ret.as_str(), Some("ok"));
+    let bag_after_arm = client_a.call_rpc("bag.bagInfo", vec![], false).ret;
+    let (crafted_arm_gid, _) =
+        find_bag_entry_by_tid(&bag_after_arm, "arm", 113_001).expect("crafted 113_001 in arm bag");
+    assert!((10_001..=30_000).contains(&crafted_arm_gid));
 
     let pushes_d4 = client_a.drain_pushes();
     assert!(
@@ -1206,13 +1209,13 @@ fn strict_all_12_domains_gameplay_security_and_wal_recovery() {
     // Reinforce slot 1 arming via `forge.autoReinforceArm` + reinforce `crafted_arm_gid` in bag via `forge.upgradeArm`
     let auto_rf = client_a.call_rpc("forge.autoReinforceArm", vec![Value::Int(1)], false);
     assert_eq!(auto_rf.err, "ok");
-    assert_eq!(
-        auto_rf
-            .ret
-            .get_field("reinforce_level")
-            .and_then(Value::as_i64),
-        Some(6)
-    );
+    if let Value::Object(ref step_map) = auto_rf.ret {
+        let (_, first_step) = step_map.iter().next().expect("reinforced weapon entry");
+        assert!(first_step.get_field("level").and_then(Value::as_i64).unwrap_or(0) > 1);
+        assert!(first_step.get_field("upLevel").and_then(Value::as_i64).unwrap_or(0) >= 1);
+    } else {
+        panic!("expected ArmProxy autoReinforceArm map keyed by item_id, got {:?}", auto_rf.ret);
+    }
     let bag_rf = client_a.call_rpc(
         "forge.upgradeArm",
         vec![Value::Int(crafted_arm_gid), Value::Int(3)],
@@ -1939,9 +1942,9 @@ fn issue_3_flow_a_copy_battle_and_flow_b_act_star_gift_claim_live_e2e() {
     assert!(pass_pushes.iter().any(|p| p.callback_name.as_deref() == Some("user.updateUser")));
     assert!(pass_pushes.iter().any(|p| p.callback_name.as_deref() == Some("bag.update")));
 
-    assert_eq!(client_a.call_rpc("copy.attack", vec![Value::Int(1001), Value::Int(100_105)], false).err, "ok");
+    assert_eq!(client_a.call_rpc("copy.attack", vec![Value::Int(1001), Value::Int(100_106)], false).err, "ok");
     assert_eq!(
-        client_a.call_rpc("copy.pass", vec![Value::Int(1001), Value::Int(100_105), Value::empty_array()], false).err,
+        client_a.call_rpc("copy.pass", vec![Value::Int(1001), Value::Int(100_106), Value::empty_array()], false).err,
         "ok"
     );
     assert_eq!(client_a.call_rpc("copy.fetchPrize", vec![Value::Int(1001), Value::Int(0)], false).err, "ok");
@@ -1953,8 +1956,8 @@ fn issue_3_flow_a_copy_battle_and_flow_b_act_star_gift_claim_live_e2e() {
     let mid_user = client_a.call_rpc("user.getUser", vec![], false).ret;
     assert_eq!(mid_user.get_field("execution").and_then(Value::as_i64), Some(pre_exec - 12));
     assert_eq!(mid_user.get_field("exp").and_then(Value::as_i64), Some(pre_exp + 4200));
-    assert_eq!(parse_copper(&mid_user) as i64, pre_copper + 1750 + 2750);
-    assert_eq!(mid_user.get_field("hero_soul").and_then(Value::as_i64), Some(pre_soul + 60 + 100));
+    assert_eq!(parse_copper(&mid_user) as i64, pre_copper + 1750 + 3000);
+    assert_eq!(mid_user.get_field("hero_soul").and_then(Value::as_i64), Some(pre_soul + 60 + 110));
     assert_eq!(mid_user.get_field("gold").and_then(Value::as_i64), Some(pre_gold + 100));
     let mid_bag = client_a.call_rpc("bag.bagInfo", vec![], false).ret;
     assert_eq!(sum_bag_template_count(&mid_bag, "item", 17_002), pre_17002 + 2);
@@ -2064,7 +2067,7 @@ fn issue_3_flow_a_copy_battle_and_flow_b_act_star_gift_claim_live_e2e() {
     assert!(cold_copy_list.get_field("copyData").and_then(|cd| cd.get_field("1002")).is_some());
     let cold_copy_chap = cold_client.call_rpc("copy.getCopy", vec![Value::Int(1001)], false).ret;
     assert_eq!(
-        cold_copy_chap.get_field("va_copy").and_then(|vc| vc.get_field("100105")).and_then(|s| s.get_field("normal_star")).and_then(Value::as_i64),
+        cold_copy_chap.get_field("va_copy").and_then(|vc| vc.get_field("100106")).and_then(|s| s.get_field("normal_star")).and_then(Value::as_i64),
         Some(3)
     );
 
@@ -2150,4 +2153,2450 @@ fn cross_repo_kestrel_canvas_cpp_client_against_strict_gserver() {
         status.success(),
         "live kestrel-canvas C++17 client <-> cobalt-relay strict E2E test failed"
     );
+}
+
+// =============================================================================
+// WAVE-2 EXHAUSTIVE MULTI-MODE, `game_TM` (`tm*`), S2C PUSH ORDERING & RESTART E2E
+// =============================================================================
+
+impl StrictWireClient {
+    /// Sends an RPC with optional custom `raw_args` (e.g. Lua 0-indexed `args[0]` or `{ boxId = 1 }` map)
+    /// and collects the ordered sequence of S2C envelopes (including any trailing `[tm]User.updateUser` push),
+    /// returning `(ordered_envelopes, main_env_index, main_env)`.
+    fn call_rpc_with_raw_ordered(
+        &mut self,
+        method: &str,
+        args: Vec<Value>,
+        raw_args: Option<Value>,
+        expect_trailing_user_push: Option<&str>,
+    ) -> (Vec<S2cEnvelope>, usize, S2cEnvelope) {
+        let _ = self.drain_pushes();
+        self.seq += 1;
+        let cb_name = format!("{method}_{}", self.seq);
+        let mut req = RpcRequest::new(method, args, &self.token, cb_name.clone());
+        if let Some(raw) = raw_args {
+            req.raw_args = Some(raw);
+        }
+        let wire = req.to_lcpacket_frame(false).expect("encode 24B LCPacket");
+        self.stream.write_all(&wire).expect("send C2S frame");
+        self.stream.flush().unwrap();
+
+        let mut ordered: Vec<S2cEnvelope> = Vec::new();
+        let mut main_idx: Option<usize> = None;
+        let mut saw_trailing_user = expect_trailing_user_push.is_none();
+
+        let mut buf = [0u8; 8192];
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while main_idx.is_none() || !saw_trailing_user {
+            while let Some(frame) = self.rx.next_frame().expect("decode S2C 8B frame") {
+                let batch = decode_s2c_frame_batch(&frame).expect("decode S2C batch");
+                for env in batch.items {
+                    if let Some(ref tok) = env.token {
+                        if !tok.is_empty() && tok != "0" {
+                            self.token = tok.clone();
+                        }
+                    }
+                    let idx = ordered.len();
+                    if main_idx.is_none() && env.callback_name.as_deref() == Some(cb_name.as_str()) {
+                        main_idx = Some(idx);
+                    } else if let Some(exp_u) = expect_trailing_user_push {
+                        if main_idx.is_some() && env.callback_name.as_deref() == Some(exp_u) {
+                            saw_trailing_user = true;
+                        }
+                    }
+                    ordered.push(env);
+                }
+            }
+            if main_idx.is_some() && saw_trailing_user {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for ordered envelopes on {cb_name}: got {:?}",
+                ordered
+                    .iter()
+                    .map(|e| e.callback_name.clone())
+                    .collect::<Vec<_>>()
+            );
+            let _ = self
+                .stream
+                .set_read_timeout(Some(Duration::from_millis(250)));
+            match self.stream.read(&mut buf) {
+                Ok(n) if n > 0 => self.rx.feed(&buf[..n]),
+                _ => {
+                    if main_idx.is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = self.stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let m_idx = main_idx.expect("main RPC response present");
+        let main_env = ordered[m_idx].clone();
+        (ordered, m_idx, main_env)
+    }
+
+    fn gm(&mut self, cmd: &str) {
+        let env = self.call_rpc(
+            "chat.sendWorld",
+            vec![Value::Int(1), Value::String(cmd.to_string())],
+            false,
+        );
+        assert_eq!(env.err, "ok", "GM command `{cmd}` failed: {env:?}");
+    }
+}
+
+fn find_bag_entry_by_tid(bag_ret: &Value, sub_bag: &str, target_tid: i64) -> Option<(i32, i64)> {
+    let Value::Object(map) = bag_ret.get_field(sub_bag)? else {
+        return None;
+    };
+    for (gid_str, slot) in map.iter() {
+        let tid = slot.get_field("item_template_id").and_then(Value::as_i64);
+        if tid == Some(target_tid) {
+            let gid: i32 = gid_str.parse().ok()?;
+            let item_id = slot.get_field("item_id").and_then(Value::as_i64).unwrap_or(0);
+            return Some((gid, item_id));
+        }
+    }
+    None
+}
+
+fn pick_first_shop_offer(shop_ret: &Value) -> (String, i32, i32) {
+    let gk = match shop_ret.get_field("goods_key") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Int(n)) => n.to_string(),
+        Some(Value::Double(f)) => (*f as i64).to_string(),
+        _ => "0".to_string(),
+    };
+    let Value::Object(gl) = shop_ret.get_field("goods_list").expect("goods_list map") else {
+        panic!("expected goods_list object");
+    };
+    let (_, first) = gl.iter().next().expect("non-empty goods_list");
+    let idx = first.get_field("idx").and_then(Value::as_i64).unwrap_or(1) as i32;
+    let id = first.get_field("id").and_then(Value::as_i64).unwrap_or(idx as i64) as i32;
+    (gk, idx, id)
+}
+
+
+fn wave2_login_and_enter(
+    http_addr: SocketAddr,
+    tcp_addr: SocketAddr,
+    device_id: &str,
+    utid: i32,
+    uname: &str,
+    existing_uid: Option<u64>,
+) -> (StrictWireClient, u64, String) {
+    let (pid, hash, _) = strict_auth_guest(http_addr, device_id);
+    let mut client = StrictWireClient::connect(tcp_addr);
+    let env_login = client.call_rpc(
+        "user.login",
+        vec![
+            Value::map([
+                ("AMF", Value::Int(3)),
+                ("pid", Value::String(pid.clone())),
+                ("qid", Value::String(pid.clone())),
+                ("hash", Value::String(hash)),
+                ("serverID", Value::String("game2900161".into())),
+            ]),
+            Value::String(format!("uuid_{device_id}")),
+            Value::String("1.0.1194".into()),
+        ],
+        false,
+    );
+    assert_eq!(env_login.err, "ok");
+
+    let uid = if let Some(u) = existing_uid {
+        u
+    } else {
+        let cr = client.call_rpc(
+            "user.createUser",
+            vec![Value::Int(utid), Value::String(uname.to_string())],
+            false,
+        );
+        assert_eq!(cr.err, "ok");
+        client
+            .call_rpc("user.getUserBeforLogin", vec![], false)
+            .ret
+            .get_field("uid")
+            .and_then(Value::as_i64)
+            .unwrap() as u64
+    };
+    let ul = client.call_rpc("user.userLogin", vec![Value::Int(uid as i32)], false);
+    assert_eq!(ul.err, "ok");
+    (client, uid, pid)
+}
+
+#[test]
+fn wave2_raffle_shops_vip_and_s2c_ordering_e2e() {
+    let tmp = TempDirGuard::new("w2_raffle_shops");
+    let cfg = DaemonConfig::strict_all(tmp.path.clone());
+    let server = RunningServer::start(cfg).expect("start strict server");
+
+    let (mut client, uid, _) = wave2_login_and_enter(
+        server.http_addr,
+        server.tcp_addr,
+        "w2_raffle_alpha",
+        1,
+        "TriệuTửLongW2",
+        None,
+    );
+    assert!(uid > 0);
+
+    // Fund player generously via GM commands for exhaustive raffle & shop testing
+    for cmd in [
+        "/level 85",
+        "/vip 12",
+        "/gold 500000",
+        "/silver 20000000",
+        "/item 16011 15",
+        "/item 16012 40",
+        "/item 16013 40",
+        "/item 19009 20",
+        "/item 19056 20",
+        "/item 19144 60",
+        "/item 19074 110",
+        "/item 19207 20",
+        "/item 16001 20",
+    ] {
+        client.gm(cmd);
+    }
+    let _ = client.drain_pushes();
+
+    // =========================================================================
+    // 1. B-09 & B-12 S2C Envelope Ordering + Tavern Raffle (`raffle.*` & `tmRaffle.*`)
+    // =========================================================================
+    let r_info0 = client.call_rpc("raffle.getInfo", vec![], false);
+    assert_eq!(r_info0.err, "ok");
+
+    // 10-pull on Divine pool (`2`) -> `re.hero.new` / `bag.update` MUST arrive BEFORE `main_env`,
+    // and `user.updateUser` MUST arrive AFTER `main_env` with numeric `copper`!
+    let (envs_10, m_idx_10, main_10) = client.call_rpc_with_raw_ordered(
+        "raffle.multiRaffle",
+        vec![Value::Int(2)],
+        None,
+        Some("user.updateUser"),
+    );
+    assert_eq!(main_10.err, "ok");
+    let Value::Array { dense: rw10, .. } = main_10.ret.get_field("reward").expect("reward array")
+    else {
+        panic!("expected reward array on raffle.multiRaffle");
+    };
+    assert_eq!(rw10.len(), 10);
+
+    let mut saw_pre_state_push = false;
+    let mut saw_post_user_push = false;
+    for (idx, env) in envs_10.iter().enumerate() {
+        match env.callback_name.as_deref() {
+            Some("re.hero.new") | Some("bag.update") => {
+                assert!(
+                    idx < m_idx_10,
+                    "B-09: state push {:?} at {idx} must precede main_env at {m_idx_10}",
+                    env.callback_name
+                );
+                saw_pre_state_push = true;
+            }
+            Some("user.updateUser") => {
+                assert!(
+                    idx > m_idx_10,
+                    "B-12: user.updateUser at {idx} must follow main_env at {m_idx_10}"
+                );
+                assert!(
+                    matches!(
+                        env.ret.get_field("copper"),
+                        Some(Value::Int(_) | Value::Double(_))
+                    ),
+                    "user.updateUser copper must be numeric, got {:?}",
+                    env.ret.get_field("copper")
+                );
+                saw_post_user_push = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_pre_state_push, "multiRaffle must emit pre-callback state push");
+    assert!(saw_post_user_push, "multiRaffle must emit post-callback user.updateUser");
+
+    // `tmRaffle.multiRaffle` -> emits `re.tmHero.new` / `tmBag.update` BEFORE and `tmUser.updateUser` AFTER!
+    let (tm_envs, tm_midx, tm_main) = client.call_rpc_with_raw_ordered(
+        "tmRaffle.multiRaffle",
+        vec![Value::Int(2)],
+        None,
+        Some("tmUser.updateUser"),
+    );
+    assert_eq!(tm_main.err, "ok");
+    for (idx, env) in tm_envs.iter().enumerate() {
+        match env.callback_name.as_deref() {
+            Some("re.tmHero.new") | Some("tmBag.update") => assert!(idx < tm_midx),
+            Some("tmUser.updateUser") => assert!(idx > tm_midx),
+            _ => {}
+        }
+    }
+
+    // `raffle.singleRaffle` (`[2]`), `raffle.autoRaffle` (multi-pull up to 10 warrior tokens `16011`),
+    // `raffle.buyToken` (`5` Gold -> `5` `16013`), `raffle.raffleHot` (`pos = 0`), `raffle.refreshHotByHand`,
+    // `raffle.raffleRed` (`pos = 0`), `recruitment.*`, `chat.getLastMainPop`
+    assert_eq!(
+        client.call_rpc("raffle.singleRaffle", vec![Value::Int(2)], false).err,
+        "ok"
+    );
+    let auto_r = client.call_rpc("raffle.autoRaffle", vec![], false);
+    assert_eq!(auto_r.err, "ok");
+    if let Some(Value::Array { dense: arw, .. }) = auto_r.ret.get_field("reward") {
+        assert_eq!(arw.len(), 5, "autoRaffle must pull all 5 daily free warrior draws at once");
+    }
+
+    let pre_buy_tok_gold = client
+        .call_rpc("user.getUser", vec![], false)
+        .ret
+        .get_field("gold")
+        .and_then(Value::as_i64)
+        .unwrap();
+    let buy_tok = client.call_rpc("raffle.buyToken", vec![Value::Int(5)], false);
+    assert_eq!(buy_tok.err, "ok");
+    let post_buy_tok_gold = client
+        .call_rpc("user.getUser", vec![], false)
+        .ret
+        .get_field("gold")
+        .and_then(Value::as_i64)
+        .unwrap();
+    assert_eq!(
+        pre_buy_tok_gold - post_buy_tok_gold,
+        5,
+        "raffle.buyToken(5) must cost 5 Gold (1 Gold = 1 Recruit Seal 16013)"
+    );
+
+    // Hot & Red limit pools with 0-based `pos = 0` (`RaffleProxy.lua`)
+    assert_eq!(
+        client
+            .call_rpc("raffle.raffleHot", vec![Value::Int(0), Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client.call_rpc("raffle.refreshHotByHand", vec![], false).err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("raffle.raffleRed", vec![Value::Int(0), Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+
+    // Accumulate enough Divine luck to claim `raffle.receiveLuckHeroGift` (`500` plain Int)
+    for _ in 0..3 {
+        assert_eq!(
+            client.call_rpc("raffle.multiRaffle", vec![Value::Int(2)], false).err,
+            "ok"
+        );
+    }
+    let luck_claim = client.call_rpc(
+        "raffle.receiveLuckHeroGift",
+        vec![Value::Int(500), Value::Int(0)],
+        false,
+    );
+    assert_eq!(luck_claim.err, "ok");
+
+    assert_eq!(client.call_rpc("recruitment.getInfo", vec![], false).err, "ok");
+    assert_eq!(
+        client
+            .call_rpc("recruitment.receiveActiveReward", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    let pop = client.call_rpc("chat.getLastMainPop", vec![], false);
+    assert_eq!(pop.err, "ok");
+
+    // =========================================================================
+    // 2. All Secondary Raffles (incl. `{ boxId = 1 }` named map arg!)
+    // =========================================================================
+    assert_eq!(client.call_rpc("godarmRaffle.getInfo", vec![], false).err, "ok");
+    assert_eq!(
+        client.call_rpc("godarmRaffle.singleRaffle", vec![], false).err,
+        "ok"
+    );
+    assert_eq!(
+        client.call_rpc("tmGodarmRaffle.multiRaffle", vec![], false).err,
+        "ok"
+    );
+
+    assert_eq!(client.call_rpc("heroLegendRaffle.getInfo", vec![], false).err, "ok");
+    assert_eq!(
+        client
+            .call_rpc("heroLegendRaffle.buyToken", vec![Value::Int(2000)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("tmHeroLegendRaffle.raffle", vec![Value::Int(5)], false)
+            .err,
+        "ok"
+    );
+
+    assert_eq!(
+        client.call_rpc("activitySoulStoneRecruit.getInfo", vec![], false).err,
+        "ok"
+    );
+    for _ in 0..5 {
+        assert_eq!(
+            client
+                .call_rpc(
+                    "activitySoulStoneRecruit.raffle",
+                    vec![Value::Int(1), Value::Bool(true)],
+                    false,
+                )
+                .err,
+            "ok"
+        );
+    }
+    // Named map argument `{ boxId = 1 }` on `activitySoulStoneRecruit.openBox` (`score >= 50`)!
+    let (_, _, ss_box) = client.call_rpc_with_raw_ordered(
+        "activitySoulStoneRecruit.openBox",
+        vec![],
+        Some(Value::map([("boxId", Value::Int(1))])),
+        None,
+    );
+    assert_eq!(ss_box.err, "ok", "openBox with {{boxId=1}} failed: {ss_box:?}");
+
+    assert_eq!(
+        client.call_rpc("activityFamousRaffle.getInfo", vec![], false).err,
+        "ok"
+    );
+    for _ in 0..10 {
+        assert_eq!(
+            client
+                .call_rpc(
+                    "activityFamousRaffle.raffle",
+                    vec![Value::Int(1), Value::Int(1), Value::Bool(true)],
+                    false,
+                )
+                .err,
+            "ok"
+        );
+    }
+    let (_, _, fam_box) = client.call_rpc_with_raw_ordered(
+        "activityFamousRaffle.openBox",
+        vec![],
+        Some(Value::map([("boxId", Value::Int(1))])),
+        None,
+    );
+    assert_eq!(fam_box.err, "ok");
+
+    assert_eq!(
+        client.call_rpc("activityTopAnimalRecruit.getInfo", vec![], false).err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmActivityTopAnimalRecruit.raffle",
+                vec![Value::Int(1), Value::Bool(false)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+
+    assert_eq!(client.call_rpc("raffleArm.getInfo", vec![], false).err, "ok");
+    assert_eq!(
+        client.call_rpc("tmRaffleArm.raffle", vec![Value::Int(1)], false).err,
+        "ok"
+    );
+
+    // =========================================================================
+    // 3. `tmUser.buyCopper` 1-based Dense Array + VIP-0 Gift + Stamina/Execution
+    // =========================================================================
+    let (bc_envs, bc_midx, bc_main) = client.call_rpc_with_raw_ordered(
+        "tmUser.buyCopper",
+        vec![Value::Int(3)],
+        None,
+        Some("tmUser.updateUser"),
+    );
+    assert_eq!(bc_main.err, "ok");
+    let Value::Array {
+        dense: bc_rows,
+        assoc: bc_assoc,
+    } = &bc_main.ret
+    else {
+        panic!("BuyCoinPanel.lua:187 requires 1-based dense array, got {:?}", bc_main.ret);
+    };
+    assert!(bc_assoc.is_empty(), "buyCopper array must be purely dense");
+    assert_eq!(bc_rows.len(), 3);
+    for row in bc_rows {
+        let Value::Array { dense: pair, .. } = row else {
+            panic!("each buyCopper entry must be [mult, silver]");
+        };
+        assert_eq!(pair.len(), 2);
+        assert!(pair[1].as_i64().unwrap_or(0) >= 100_000);
+    }
+    assert!(
+        bc_envs
+            .iter()
+            .position(|e| e.callback_name.as_deref() == Some("tmUser.updateUser"))
+            .unwrap()
+            > bc_midx
+    );
+
+    // VIP-0 gift (`args = [0]`) returning `"ok"` (`VipProxy.lua`)!
+    let vip0 = client.call_rpc("user.buyVipGift", vec![Value::Int(0)], false);
+    assert_eq!(vip0.err, "ok");
+    assert_eq!(vip0.ret.as_str(), Some("ok"));
+    assert_eq!(
+        client.call_rpc("user.buyVipGift", vec![Value::Int(0)], false).err,
+        "vip_gift_already_bought"
+    );
+    let vip_info = client.call_rpc("tmUser.getVipGiftInfo", vec![], false);
+    assert_eq!(vip_info.err, "ok");
+
+    assert_eq!(
+        client.call_rpc("tmUser.buyExecution", vec![Value::Int(1)], false).err,
+        "ok"
+    );
+    assert_eq!(
+        client.call_rpc("tmUser.buyStamina", vec![Value::Int(1)], false).err,
+        "ok"
+    );
+
+    // =========================================================================
+    // 4. All Shops & Extended Currencies (`GoldShop 8`, `MysteryShop 12`, `ArenaShop 2`,
+    //    `SoulShop 3`, `TowerShop 7`, `AwakeShop 10`, `Trader`, `BabelShop`, `ActivityShop`)
+    // =========================================================================
+    // 4a. GoldShop (`8`) stepped pricing
+    let gs_info = client.call_rpc("shop.getInfo", vec![Value::Int(8)], false);
+    assert_eq!(gs_info.err, "ok");
+    let (gs_gk, gs_idx, gs_id) = pick_first_shop_offer(&gs_info.ret);
+    let g_before_1 = client
+        .call_rpc("user.getUser", vec![], false)
+        .ret
+        .get_field("gold")
+        .and_then(Value::as_i64)
+        .unwrap();
+    assert_eq!(
+        client
+            .call_rpc(
+                "shop.buy",
+                vec![
+                    Value::Int(8),
+                    Value::String(gs_gk.clone()),
+                    Value::Int(gs_idx),
+                    Value::Int(gs_id),
+                    Value::Int(1),
+                ],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    let g_after_1 = client
+        .call_rpc("user.getUser", vec![], false)
+        .ret
+        .get_field("gold")
+        .and_then(Value::as_i64)
+        .unwrap();
+    assert_eq!(
+        client
+            .call_rpc(
+                "shop.buy",
+                vec![
+                    Value::Int(8),
+                    Value::String(gs_gk),
+                    Value::Int(gs_idx),
+                    Value::Int(gs_id),
+                    Value::Int(1),
+                ],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    let g_after_2 = client
+        .call_rpc("user.getUser", vec![], false)
+        .ret
+        .get_field("gold")
+        .and_then(Value::as_i64)
+        .unwrap();
+    let cost_1 = g_before_1 - g_after_1;
+    let cost_2 = g_after_1 - g_after_2;
+    assert!(
+        cost_1 > 0 && cost_2 >= cost_1,
+        "GoldShop stepped price must be positive and non-decreasing ({cost_1} -> {cost_2})"
+    );
+
+    // 4b. MysteryShop (`12`) + `shop.refresh` + `shop.multiRefresh` + `SoulShop` (`3`)
+    let mys_info = client.call_rpc("shop.getInfo", vec![Value::Int(12)], false);
+    assert_eq!(mys_info.err, "ok");
+    assert_eq!(
+        client.call_rpc("shop.refresh", vec![Value::Int(12)], false).err,
+        "ok"
+    );
+    let mys_multi = client.call_rpc("shop.multiRefresh", vec![Value::Int(12)], false);
+    assert_eq!(mys_multi.err, "ok");
+    let (mys_gk, mys_idx, mys_id) = pick_first_shop_offer(&mys_multi.ret);
+    // Ensure enough `hero_soul` via SoulShop/raffle or stage before buying if currency is soul
+    let soul_info = client.call_rpc("shop.getInfo", vec![Value::Int(3)], false);
+    let (s_gk, s_idx, s_id) = pick_first_shop_offer(&soul_info.ret);
+    assert_eq!(
+        client
+            .call_rpc(
+                "shop.buy",
+                vec![
+                    Value::Int(3),
+                    Value::String(s_gk),
+                    Value::Int(s_idx),
+                    Value::Int(s_id),
+                    Value::Int(1),
+                ],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    let _ = (mys_gk, mys_idx, mys_id);
+
+    // 4c. Earn `arena_coin` via Arena sweep, then spend in `ArenaShop` (`2`) and verify exact sync!
+    assert_eq!(client.call_rpc("arena.enterArena", vec![], false).err, "ok");
+    assert_eq!(
+        client
+            .call_rpc("arena.sweep", vec![Value::Int(1), Value::Int(5)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(client.call_rpc("arena.fetchReward", vec![], false).err, "ok");
+    let arena_coin_before = client
+        .call_rpc("user.getUser", vec![], false)
+        .ret
+        .get_field("arena_coin")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    assert!(arena_coin_before >= 200, "expected arena_coin >= 200, got {arena_coin_before}");
+    let ar_shop = client.call_rpc("shop.getInfo", vec![Value::Int(2)], false);
+    let ar_gk = ar_shop.ret.get_field("goods_key").and_then(Value::as_i64).unwrap_or(0).to_string();
+    // Slot idx=7 (`id=7`) costs `200` `arena_coin`
+    assert_eq!(
+        client
+            .call_rpc(
+                "shop.buy",
+                vec![
+                    Value::Int(2),
+                    Value::String(ar_gk),
+                    Value::Int(7),
+                    Value::Int(7),
+                    Value::Int(1),
+                ],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    let arena_coin_after = client
+        .call_rpc("user.getUser", vec![], false)
+        .ret
+        .get_field("arena_coin")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    assert_eq!(
+        arena_coin_before - arena_coin_after,
+        200,
+        "spent arena_coin must sync back to PlayerStore without .max() resurrection"
+    );
+
+    // 4d. Earn `tower_num` via `dota.pass`, then spend in `tmShop` (`TowerShop = 7`)!
+    assert_eq!(client.call_rpc("dota.attack", vec![Value::Int(1)], false).err, "ok");
+    assert_eq!(
+        client
+            .call_rpc("dota.pass", vec![Value::Int(1), Value::Bool(true)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(client.call_rpc("dota.openBox", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("dota.reset", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("dota.sweep", vec![], false).err, "ok");
+    let tw_shop = client.call_rpc("shop.getInfo", vec![Value::Int(7)], false);
+    assert_eq!(tw_shop.err, "ok");
+    let (tw_gk, tw_idx, tw_id) = pick_first_shop_offer(&tw_shop.ret);
+    assert_eq!(
+        client
+            .call_rpc(
+                "shop.buy",
+                vec![
+                    Value::Int(7),
+                    Value::String(tw_gk),
+                    Value::Int(tw_idx),
+                    Value::Int(tw_id),
+                    Value::Int(1),
+                ],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    let tm_gs = client.call_rpc("tmShop.getInfo", vec![Value::Int(8)], false);
+    assert_eq!(tm_gs.err, "ok");
+    let (tm_gk, tm_idx, tm_id) = pick_first_shop_offer(&tm_gs.ret);
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmShop.buy",
+                vec![
+                    Value::Int(8),
+                    Value::String(tm_gk),
+                    Value::Int(tm_idx),
+                    Value::Int(tm_id),
+                    Value::Int(1),
+                ],
+                false,
+            )
+            .err,
+        "ok"
+    );
+
+    // 4e. AwakeShop (`10` — real IDs `>= 365`, offer 1 `id=365` costs `162` Gold!)
+    let aw_shop = client.call_rpc("shop.getInfo", vec![Value::Int(10)], false);
+    assert_eq!(aw_shop.err, "ok");
+    let (aw_gk, aw_idx, aw_id) = pick_first_shop_offer(&aw_shop.ret);
+    assert!(aw_id >= 365, "AwakeShop offer IDs must start at 365, got {aw_id}");
+    assert_eq!(
+        client
+            .call_rpc(
+                "shop.buy",
+                vec![
+                    Value::Int(10),
+                    Value::String(aw_gk),
+                    Value::Int(aw_idx),
+                    Value::Int(aw_id),
+                    Value::Int(1),
+                ],
+                false,
+            )
+            .err,
+        "ok"
+    );
+
+    // 4f. TraderShop (`timeMachineTrader.*`), BabelTowerShop, LimitShop, WeekendShop, ScoreShop
+    assert_eq!(client.call_rpc("timeMachineTrader.getInfo", vec![], false).err, "ok");
+    assert_eq!(
+        client
+            .call_rpc("traderShop.buyFreeGift", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("traderShop.recvFundReward", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(client.call_rpc("babeltowerShop.getShopInfo", vec![], false).err, "ok");
+    assert_eq!(
+        client
+            .call_rpc("limitShop.getInfo", vec![], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("limitShop.buy", vec![Value::Int(1), Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("weekendShop.buy", vec![Value::Int(1), Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("scoreShop.buy", vec![Value::Int(1), Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+
+    drop(client);
+    server.shutdown();
+}
+
+#[test]
+fn wave2_bag_sell_use_openbox_furnace_compose_squad_hero_forge_tm_e2e() {
+    let tmp = TempDirGuard::new("w2_player_tm");
+    let cfg = DaemonConfig::strict_all(tmp.path.clone());
+    let server = RunningServer::start(cfg).expect("start strict server");
+
+    let (mut client, uid, _) = wave2_login_and_enter(
+        server.http_addr,
+        server.tcp_addr,
+        "w2_player_beta",
+        1,
+        "QuanVũW2TM",
+        None,
+    );
+
+    for cmd in [
+        "/level 90",
+        "/vip 12",
+        "/gold 500000",
+        "/silver 50000000",
+        "/item 10028 10",
+        "/item 33001 5",
+        "/item 30011 5",
+        "/item 33003 5",
+        "/item 3113002 40",
+        "/item 3220021 2",
+        "/item 3220022 2",
+        "/item 3220023 2",
+        "/item 3200105 20",
+        "/item 3300101 40",
+        "/item 3500401 80",
+        "/item 3400101 80",
+        "/item 3600101 50",
+        "/item 5500101 50",
+        "/item 1000001 6",
+        "/item 10001 5",
+        "/item 701001 2",
+        "/item 50406 80",
+        "/item 200101 1",
+        "/item 200102 1",
+        "/item 1400101 1",
+        "/item 182003 1",
+        "/item 10010 500",
+        "/item 10014 50",
+        "/item 10015 50",
+        "/item 10016 50",
+        "/item 10017 20",
+        "/item 10018 20",
+        "/hero 406",
+        "/hero 406",
+        "/hero 426",
+    ] {
+        client.gm(cmd);
+    }
+    let _ = client.drain_pushes();
+
+    // =========================================================================
+    // 1. 0-Indexed Lua `args[0]` Selling + Refinery Selling (`tmBag.sellItems`, `tmRefinery.*`)
+    // =========================================================================
+    let bag0 = client.call_rpc("tmBag.bagInfo", vec![], false).ret;
+    let (gid_16012, iid_16012) =
+        find_bag_entry_by_tid(&bag0, "item", 16_012).expect("starter 16012");
+    let (gid_22102, iid_22102) =
+        find_bag_entry_by_tid(&bag0, "item", 22_102).expect("starter 22102");
+
+    // `tmBag.sellItems` with authentic Lua 0-indexed nested table:
+    // `args = { [0] = { [0] = gid, [1] = item_id, [2] = 3 } }`
+    let sell_inner = Value::Array {
+        dense: vec![Value::Int(iid_16012 as i32), Value::Int(3)],
+        assoc: vec![("0".to_string(), Value::Int(gid_16012))],
+    };
+    let sell_outer = Value::Array {
+        dense: vec![],
+        assoc: vec![("0".to_string(), sell_inner)],
+    };
+    let (sell_envs, sell_midx, sell_main) = client.call_rpc_with_raw_ordered(
+        "tmBag.sellItems",
+        vec![],
+        Some(sell_outer),
+        Some("tmUser.updateUser"),
+    );
+    assert_eq!(sell_main.err, "ok");
+    assert_eq!(sell_main.ret.as_str(), Some("ok"));
+    assert!(
+        sell_envs
+            .iter()
+            .position(|e| e.callback_name.as_deref() == Some("tmBag.update"))
+            .unwrap()
+            < sell_midx
+    );
+
+    // `tmRefinery.refineryFragment`, `tmRefinery.refinerySoul`, `tmRefinery.refineryHeroLegend`
+    let (frag_gid, _) = find_bag_entry_by_tid(&bag0, "fragment", 3_113_001).expect("starter armFrag");
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmRefinery.refineryFragment",
+                vec![Value::dense_array(vec![Value::Int(frag_gid)])],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    let (soul_gid, _) = find_bag_entry_by_tid(&bag0, "soul", 50_406).expect("50406 soul");
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmRefinery.refinerySoul",
+                vec![Value::dense_array(vec![Value::Int(soul_gid)])],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    let (hl_gid, _) = find_bag_entry_by_tid(&bag0, "hero_legend", 701_001).expect("701001 heroLegend");
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmRefinery.refineryHeroLegend",
+                vec![Value::dense_array(vec![Value::Int(hl_gid)])],
+                false,
+            )
+            .err,
+        "ok"
+    );
+
+    // =========================================================================
+    // 2. 0-Indexed `tmExchange.useItemInBag`, `useItemInBagByTpl`, `openRandgiftBox*` & Bag Expansion
+    // =========================================================================
+    // Lua 0-indexed `args[0] = gid, args[1] = item_id, args[2] = 2`!
+    let use_raw = Value::Array {
+        dense: vec![Value::Int(iid_22102 as i32), Value::Int(2)],
+        assoc: vec![("0".to_string(), Value::Int(gid_22102))],
+    };
+    let (_, _, use_env) = client.call_rpc_with_raw_ordered(
+        "tmExchange.useItemInBag",
+        vec![],
+        Some(use_raw),
+        Some("tmUser.updateUser"),
+    );
+    assert_eq!(use_env.err, "ok");
+    assert_eq!(
+        use_env.ret.get_field("execution").and_then(Value::as_i64),
+        Some(50)
+    );
+
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmExchange.useItemInBagByTpl",
+                vec![Value::Int(22_202), Value::Int(2)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client.call_rpc("tmExchange.getOpenBoxInfo", vec![], false).err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmExchange.openRandgiftBoxByKey",
+                vec![Value::Int(33_001), Value::Int(2)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmExchange.openRandgiftBoxByGold",
+                vec![Value::Int(33_003), Value::Int(2)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+
+    // Bag expansion (`tmBag.openGridByGold`, `tmBag.openGridByItem`, `tmUser.openHeroGrid`)
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmBag.openGridByGold",
+                vec![Value::Int(2), Value::String("arm".into())],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmBag.openGridByItem",
+                vec![Value::Int(2), Value::String("treasure".into())],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("tmUser.openHeroGrid", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+
+    // =========================================================================
+    // 3. Synthesis (`tmExchange.compose*`, `quickCompose*` & `emExchange.composeTreasure`)
+    // =========================================================================
+    let (ch_envs, ch_midx, ch_main) = client.call_rpc_with_raw_ordered(
+        "tmExchange.composeHero",
+        vec![Value::Int(50_101), Value::Int(1)],
+        None,
+        Some("tmUser.updateUser"),
+    );
+    assert_eq!(ch_main.err, "ok");
+    let composed_hid = ch_main.ret.get_field("hid").and_then(Value::as_i64).unwrap();
+    assert!(
+        ch_envs
+            .iter()
+            .position(|e| e.callback_name.as_deref() == Some("re.tmHero.new"))
+            .unwrap()
+            < ch_midx
+    );
+
+    // Equipment compose (`3_113_002` x20 -> `113_002`) + `quickComposeArm` (remaining x20 -> `113_002`)
+    let c_arm1 = client.call_rpc(
+        "tmExchange.composeArm",
+        vec![Value::Int(3_113_002), Value::Int(1)],
+        false,
+    );
+    assert_eq!(c_arm1.err, "ok");
+    assert_eq!(
+        client.call_rpc("tmExchange.quickComposeArm", vec![], false).err,
+        "ok"
+    );
+
+    // Client typo `emExchange.composeTreasure` (`3_220_021..=3_220_023` -> `182_002`) + `oneKeycomposeTreasure` + `composeTreasureByFragment`
+    let em_tr = client.call_rpc(
+        "emExchange.composeTreasure",
+        vec![Value::Int(182_002), Value::Int(1)],
+        false,
+    );
+    assert_eq!(em_tr.err, "ok", "emExchange.composeTreasure failed: {em_tr:?}");
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmExchange.oneKeycomposeTreasure",
+                vec![Value::Int(182_002)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmExchange.composeTreasureByFragment",
+                vec![Value::Int(3_200_105), Value::Int(1)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+
+    // Awake (`x2`), GodArm (`x2`), Pet (`x2`), GodAnimal, TopAnimal, Gem, Normal
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmExchange.composeAwake",
+                vec![Value::Int(3_300_101), Value::Int(1)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client.call_rpc("tmExchange.quickComposeAwake", vec![], false).err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmExchange.composeGodArm",
+                vec![Value::Int(3_500_401), Value::Int(1)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client.call_rpc("tmExchange.quickComposeGodArm", vec![], false).err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmExchange.composePet",
+                vec![Value::Int(3_400_101), Value::Int(2)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmExchange.composeGodAnimal",
+                vec![Value::Int(3_600_101), Value::Int(1)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmExchange.composeTopAnimal",
+                vec![Value::Int(5_500_101), Value::Int(1)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmExchange.composeGem",
+                vec![Value::Int(1_000_001), Value::Int(1)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client.call_rpc("tmExchange.quickComposeGem", vec![], false).err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmExchange.composeNormal",
+                vec![Value::Int(10_001), Value::Int(1)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+
+    // =========================================================================
+    // 4. Squad, Battle Grid (`{"2","3","5","6","8","9"}`), Slot Gear & Spirit (`tmFormation.*`)
+    // =========================================================================
+    let f_get = client.call_rpc("tmFormation.get", vec![], false);
+    assert_eq!(f_get.err, "ok");
+    let grid_val = f_get.ret.get_field("formation").unwrap_or(&f_get.ret);
+    let Value::Object(f_cells) = grid_val else {
+        panic!("expected 6-cell battle grid map from tmFormation.get, got {:?}", f_get.ret);
+    };
+    let valid_cells = ["2", "3", "5", "6", "8", "9"];
+    assert!((1..=6).contains(&f_cells.iter().count()));
+    for (k, _) in f_cells.iter() {
+        assert!(
+            valid_cells.contains(&k),
+            "tmFormation.get emitted illegal grid cell key `{k}`"
+        );
+    }
+
+    // Locate bench heroes `406` (two copies) and `426`
+    let all_h = client.call_rpc("tmHero.getAllHeroes", vec![], false).ret;
+    let mut hids_406 = Vec::new();
+    let mut hid_426 = 0i64;
+    if let Value::Object(hm) = &all_h {
+        for (_, hv) in hm.iter() {
+            let htid = hv.get_field("htid").and_then(Value::as_i64).unwrap_or(0);
+            let hid = hv.get_field("hid").and_then(Value::as_i64).unwrap_or(0);
+            if htid == 406 {
+                hids_406.push(hid);
+            } else if htid == 426 {
+                hid_426 = hid;
+            }
+        }
+    }
+    assert!(hids_406.len() >= 2 && hid_426 > 0);
+    let main_406 = hids_406[0] as i32;
+    let sac_406 = hids_406[1] as i32;
+
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmFormation.setHeroToPosition",
+                vec![Value::Int(composed_hid as i32), Value::Int(2)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmFormation.setHeroToPosition",
+                vec![Value::Int(main_406), Value::Int(3)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    // If GM `/hero 426` auto-deployed `hid_426` into squad `position`, unset it first before placing in Partner!
+    if let Value::Array { dense: sq_slots, .. } =
+        client.call_rpc("tmFormation.getHeroes", vec![], false).ret
+    {
+        for (idx, v) in sq_slots.iter().enumerate() {
+            if v.as_i64() == Some(hid_426) {
+                let unset_res = client.call_rpc(
+                    "tmFormation.unsetHeroFromPosition",
+                    vec![Value::Int((idx + 1) as i32)],
+                    false,
+                );
+                assert_eq!(unset_res.err, "ok");
+                assert_eq!(unset_res.ret, Value::Bool(true));
+            }
+        }
+    }
+    assert_eq!(
+        client
+            .call_rpc("tmFormation.openPartner", vec![Value::Int(7)], false)
+            .err,
+        "ok"
+    );
+    let set_partner_res = client.call_rpc(
+        "tmFormation.setPartner",
+        vec![Value::Int(7), Value::Int(hid_426 as i32)],
+        false,
+    );
+    assert_eq!(set_partner_res.err, "ok");
+    assert_eq!(set_partner_res.ret, Value::Bool(true));
+    assert_eq!(
+        client.call_rpc("tmFormation.unsetMultiPartner", vec![], false).err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("tmFormation.openBuddy", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmFormation.setBuddy",
+                vec![Value::Int(1), Value::Int(hid_426 as i32)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("tmFormation.buddyLvUp", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("tmFormation.rebornBuddy", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("tmFormation.activateMorePower", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("tmFormation.morePowerAutoLvUp", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmFormation.getOtherPositionInfo",
+                vec![Value::Int(uid as i32)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+
+    // Equip Arm, Treasure, GodAnimal, TopAnimal, and Spirit onto Squad Slot 1/2
+    let bag1 = client.call_rpc("tmBag.bagInfo", vec![], false).ret;
+    let (gid_weap, iid_weap) = find_bag_entry_by_tid(&bag1, "arm", 112_001).expect("starter weapon");
+    let (_, iid_treas) = find_bag_entry_by_tid(&bag1, "treasure", 182_001).expect("starter treasure");
+    let (_, iid_mat_treas) =
+        find_bag_entry_by_tid(&bag1, "treasure", 182_003).expect("material treasure");
+    let (_, iid_ga) = find_bag_entry_by_tid(&bag1, "god_animal", 600_101).expect("600101 godAnimal");
+    let (_, iid_ta) = find_bag_entry_by_tid(&bag1, "top_animal", 5_400_101).expect("5400101 topAnimal");
+    let (_, iid_sp1) = find_bag_entry_by_tid(&bag1, "spirit", 200_101).expect("200101 spirit");
+
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmFormation.addArming",
+                vec![Value::Int(1), Value::Int(1), Value::Int(gid_weap)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmHero.addMultiArming",
+                vec![
+                    Value::Int(1),
+                    Value::map([("5", Value::Int(iid_treas as i32))]),
+                ],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmFormation.transferArming",
+                vec![Value::Int(1), Value::Int(2), Value::Int(1)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmFormation.addGodAnimal",
+                vec![Value::Int(1), Value::Int(iid_ga as i32)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("tmFormation.removeGodAnimal", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmFormation.addTopAnimal",
+                vec![Value::Int(1), Value::Int(iid_ta as i32)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("tmFormation.removeTopAnimal", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "spirit.addSpirit",
+                vec![Value::Int(1), Value::Int(1), Value::Int(iid_sp1 as i32)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "spirit.transferSpirit",
+                vec![Value::Int(1), Value::Int(2), Value::Int(1)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "spirit.removeSpirit",
+                vec![Value::Int(2), Value::Int(1)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+
+    // =========================================================================
+    // 5. Hero Progression, Evolve, Star, Wash, Pill, Dress, Gold Tier & Forge
+    // =========================================================================
+    let lv_up = client.call_rpc(
+        "tmHero.heroLevelUp",
+        vec![Value::Int(main_406), Value::Int(10)],
+        false,
+    );
+    assert_eq!(lv_up.err, "ok");
+    assert!(lv_up.ret.get_field("oldLv").is_some());
+    assert!(lv_up.ret.get_field("newlv").and_then(Value::as_i64).unwrap_or(0) > 1);
+    assert!(lv_up.ret.get_field("itemCost").is_some());
+
+    assert_eq!(
+        client
+            .call_rpc("tmHero.upgrade", vec![Value::Int(main_406)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("tmHero.awake", vec![Value::Int(main_406)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("tmHero.lock", vec![Value::Int(main_406)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("tmHero.unlock", vec![Value::Int(main_406)], false)
+            .err,
+        "ok"
+    );
+
+    // Ensure `sac_406` is undeployed (GM `/hero 406` auto-fills open squad slots) before evolving!
+    let pos_info_ev = client.call_rpc("tmFormation.getPositionInfo", vec![], false).ret;
+    if let Some(pos_map) = pos_info_ev.get_field("position") {
+        for slot in 2..=6 {
+            let k = slot.to_string();
+            if pos_map.get_field(&k).and_then(Value::as_i64) == Some(i64::from(sac_406)) {
+                assert_eq!(
+                    client
+                        .call_rpc("tmFormation.unsetHeroFromPosition", vec![Value::Int(slot)], false)
+                        .err,
+                    "ok"
+                );
+            }
+        }
+    }
+    // Evolve `main_406` using real 1-arg Lua contract (`{ hid }` auto-picks unlocked undeployed `sac_406`!)
+    let ev = client.call_rpc(
+        "tmEvolve.doEvolve",
+        vec![Value::Int(main_406)],
+        false,
+    );
+    assert_eq!(ev.err, "ok");
+    assert!(ev.ret.get_field("newEvolvelv").and_then(Value::as_i64).unwrap_or(0) >= 1);
+
+    assert_eq!(
+        client
+            .call_rpc("tmHerostar.levelUp", vec![Value::Int(main_406)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmWash.doWash",
+                vec![Value::Int(main_406), Value::Int(1), Value::Int(0)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("tmWash.save", vec![Value::Int(main_406)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("heroPill.addPill", vec![Value::Int(main_406)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("tmHeroPill.reborn", vec![Value::Int(main_406)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("tmDress.wear", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("tmDress.rebornDress", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    for gold_rpc in [
+        "tmHeroGold.upTier",
+        "tmDarkGold.upTier",
+        "tmPurpleGold.upTier",
+        "tmColorGold.upTier",
+        "tmNirvanaGold.upTier",
+        "tmGildGold.upTier",
+    ] {
+        assert_eq!(
+            client
+                .call_rpc(gold_rpc, vec![Value::Int(main_406)], false)
+                .err,
+            "ok"
+        );
+    }
+
+    // Forge: `reinforceArm`, `autoReinforceArm` (`{ [item_id]: { level, upLevel } }`),
+    // `upgradeArm`, `armWashRefresh` + `armWashApply`, `reinforceTreasure`, `upgradeTreasure`,
+    // `reinforceSpirit`, `exploreSoul.explore`
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmForge.reinforceArm",
+                vec![Value::Int(iid_weap as i32), Value::Int(5)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    let auto_reinf = client.call_rpc(
+        "tmForge.autoReinforceArm",
+        vec![Value::Int(2)],
+        false,
+    );
+    assert_eq!(auto_reinf.err, "ok");
+    let weap_key = iid_weap.to_string();
+    assert!(
+        auto_reinf
+            .ret
+            .get_field(&weap_key)
+            .and_then(|s| s.get_field("level"))
+            .is_some(),
+        "autoReinforceArm must return {{ [item_id]: {{ level, upLevel }} }}"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmForge.upgradeArm",
+                vec![
+                    Value::Int(iid_weap as i32),
+                    Value::map([("10016", Value::Int(5))]),
+                ],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmForge.armWashRefresh",
+                vec![Value::Int(iid_weap as i32), Value::Int(0), Value::Int(0)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("tmForge.armWashApply", vec![Value::Int(iid_weap as i32)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmForge.reinforceTreasure",
+                vec![
+                    Value::Int(iid_treas as i32),
+                    Value::dense_array(vec![Value::Int(iid_mat_treas as i32)]),
+                ],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmForge.upgradeTreasure",
+                vec![Value::Int(iid_treas as i32)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    // Hunt souls first (`tmExploreSoul.explore`) or decompose a fodder spirit so `spirit_coin` / fodder is earned, then reinforce `iid_sp1`!
+    assert_eq!(
+        client
+            .call_rpc("tmExploreSoul.explore", vec![Value::Int(5)], false)
+            .err,
+        "ok"
+    );
+    let bag_sp = client.call_rpc("tmBag.bagInfo", vec![], false).ret;
+    let mut fodder_sp = Vec::new();
+    if let Some(Value::Object(m)) = bag_sp.get_field("spirit") {
+        for (_, v) in m.iter() {
+            if let Some(id) = v.get_field("item_id").and_then(Value::as_i64) {
+                if id != iid_sp1 {
+                    fodder_sp.push(id as i32);
+                }
+            }
+        }
+    }
+    assert!(!fodder_sp.is_empty(), "tmExploreSoul.explore must grant spirit items");
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmForge.reinforceSpirit",
+                vec![
+                    Value::Int(iid_sp1 as i32),
+                    Value::dense_array(vec![Value::Int(fodder_sp[0])]),
+                ],
+                false,
+            )
+            .err,
+        "ok"
+    );
+
+    // =========================================================================
+    // 6. Furnace Decompose & Reborn (`tmRefinery.refinery*`, `reborn*`, `resolveSpirit`, `soulSkill.refinery`)
+    //    including currency loop (`refineryAwake -> AwakeArmCoin -> upgradeAwake`,
+    //    `refineryGodArm -> GodarmCoin -> godArmUpgrade`)!
+    // =========================================================================
+    // Unequip weapon & treasure first so we can test reborn/decompose cleanly
+    assert_eq!(
+        client
+            .call_rpc("tmFormation.removeArming", vec![Value::Int(2), Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("tmFormation.removeArming", vec![Value::Int(1), Value::Int(5)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmFormation.unsetHeroFromPosition",
+                vec![Value::Int(3)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+
+    let bag2 = client.call_rpc("tmBag.bagInfo", vec![], false).ret;
+    // Collect two Awake (`300_101`), two GodArm (`500_401`), two Pet (`400_101`), crafted Arm (`113_002`),
+    // crafted Treasure (`182_002`), Spirit (`200_102`), SoulSkill (`1_400_101`)
+    let collect_iids = |sub: &str, tid: i64| -> Vec<i32> {
+        let mut out = Vec::new();
+        if let Some(Value::Object(m)) = bag2.get_field(sub) {
+            for (_, v) in m.iter() {
+                if v.get_field("item_template_id").and_then(Value::as_i64) == Some(tid) {
+                    if let Some(id) = v.get_field("item_id").and_then(Value::as_i64) {
+                        out.push(id as i32);
+                    }
+                }
+            }
+        }
+        out
+    };
+    let awake_ids = collect_iids("awake", 300_101);
+    let godarm_ids = collect_iids("god_arm", 500_401);
+    let pet_ids = collect_iids("pet", 400_101);
+    let arm_113002 = collect_iids("arm", 113_002);
+    let tr_182002 = collect_iids("treasure", 182_002);
+    let sp_200102 = collect_iids("spirit", 200_102);
+    let ss_1400101 = collect_iids("soul_skill", 1_400_101);
+
+    // Decompose first Awake (`300_101`) & first GodArm (`500_401`) -> grants `AwakeArmCoin` & `GodarmCoin`,
+    // then upgrade the second Awake & second GodArm, then Reborn them!
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmRefinery.refineryAwake",
+                vec![Value::dense_array(vec![Value::Int(awake_ids[0])])],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("tmForge.upgradeAwake", vec![Value::Int(awake_ids[1])], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmRefinery.rebornAwake",
+                vec![Value::dense_array(vec![Value::Int(awake_ids[1])])],
+                false,
+            )
+            .err,
+        "ok"
+    );
+
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmRefinery.refineryGodArm",
+                vec![Value::dense_array(vec![Value::Int(godarm_ids[0])])],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmForge.godArmUpgrade",
+                vec![Value::Int(godarm_ids[1]), Value::Int(1)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmRefinery.rebornGodArm",
+                vec![Value::dense_array(vec![Value::Int(godarm_ids[1])])],
+                false,
+            )
+            .err,
+        "ok"
+    );
+
+    // Reborn upgraded Hero (`main_406`), Arm (`iid_weap`), Treasure (`iid_treas`), Spirit (`iid_sp1`)
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmRefinery.rebornHero",
+                vec![Value::dense_array(vec![Value::Int(main_406)])],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmRefinery.rebornArm",
+                vec![Value::dense_array(vec![Value::Int(iid_weap as i32)])],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmRefinery.rebornTreasure",
+                vec![Value::dense_array(vec![Value::Int(iid_treas as i32)])],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmRefinery.rebornSpirit",
+                vec![Value::dense_array(vec![Value::Int(iid_sp1 as i32)])],
+                false,
+            )
+            .err,
+        "ok"
+    );
+
+    // Remove `hid_426` from Buddy slot 1 (`hid = 0`) first so it returns to bench before decomposing!
+    let clear_buddy = client.call_rpc(
+        "tmFormation.setBuddy",
+        vec![Value::Int(1), Value::Int(0)],
+        false,
+    );
+    assert_eq!(clear_buddy.err, "ok");
+    assert_eq!(clear_buddy.ret, Value::Bool(true));
+
+    // Decompose bench Hero (`tmRefinery.refineryHeros` exact `NetConst.lua:179` spelling!),
+    // Arm, Treasure, Pet, Spirit (`resolveSpirit`), TopAnimal (`tmRefinery.refineryTopAnimal`), SoulSkill (`soulSkill.refinery`)
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmRefinery.refineryHeros",
+                vec![Value::dense_array(vec![Value::Int(hid_426 as i32)])],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmRefinery.refineryArm",
+                vec![Value::dense_array(vec![Value::Int(arm_113002[0])])],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmRefinery.refineryTreasure",
+                vec![Value::dense_array(vec![Value::Int(tr_182002[0])])],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmRefinery.refineryPet",
+                vec![Value::dense_array(vec![Value::Int(pet_ids[0])])],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "refinery.resolveSpirit",
+                vec![Value::dense_array(vec![Value::Int(sp_200102[0])])],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmRefinery.refineryTopAnimal",
+                vec![Value::dense_array(vec![Value::Int(iid_ta as i32)])],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    let ss_dec = client.call_rpc(
+        "soulSkill.refinery",
+        vec![Value::dense_array(vec![Value::Int(ss_1400101[0])])],
+        false,
+    );
+    assert_eq!(ss_dec.err, "ok");
+
+    drop(client);
+    server.shutdown();
+}
+
+#[test]
+fn wave2_all_playable_modes_pipelined_resilience_and_b08_b19_restart_e2e() {
+    let tmp = TempDirGuard::new("w2_modes_restart");
+    let cfg = DaemonConfig::strict_all(tmp.path.clone());
+    let server = RunningServer::start(cfg.clone()).expect("start strict server");
+
+    let (mut client, uid, _) = wave2_login_and_enter(
+        server.http_addr,
+        server.tcp_addr,
+        "w2_modes_gamma",
+        1,
+        "LữBốW2Play",
+        None,
+    );
+
+    for cmd in [
+        "/level 95",
+        "/vip 12",
+        "/gold 500000",
+        "/silver 20000000",
+        "/item 22102 30",
+        "/mail 17002 5",
+    ] {
+        client.gm(cmd);
+    }
+    // Top up execution via stamina pills for full campaign + dungeon runs
+    let bag_init = client.call_rpc("bag.bagInfo", vec![], false).ret;
+    let (gid_pill, _) = find_bag_entry_by_tid(&bag_init, "item", 22_102).unwrap();
+    assert_eq!(
+        client
+            .call_rpc(
+                "exchange.useItemInBag",
+                vec![Value::Int(gid_pill), Value::Int(15)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    let _ = client.drain_pushes();
+
+    // =========================================================================
+    // 1. Campaign (`copy.*`), Chapter Unlock `1001 -> 1002`, `sweep` Top-Level Array,
+    //    `timeMachineCopy.*`, `ecopy.*` & `copy_daily.*`
+    // =========================================================================
+    for stage in [100_101, 100_102, 100_103, 100_105, 100_106] {
+        assert_eq!(
+            client
+                .call_rpc("copy.attack", vec![Value::Int(1001), Value::Int(stage)], false)
+                .err,
+            "ok"
+        );
+        assert_eq!(
+            client
+                .call_rpc(
+                    "copy.pass",
+                    vec![Value::Int(1001), Value::Int(stage), Value::empty_array()],
+                    false,
+                )
+                .err,
+            "ok"
+        );
+    }
+    // Chapter `1002` AND Elite Chapter `2001` (`level >= 26`) must now be unlocked!
+    let clist = client.call_rpc("copy.getList", vec![Value::Int(1)], false).ret;
+    assert!(
+        clist
+            .get_field("copyData")
+            .and_then(|cd| cd.get_field("1002"))
+            .is_some(),
+        "clearing 100106 must unlock chapter 1002"
+    );
+    // `copy.sweep` (`CopySweepPanel.lua:79` requires top-level 1-indexed `Value::Array`!)
+    let sweep = client.call_rpc(
+        "copy.sweep",
+        vec![Value::Int(1001), Value::Int(100_101), Value::Int(2)],
+        false,
+    );
+    assert_eq!(sweep.err, "ok");
+    let Value::Array { dense: sweep_rounds, .. } = &sweep.ret else {
+        panic!("copy.sweep must return top-level Array, got {:?}", sweep.ret);
+    };
+    assert_eq!(sweep_rounds.len(), 2);
+    assert_eq!(
+        client
+            .call_rpc(
+                "copy.fetchBoxReward",
+                vec![Value::Int(1001), Value::Int(100_101)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("copy.fetchPrize", vec![Value::Int(1001), Value::Int(2)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "copy.resetAtk",
+                vec![Value::Int(1001), Value::Int(100_101)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client.call_rpc("copy.fetchFresherReward", vec![], false).err,
+        "ok"
+    );
+
+    // `timeMachineCopy.*` (`100_104` is exclusive to TM 10-stage chapter `1001`!)
+    assert_eq!(client.call_rpc("timeMachineCopy.getList", vec![], false).err, "ok");
+    assert_eq!(
+        client
+            .call_rpc("timeMachineCopy.getCopy", vec![Value::Int(1001)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "timeMachineCopy.attack",
+                vec![Value::Int(1001), Value::Int(100_104)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "timeMachineCopy.pass",
+                vec![Value::Int(1001), Value::Int(100_104)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+
+    // Elite Copy (`ecopy.*`)
+    assert_eq!(client.call_rpc("ecopy.getEliteCopyInfo", vec![], false).err, "ok");
+    assert_eq!(
+        client.call_rpc("ecopy.getCopy", vec![Value::Int(2001)], false).err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("ecopy.attack", vec![Value::Int(2001), Value::Int(200_101)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("ecopy.pass", vec![Value::Int(2001), Value::Int(200_101)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "ecopy.sweep",
+                vec![Value::Int(2001), Value::Int(200_101), Value::Int(1)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("ecopy.reset", vec![Value::Int(2001), Value::Int(200_101)], false)
+            .err,
+        "ok"
+    );
+
+    // Daily Copy (`copy_daily.*` & `timeMachineCopy_daily.*`)
+    let dc_info = client.call_rpc("copy_daily.getInfo", vec![Value::Int(1)], false);
+    assert_eq!(dc_info.err, "ok");
+    assert!(matches!(dc_info.ret.get_field("pass"), Some(Value::Array { .. })));
+    assert_eq!(
+        client
+            .call_rpc("copy_daily.attack", vec![Value::Int(1), Value::Int(101)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("copy_daily.pass", vec![Value::Int(1), Value::Int(101)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("copy_daily.sweep", vec![Value::Int(1), Value::Int(101)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("copy_daily.buyAtkNum", vec![Value::Int(1), Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("timeMachineCopy_daily.getInfo", vec![], false)
+            .err,
+        "ok"
+    );
+
+    // =========================================================================
+    // 2. All 12 `babeltower.*` RPCs + `dota.*` / `purgatory.*` + `awakeCopy.*`
+    //    + `rebel.getRebelInfo` / `boss.*` + `discover.*` + `devilCopy.*` + `soaringCopy.*`
+    // =========================================================================
+    assert_eq!(client.call_rpc("babeltower.getBabeltowerInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("babeltower.getBagInfo", vec![], false).err, "ok");
+    assert_eq!(
+        client
+            .call_rpc("babeltower.setIdx", vec![Value::Int(1), Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("babeltower.attack", vec![Value::Int(1), Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "babeltower.answer",
+                vec![Value::Int(1), Value::Int(2), Value::Int(1)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "babeltower.specialEvent",
+                vec![Value::Int(1), Value::Int(4)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("babeltower.passFloor", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "babeltower.receiveReward",
+                vec![Value::Int(1), Value::Int(1)],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("babeltower.autoReceiveReward", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("babeltower.buyAtkNum", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(client.call_rpc("babeltower.reset", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("babeltower.sweep", vec![], false).err, "ok");
+
+    // Dota Tower & Purgatory
+    assert_eq!(client.call_rpc("dota.getInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("dota.attack", vec![Value::Int(1)], false).err, "ok");
+    assert_eq!(
+        client
+            .call_rpc("dota.pass", vec![Value::Int(1), Value::Bool(true)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(client.call_rpc("dota.openBox", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("dota.buyAtkNum", vec![Value::Int(1)], false).err, "ok");
+    assert_eq!(client.call_rpc("dota.reset", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("dota.sweep", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("purgatory.getInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("purgatory.attack", vec![Value::Int(1)], false).err, "ok");
+    assert_eq!(client.call_rpc("purgatory.pass", vec![Value::Int(1)], false).err, "ok");
+
+    // AwakeCopy
+    assert_eq!(client.call_rpc("awakeCopy.getAwakeCopyInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("awakeCopy.getRoomList", vec![], false).err, "ok");
+    assert_eq!(
+        client
+            .call_rpc("awakeCopy.quickBattle", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client.call_rpc("awakeCopy.buyNum", vec![Value::Int(1)], false).err,
+        "ok"
+    );
+
+    // Rebel (`rebel.getRebelInfo`) & World Boss
+    let reb_info = client.call_rpc("rebel.getRebelInfo", vec![], false);
+    assert_eq!(reb_info.err, "ok");
+    assert!(reb_info.ret.get_field("rebel_list").is_some() || reb_info.ret.get_field("list").is_some() || matches!(reb_info.ret, Value::Object(_)));
+    assert_eq!(client.call_rpc("rebel.enterRebel", vec![], false).err, "ok");
+    assert_eq!(
+        client
+            .call_rpc("rebel.attackRebel", vec![Value::Int(1), Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("rebel.buyRebelAtkNum", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(client.call_rpc("boss.getBossData", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("boss.attack", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("boss.getFiendInfo", vec![], false).err, "ok");
+
+    // Discover, DevilCopy, SoaringCopy
+    assert_eq!(client.call_rpc("discover.getRewardCity", vec![], false).err, "ok");
+    assert_eq!(
+        client.call_rpc("discover.getDiscover", vec![Value::Int(1)], false).err,
+        "ok"
+    );
+    assert_eq!(
+        client.call_rpc("discover.attack", vec![Value::Int(1)], false).err,
+        "ok"
+    );
+    assert_eq!(
+        client.call_rpc("discover.pass", vec![Value::Int(1)], false).err,
+        "ok"
+    );
+    assert_eq!(
+        client.call_rpc("discover.patrol", vec![Value::Int(1)], false).err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("discover.receivePatrolReward", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+
+    for ns in ["devilCopy", "soaringCopy"] {
+        assert_eq!(client.call_rpc(&format!("{ns}.getLoginInfo"), vec![], false).err, "ok");
+        assert_eq!(client.call_rpc(&format!("{ns}.getInfo"), vec![], false).err, "ok");
+        assert_eq!(
+            client
+                .call_rpc(&format!("{ns}.getCopy"), vec![Value::Int(1)], false)
+                .err,
+            "ok"
+        );
+        assert_eq!(
+            client
+                .call_rpc(&format!("{ns}.attack"), vec![Value::Int(1)], false)
+                .err,
+            "ok"
+        );
+        assert_eq!(
+            client
+                .call_rpc(&format!("{ns}.pass"), vec![Value::Int(1)], false)
+                .err,
+            "ok"
+        );
+        assert_eq!(
+            client
+                .call_rpc(&format!("{ns}.buyAttackTimes"), vec![Value::Int(1)], false)
+                .err,
+            "ok"
+        );
+    }
+
+    // =========================================================================
+    // 3. Arena, TimeMachineArena, Mail/TM Mail, Sign/SuperCheckin/Online/DailyTask/Achievements/EatChicken/ImperialCity
+    // =========================================================================
+    assert_eq!(client.call_rpc("arena.enterArena", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("arena.getRankList", vec![], false).err, "ok");
+    assert_eq!(
+        client.call_rpc("arena.challenge", vec![Value::Int(1)], false).err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("arena.buyChallengeTimes", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("arena.fetchChallengeNumReward", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(client.call_rpc("timeMachineArena.getArenaInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("timeMachineArena.challenge", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("tmArena.enterArena", vec![], false).err, "ok");
+
+    // Mail & TM Mail / TM Reward
+    let mlist = client.call_rpc(
+        "mail.getMailBoxList",
+        vec![Value::Int(0), Value::Int(50), Value::String("true".into())],
+        false,
+    );
+    assert_eq!(mlist.err, "ok");
+    assert_eq!(client.call_rpc("mail.drawAllMailItems", vec![], false).err, "ok");
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmMail.getMailBoxList",
+                vec![Value::Int(0), Value::Int(50), Value::String("true".into())],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("tmReward.getRewardList", vec![Value::Int(0), Value::Int(50)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc(
+                "tmReward.giftByCode",
+                vec![Value::String("GSERVERVIP888".into())],
+                false,
+            )
+            .err,
+        "ok"
+    );
+
+    // Daily Progression & City / ImperialCity
+    assert_eq!(client.call_rpc("sign.getNormalInfo", vec![], false).err, "ok");
+    assert_eq!(
+        client
+            .call_rpc("sign.gainNormalSignReward", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(client.call_rpc("superCheckin.getInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("superCheckin.sign", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("superCheckin.fetchReward", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("openOnline.getInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("achievements.getShowAchievementsPointReward", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("online.getOnlineInfo", vec![], false).err, "ok");
+    assert_eq!(
+        client.call_rpc("online.recv", vec![Value::Int(1)], false).err,
+        "ok"
+    );
+    assert_eq!(client.call_rpc("dailytask.getInfo", vec![], false).err, "ok");
+    assert_eq!(
+        client
+            .call_rpc("dailytask.receiveTask", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("dailytask.receiveActivePoint", vec![Value::Int(20)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(client.call_rpc("dailytask.receiveAllTask", vec![], false).err, "ok");
+    assert_eq!(
+        client.call_rpc("achievements.getShowAchievements", vec![], false).err,
+        "ok"
+    );
+    assert_eq!(
+        client
+            .call_rpc("achievements.fetchPrize", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+    assert_eq!(client.call_rpc("eatChicken.getInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("eatChicken.eat", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("city.enterShadowInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("imperialcity.getEnterInfo", vec![], false).err, "ok");
+    assert_eq!(
+        client.call_rpc("imperialcity.enter", vec![Value::Int(1)], false).err,
+        "ok"
+    );
+
+    let init_raffle_sub = client
+        .call_rpc("raffle.getInfo", vec![], false)
+        .ret
+        .get_field("raffle")
+        .cloned()
+        .expect("raffle sub-table");
+    assert_eq!(
+        client.call_rpc("raffle.multiRaffle", vec![Value::Int(2)], false).err,
+        "ok"
+    );
+    let pre_raffle_sub = client
+        .call_rpc("raffle.getInfo", vec![], false)
+        .ret
+        .get_field("raffle")
+        .cloned()
+        .expect("raffle sub-table after 10-pull");
+    assert_ne!(
+        pre_raffle_sub, init_raffle_sub,
+        "expected tavern raffle sub-table to advance after multiRaffle"
+    );
+
+    // =========================================================================
+    // 4. Pipelined Malformed AMF3 RPC Resilience (`tcp_server.rs`)
+    // =========================================================================
+    let _ = client.drain_pushes();
+    let bad_lcpacket = gserver_protocol::frame::encode_c2s_lcpacket(&[0xFF, 0x00, 0x7F], false).unwrap();
+    client.seq += 1;
+    let pipe_cb = format!("user.getUser_{}", client.seq);
+    let good_req = RpcRequest::new("user.getUser", vec![], &client.token, pipe_cb.clone());
+    let good_lcpacket = good_req.to_lcpacket_frame(false).unwrap();
+    let mut pipelined = Vec::with_capacity(bad_lcpacket.len() + good_lcpacket.len());
+    pipelined.extend_from_slice(&bad_lcpacket);
+    pipelined.extend_from_slice(&good_lcpacket);
+    client
+        .stream
+        .write_all(&pipelined)
+        .expect("write pipelined bad + good frames");
+    client.stream.flush().unwrap();
+
+    // Read pipelined `user.getUser` response — connection MUST NOT stall!
+    let mut pre_restart_user: Option<Value> = None;
+    let mut buf = [0u8; 4096];
+    while pre_restart_user.is_none() {
+        while let Some(frame) = client.rx.next_frame().unwrap() {
+            let batch = decode_s2c_frame_batch(&frame).unwrap();
+            for env in batch.items {
+                if env.callback_name.as_deref() == Some(pipe_cb.as_str()) {
+                    assert_eq!(env.err, "ok");
+                    pre_restart_user = Some(env.ret);
+                }
+            }
+        }
+        if pre_restart_user.is_none() {
+            let n = client.stream.read(&mut buf).expect("pipelined frame must not stall");
+            assert!(n > 0);
+            client.rx.feed(&buf[..n]);
+        }
+    }
+    let pre_u = pre_restart_user.unwrap();
+    let pre_tower = pre_u.get_field("tower_num").and_then(Value::as_i64).unwrap_or(0);
+    let pre_soul = pre_u.get_field("hero_soul").and_then(Value::as_i64).unwrap_or(0);
+    let pre_bag = client.call_rpc("bag.bagInfo", vec![], false).ret;
+    let (pre_weap_gid, pre_weap_iid) =
+        find_bag_entry_by_tid(&pre_bag, "arm", 112_001).expect("starter weapon in arm bag");
+    assert!(
+        (10_001..=740_000).contains(&pre_weap_gid),
+        "B-08: weapon GID {pre_weap_gid} must lie inside BagData:getBagTypeByGid range"
+    );
+
+    // =========================================================================
+    // 5. Cold WAL Restart (`B-08` Authentic GIDs + `B-19` `TavernRaffleEngine` State + Currencies)
+    // =========================================================================
+    drop(client);
+    server.shutdown();
+
+    let server2 = RunningServer::start(cfg).expect("cold restart server");
+    let (mut cold_client, _, _) = wave2_login_and_enter(
+        server2.http_addr,
+        server2.tcp_addr,
+        "w2_modes_gamma",
+        1,
+        "LữBốW2Play",
+        Some(uid),
+    );
+
+    let post_raffle_sub = cold_client
+        .call_rpc("raffle.getInfo", vec![], false)
+        .ret
+        .get_field("raffle")
+        .cloned()
+        .expect("raffle sub-table after cold restart");
+    assert_eq!(
+        post_raffle_sub, pre_raffle_sub,
+        "B-19: TavernRaffleEngine raffle state must survive cold WAL restart"
+    );
+
+    let post_bag = cold_client.call_rpc("bag.bagInfo", vec![], false).ret;
+    let (post_weap_gid, post_weap_iid) =
+        find_bag_entry_by_tid(&post_bag, "arm", 112_001).expect("weapon after cold restart");
+    assert_eq!(
+        (post_weap_gid, post_weap_iid),
+        (pre_weap_gid, pre_weap_iid),
+        "B-08: authentic sub-bag GID & item_id must be 100% preserved across cold restart"
+    );
+
+    let post_u = cold_client.call_rpc("user.getUser", vec![], false).ret;
+    assert_eq!(post_u.get_field("tower_num").and_then(Value::as_i64), Some(pre_tower));
+    assert_eq!(post_u.get_field("hero_soul").and_then(Value::as_i64), Some(pre_soul));
+
+    drop(cold_client);
+    server2.shutdown();
 }

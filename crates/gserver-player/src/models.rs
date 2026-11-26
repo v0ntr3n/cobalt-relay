@@ -5,6 +5,9 @@ use crate::error::{PlayerError, Result};
 use crate::formation::FormationState;
 use crate::json::{JsonObjReader, JsonValue};
 
+/// Maximum integer representable without precision loss in Lua 5.1 IEEE-754 `double` (`2^53 - 1`).
+pub const MAX_LUA_SAFE_INT: u64 = (1u64 << 53) - 1;
+
 /// Protagonist gender / template selector (`CreateUserScene.lua`: `utid = 1` Male, `utid = 2` Female).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gender {
@@ -35,7 +38,7 @@ impl Gender {
     }
 }
 
-/// All currencies tracked in `UserData.lua` (plus `JewelNum` for classic 1st-gen compatibility).
+/// All currencies tracked in `UserData.lua` (plus `JewelNum`, `ClanContri`, `WorldCoin` aliases).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CurrencyType {
     Gold,
@@ -88,10 +91,12 @@ pub enum CurrencyType {
     SkincoinRed,
     SkincoinGold,
     SkincoinDarkgold,
+    ClanContri,
+    WorldCoin,
 }
 
 impl CurrencyType {
-    pub const ALL: [CurrencyType; 50] = [
+    pub const ALL: [CurrencyType; 52] = [
         CurrencyType::Gold,
         CurrencyType::GoldBind,
         CurrencyType::Copper,
@@ -142,6 +147,8 @@ impl CurrencyType {
         CurrencyType::SkincoinRed,
         CurrencyType::SkincoinGold,
         CurrencyType::SkincoinDarkgold,
+        CurrencyType::ClanContri,
+        CurrencyType::WorldCoin,
     ];
 
     /// Exact field name on `UserData` (`UserData.lua`).
@@ -197,17 +204,77 @@ impl CurrencyType {
             CurrencyType::SkincoinRed => "skincoin_red",
             CurrencyType::SkincoinGold => "skincoin_gold",
             CurrencyType::SkincoinDarkgold => "skincoin_darkgold",
+            CurrencyType::ClanContri => "clan_contri",
+            CurrencyType::WorldCoin => "world_coin",
         }
     }
 
     pub fn from_key(key: &str) -> Option<Self> {
         match key {
             "gold_num" => Some(CurrencyType::Gold),
-            "silver_num" => Some(CurrencyType::Copper),
-            "soul_num" => Some(CurrencyType::HeroSoul),
+            "silver_num" | "silver" => Some(CurrencyType::Copper),
+            "soul_num" | "soul" => Some(CurrencyType::HeroSoul),
             "prestige_num" => Some(CurrencyType::Prestige),
             "stamina" => Some(CurrencyType::Energy),
+            "tower_num" => Some(CurrencyType::TowerCoin),
+            "jewel" => Some(CurrencyType::JewelNum),
+            "awake_coin" => Some(CurrencyType::AwakeArmCoin),
+            "god_animal_coin" => Some(CurrencyType::GodanimalCoin),
             _ => Self::ALL.into_iter().find(|c| c.vnsg2_key() == key),
+        }
+    }
+
+    /// Map `PriceTypeConst.lua` integer price/reward type ID to `CurrencyType` when applicable.
+    pub const fn from_price_type(price_type: u32) -> Option<Self> {
+        match price_type {
+            1 => Some(CurrencyType::Copper),
+            2 => Some(CurrencyType::Gold),
+            3 => Some(CurrencyType::GoldBind),
+            7 | 9 => Some(CurrencyType::Prestige),
+            10 => Some(CurrencyType::TowerCoin),
+            13 => Some(CurrencyType::Stone),
+            14 => Some(CurrencyType::Execution),
+            15 => Some(CurrencyType::HeroSoul),
+            16 => Some(CurrencyType::BusinessCoin),
+            17 => Some(CurrencyType::GuildPoint),
+            18 => Some(CurrencyType::Energy),
+            19 => Some(CurrencyType::BossCoin),
+            20 => Some(CurrencyType::AwakeArmCoin),
+            23 => Some(CurrencyType::RebelCoin),
+            27 => Some(CurrencyType::Fame),
+            28 => Some(CurrencyType::PetCoin),
+            29 => Some(CurrencyType::WorldTeamCoin),
+            31 => Some(CurrencyType::WorldPersonScore),
+            32 => Some(CurrencyType::LordwarCoin),
+            33 => Some(CurrencyType::GodarmCoin),
+            34 => Some(CurrencyType::GodanimalCoin),
+            38 => Some(CurrencyType::Grain),
+            39 => Some(CurrencyType::HeroLegendCoin),
+            40 => Some(CurrencyType::LegendBookCoin),
+            46 => Some(CurrencyType::BrochureCoin),
+            56 => Some(CurrencyType::SpiritCoin),
+            61 => Some(CurrencyType::ClassicWarCoin),
+            63 => Some(CurrencyType::BingshuCoin),
+            64 => Some(CurrencyType::DevilCoin),
+            65 => Some(CurrencyType::GodAnimalExploreCoin),
+            66 => Some(CurrencyType::CountryWarCoin),
+            67 => Some(CurrencyType::SkincoinPurple),
+            68 => Some(CurrencyType::SkincoinOrange),
+            69 => Some(CurrencyType::SkincoinRed),
+            70 => Some(CurrencyType::SkincoinGold),
+            71 => Some(CurrencyType::SkincoinDarkgold),
+            72 => Some(CurrencyType::UnifyCoin),
+            77 => Some(CurrencyType::FirstRideCoin),
+            78 => Some(CurrencyType::SoaringCoin),
+            81 => Some(CurrencyType::CrossGuildCoin),
+            82 => Some(CurrencyType::QushuiyanCoin),
+            87 => Some(CurrencyType::VoucherCoin),
+            89 => Some(CurrencyType::HunshixilianCoin),
+            92 => Some(CurrencyType::CrossGuildTechCoin),
+            93 => Some(CurrencyType::SecretPassScore),
+            99 => Some(CurrencyType::TimeMachineVoucherCoin),
+            106 => Some(CurrencyType::IronGoldCoin),
+            _ => None,
         }
     }
 }
@@ -385,10 +452,12 @@ pub struct HeroInstance {
     pub hid: u64,
     pub htid: u32,
     pub dress_id: u32,
+    pub skin_id: u32,
     pub level: u32,
     pub exp: u64,
     pub evolve_level: u32,
     pub upgrade_level: u32,
+    pub destiny: u32,
     pub is_lock: u8,
     pub hero_star_pos: u32,
     pub hero_star_level: u32,
@@ -411,6 +480,7 @@ pub struct HeroInstance {
     pub iron_gold_level: u32,
     pub hero_pill_rank: u32,
     pub hero_pill_level: u32,
+    pub wash_times: u32,
     pub talent: Vec<u32>,
     pub va_fail_reward: BTreeMap<String, JsonValue>,
     pub va_use_wash: BTreeMap<String, JsonValue>,
@@ -425,10 +495,12 @@ impl HeroInstance {
             hid,
             htid,
             dress_id: 0,
+            skin_id: 0,
             level: level.max(1),
             exp: 0,
             evolve_level: 0,
             upgrade_level: 0,
+            destiny: 0,
             is_lock: 0,
             hero_star_pos: 0,
             hero_star_level: 1,
@@ -451,6 +523,7 @@ impl HeroInstance {
             iron_gold_level: 0,
             hero_pill_rank: 0,
             hero_pill_level: 0,
+            wash_times: 0,
             talent: Vec::new(),
             va_fail_reward: BTreeMap::new(),
             va_use_wash: BTreeMap::new(),
@@ -476,22 +549,29 @@ impl HeroInstance {
         (res.normal_skill_id, res.rage_skill_id)
     }
 
-    /// Exact `HeroInfo:init(data)` wire dictionary (`HeroInfo.lua`), plus classic `soul` / `talent` / `equip` compatibility keys.
+    /// Exact `HeroInfo:init(data)` wire dictionary (`HeroInfo.lua`), including:
+    /// `hid`, `htid`, `level`, `exp`, `evolve_level`, `upgrade_level`, `destiny`, `awake_level`,
+    /// `lock` (`0`/`1`) & `is_lock`, `pill`, `skin_id`, `va_fail_reward`, and
+    /// `va_hero = { star: {level, progress}, wash: {attr, replace, times}, dress: ... }`
+    /// (strictly WITHOUT `arming` inside `va_hero`!).
     pub fn to_vnsg2_hero_info(&self) -> JsonValue {
         let mut m = BTreeMap::new();
         m.insert("hid".into(), JsonValue::from(self.hid));
         m.insert("htid".into(), JsonValue::from(self.htid));
         m.insert("dress_id".into(), JsonValue::from(self.dress_id));
+        m.insert("skin_id".into(), JsonValue::from(self.skin_id));
         m.insert("level".into(), JsonValue::from(self.level));
         m.insert("exp".into(), JsonValue::from(self.exp));
-        m.insert("soul".into(), JsonValue::from(self.exp)); // Classic 1st-gen alias
+        m.insert("soul".into(), JsonValue::from(self.exp));
         m.insert("evolve_level".into(), JsonValue::from(self.evolve_level));
         m.insert("upgrade_level".into(), JsonValue::from(self.upgrade_level));
+        m.insert("destiny".into(), JsonValue::from(self.destiny));
         m.insert("is_lock".into(), JsonValue::from(self.is_lock));
+        m.insert("lock".into(), JsonValue::from(self.is_lock));
         m.insert("hero_star_pos".into(), JsonValue::from(self.hero_star_pos));
         m.insert(
             "hero_star_level".into(),
-            JsonValue::from(self.hero_star_level),
+            JsonValue::from(self.hero_star_level.max(1)),
         );
         m.insert("awake_rank".into(), JsonValue::from(self.awake_rank));
         m.insert("awake_level".into(), JsonValue::from(self.awake_level));
@@ -558,6 +638,7 @@ impl HeroInstance {
             "hero_pill_level".into(),
             JsonValue::from(self.hero_pill_level),
         );
+        m.insert("pill".into(), JsonValue::Object(self.va_inlay.clone()));
 
         // CRITICAL: va_fail_reward MUST be a non-nil table (HeroInfo:cloneTable iterates pairs(t) directly!)
         m.insert(
@@ -577,6 +658,34 @@ impl HeroInstance {
             JsonValue::Object(self.va_wash_count.clone()),
         );
         m.insert("va_inlay".into(), JsonValue::Object(self.va_inlay.clone()));
+
+        // `va_hero = { star: {level, progress}, wash: {attr, replace, times}, dress: ... }` (NO `arming`!)
+        let mut star_obj = BTreeMap::new();
+        star_obj.insert(
+            "level".into(),
+            JsonValue::from(self.hero_star_level.max(1)),
+        );
+        star_obj.insert("progress".into(), JsonValue::from(self.hero_star_pos));
+
+        let mut wash_obj = BTreeMap::new();
+        wash_obj.insert("attr".into(), JsonValue::Object(self.va_use_wash.clone()));
+        wash_obj.insert(
+            "replace".into(),
+            JsonValue::Object(self.va_last_wash.clone()),
+        );
+        wash_obj.insert("times".into(), JsonValue::from(self.wash_times));
+
+        let mut dress_obj = BTreeMap::new();
+        if self.dress_id > 0 {
+            dress_obj.insert("1".into(), JsonValue::from(self.dress_id));
+        }
+
+        let mut va_hero = BTreeMap::new();
+        va_hero.insert("star".into(), JsonValue::Object(star_obj));
+        va_hero.insert("wash".into(), JsonValue::Object(wash_obj));
+        va_hero.insert("dress".into(), JsonValue::Object(dress_obj));
+        m.insert("va_hero".into(), JsonValue::Object(va_hero));
+
         m.insert(
             "talent".into(),
             JsonValue::Array(self.talent.iter().map(|&t| JsonValue::from(t)).collect()),
@@ -595,15 +704,35 @@ impl HeroInstance {
                 }
             }
         }
+        let is_lock = match r.opt_u8("is_lock", 255)? {
+            255 => r.opt_u8("lock", 0)?,
+            v => v,
+        };
+        let va_inlay = match r.opt_obj("va_inlay")? {
+            Some(m) if !m.is_empty() => m.clone(),
+            _ => r.opt_obj("pill")?.cloned().unwrap_or_default(),
+        };
+        let mut wash_times = r.opt_u32("wash_times", 0)?;
+        if wash_times == 0 {
+            if let Some(vh) = r.opt_obj("va_hero")? {
+                if let Some(w) = vh.get("wash").and_then(JsonValue::as_object) {
+                    if let Some(t) = w.get("times").and_then(JsonValue::as_u64) {
+                        wash_times = u32::try_from(t).unwrap_or(0);
+                    }
+                }
+            }
+        }
         Ok(Self {
             hid: r.req_u64("hid")?,
             htid: r.req_u32("htid")?,
             dress_id: r.opt_u32("dress_id", 0)?,
+            skin_id: r.opt_u32("skin_id", 0)?,
             level: r.opt_u32("level", 1)?,
             exp: r.opt_u64("exp", 0)?,
             evolve_level: r.opt_u32("evolve_level", 0)?,
             upgrade_level: r.opt_u32("upgrade_level", 0)?,
-            is_lock: r.opt_u8("is_lock", 0)?,
+            destiny: r.opt_u32("destiny", 0)?,
+            is_lock,
             hero_star_pos: r.opt_u32("hero_star_pos", 0)?,
             hero_star_level: r.opt_u32("hero_star_level", 1)?,
             awake_rank: r.opt_u32("awake_rank", 0)?,
@@ -625,12 +754,13 @@ impl HeroInstance {
             iron_gold_level: r.opt_u32("iron_gold_level", 0)?,
             hero_pill_rank: r.opt_u32("hero_pill_rank", 0)?,
             hero_pill_level: r.opt_u32("hero_pill_level", 0)?,
+            wash_times,
             talent,
             va_fail_reward: r.opt_obj("va_fail_reward")?.cloned().unwrap_or_default(),
             va_use_wash: r.opt_obj("va_use_wash")?.cloned().unwrap_or_default(),
             va_last_wash: r.opt_obj("va_last_wash")?.cloned().unwrap_or_default(),
             va_wash_count: r.opt_obj("va_wash_count")?.cloned().unwrap_or_default(),
-            va_inlay: r.opt_obj("va_inlay")?.cloned().unwrap_or_default(),
+            va_inlay,
         })
     }
 }
@@ -684,6 +814,8 @@ pub struct PlayerProfile {
     pub server_open_time: String,
     pub va_config: BTreeMap<String, JsonValue>,
     pub copy_progress: BTreeMap<String, JsonValue>,
+    /// Persistent `PlayerRaffleState` / OpenBox counters JSON map preserved across cold restarts.
+    pub raffle_state: BTreeMap<String, JsonValue>,
     pub act_star_claimed: Vec<u32>,
     pub act_star_sign_claimed: Vec<u32>,
     pub heroes: BTreeMap<u64, HeroInstance>,
@@ -730,10 +862,12 @@ impl PlayerProfile {
         }
         currencies.insert(CurrencyType::Gold, starter.gold);
         currencies.insert(CurrencyType::GoldBind, starter.gold_bind);
-        currencies.insert(CurrencyType::Copper, starter.copper);
+        currencies.insert(CurrencyType::Copper, starter.copper.min(MAX_LUA_SAFE_INT));
         currencies.insert(CurrencyType::HeroSoul, starter.hero_soul);
         currencies.insert(CurrencyType::Prestige, starter.prestige);
+        currencies.insert(CurrencyType::ArenaCoin, starter.prestige);
         currencies.insert(CurrencyType::JewelNum, starter.jewel_num);
+        currencies.insert(CurrencyType::AwakeArmCoin, starter.jewel_num);
         currencies.insert(CurrencyType::Execution, starter.execution);
         currencies.insert(CurrencyType::Energy, starter.energy);
 
@@ -795,6 +929,7 @@ impl PlayerProfile {
             server_open_time: starter.server_open_time.clone(),
             va_config: BTreeMap::new(),
             copy_progress: BTreeMap::new(),
+            raffle_state: BTreeMap::new(),
             act_star_claimed: Vec::new(),
             act_star_sign_claimed: Vec::new(),
             heroes,
@@ -831,7 +966,12 @@ impl PlayerProfile {
     }
 
     pub fn currency(&self, currency: CurrencyType) -> u64 {
-        self.currencies.get(&currency).copied().unwrap_or(0)
+        let v = self.currencies.get(&currency).copied().unwrap_or(0);
+        if currency == CurrencyType::Copper {
+            v.min(MAX_LUA_SAFE_INT)
+        } else {
+            v
+        }
     }
 
     /// Maximum hero roster capacity (`bag.db` row 1: `base_bag_storage = 200`, `buy_storage = 10`).
@@ -849,6 +989,8 @@ impl PlayerProfile {
                     + u64::from(hero.evolve_level) * 850
                     + u64::from(hero.upgrade_level) * 600
                     + u64::from(hero.awake_rank) * 1_500
+                    + u64::from(hero.awake_level) * 250
+                    + u64::from(hero.hero_star_level) * 180
                     + u64::from(hero.gold_rank) * 2_000;
                 total_fc = total_fc.saturating_add(hero_power);
             }
@@ -862,11 +1004,35 @@ impl PlayerProfile {
                     let prog = item
                         .va_item_text
                         .get("progress_level")
+                        .or_else(|| item.va_item_text.get("upgrade_level"))
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
                     total_fc = total_fc.saturating_add(250 + reinf * 45 + prog * 180);
                 }
             }
+            if let Some(sp_map) = self.formation.spirit.get(&slot) {
+                for item in sp_map.values() {
+                    let reinf = item
+                        .va_item_text
+                        .get("reinforce_level")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(1);
+                    let prog = item
+                        .va_item_text
+                        .get("progress_level")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    total_fc = total_fc.saturating_add(120 + reinf * 30 + prog * 100);
+                }
+            }
+        }
+        for item in self.formation.godanimal.values().flatten() {
+            let reinf = item
+                .va_item_text
+                .get("reinforce_level")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1);
+            total_fc = total_fc.saturating_add(400 + reinf * 50);
         }
         self.fc = total_fc;
         if self.fc > self.fight_force_max {
@@ -904,10 +1070,98 @@ impl PlayerProfile {
         JsonValue::Object(m)
     }
 
+    fn insert_currency_wire_fields(&self, m: &mut BTreeMap<String, JsonValue>) {
+        // Emit `copper` as numeric within Lua IEEE-754 double precision (`<= 2^53 - 1`) so BOTH
+        // `UserData:parseData` (`tonumber(self.copper)`) AND `UserData:onUpdateUser` (`self.copper = v`,
+        // followed by `getCopper() < cost` numeric comparison!) succeed without string-comparison crashes!
+        let copper = self.currency(CurrencyType::Copper);
+        m.insert("copper".into(), JsonValue::from(copper));
+        m.insert("silver_num".into(), JsonValue::from(copper));
+
+        for c in CurrencyType::ALL {
+            if c != CurrencyType::Copper {
+                m.insert(c.vnsg2_key().into(), JsonValue::from(self.currency(c)));
+            }
+        }
+
+        // Synchronize coupled classic / vnsg2 currency aliases
+        let prestige = self
+            .currency(CurrencyType::Prestige)
+            .max(self.currency(CurrencyType::ArenaCoin));
+        m.insert("prestige".into(), JsonValue::from(prestige));
+        m.insert("prestige_num".into(), JsonValue::from(prestige));
+        m.insert("arena_coin".into(), JsonValue::from(prestige));
+
+        let tower = self.currency(CurrencyType::TowerCoin);
+        m.insert("tower_coin".into(), JsonValue::from(tower));
+        m.insert("tower_num".into(), JsonValue::from(tower));
+
+        let jewel = self.currency(CurrencyType::JewelNum);
+        let awake_coin = self.currency(CurrencyType::AwakeArmCoin).max(jewel);
+        m.insert("jewel_num".into(), JsonValue::from(jewel.max(awake_coin)));
+        m.insert("jewel".into(), JsonValue::from(jewel.max(awake_coin)));
+        m.insert("awakeArm_coin".into(), JsonValue::from(awake_coin));
+        m.insert("awake_coin".into(), JsonValue::from(awake_coin));
+
+        let clan = self
+            .currency(CurrencyType::ClanContri)
+            .max(self.currency(CurrencyType::GuildPoint));
+        m.insert("guild_point".into(), JsonValue::from(clan));
+        m.insert("clan_contri".into(), JsonValue::from(clan));
+
+        let god_animal_coin = self.currency(CurrencyType::GodanimalCoin);
+        m.insert("godanimal_coin".into(), JsonValue::from(god_animal_coin));
+        m.insert("god_animal_coin".into(), JsonValue::from(god_animal_coin));
+
+        let world_coin = self
+            .currency(CurrencyType::WorldCoin)
+            .max(self.currency(CurrencyType::WorldTeamCoin));
+        m.insert("world_team_coin".into(), JsonValue::from(world_coin));
+        m.insert("world_coin".into(), JsonValue::from(world_coin));
+
+        m.insert(
+            "gold_num".into(),
+            JsonValue::from(self.currency(CurrencyType::Gold)),
+        );
+        m.insert(
+            "soul_num".into(),
+            JsonValue::from(self.currency(CurrencyType::HeroSoul)),
+        );
+        m.insert(
+            "stamina".into(),
+            JsonValue::from(self.currency(CurrencyType::Energy)),
+        );
+        m.insert("stamina_time".into(), JsonValue::from(self.energy_time));
+    }
+
+    /// Exact `user.updateUser` / `tmUser.updateUser` S2C push payload (`UserData:onUpdateUser`),
+    /// encoding `copper` and `fight_force_max` as numbers within Lua double precision.
+    pub fn to_vnsg2_user_update(&self) -> JsonValue {
+        let mut m = BTreeMap::new();
+        m.insert("uname".into(), JsonValue::from(self.uname.clone()));
+        m.insert("level".into(), JsonValue::from(self.level));
+        m.insert("exp".into(), JsonValue::from(self.exp));
+        m.insert("vip".into(), JsonValue::from(self.vip));
+        m.insert("vip_exp".into(), JsonValue::from(self.vip_exp));
+        self.insert_currency_wire_fields(&mut m);
+        m.insert("execution_time".into(), JsonValue::from(self.execution_time));
+        m.insert("energy_time".into(), JsonValue::from(self.energy_time));
+        m.insert("fc".into(), JsonValue::from(self.fc));
+        m.insert("fight_force".into(), JsonValue::from(self.fc));
+        m.insert(
+            "fight_force_max".into(),
+            JsonValue::from(self.fight_force_max.min(MAX_LUA_SAFE_INT)),
+        );
+        m.insert(
+            "hero_bag_buy_times".into(),
+            JsonValue::from(self.hero_bag_buy_times),
+        );
+        JsonValue::Object(m)
+    }
+
     /// Exact `user.getUser` payload (`UserData:parseData` in `UserData.lua`),
-    /// respecting `tonumber(copper)` string encoding, direct numeric arithmetic fields,
-    /// 14-char `server_open_time`, non-nil `dress_info` / `dress_expire` / `dress_hero_info`,
-    /// and classic 1st-gen field aliases (`gold_num`, `silver_num`, `soul_num`, `jewel_num`, `prestige_num`, `stamina`, `fight_force`, `va_user`).
+    /// emitting numeric `copper` within Lua double precision, all shop/progression currencies,
+    /// 14-char `server_open_time`, and non-nil `dress_info` / `dress_expire` / `dress_hero_info`.
     pub fn to_vnsg2_get_user(&self) -> JsonValue {
         let mut m = BTreeMap::new();
         m.insert("uid".into(), JsonValue::from(self.uid));
@@ -923,36 +1177,7 @@ impl PlayerProfile {
         m.insert("vip".into(), JsonValue::from(self.vip));
         m.insert("vip_exp".into(), JsonValue::from(self.vip_exp));
 
-        // Big-number string field parsed via `self.copper = tonumber(self.copper)` in UserData.lua:1932
-        let copper = self.currency(CurrencyType::Copper);
-        m.insert("copper".into(), JsonValue::from(copper.to_string()));
-        m.insert("silver_num".into(), JsonValue::from(copper));
-
-        // Direct arithmetic number currencies (MUST be JSON/AMF numbers, NOT strings!)
-        for c in CurrencyType::ALL {
-            if c != CurrencyType::Copper {
-                m.insert(c.vnsg2_key().into(), JsonValue::from(self.currency(c)));
-            }
-        }
-
-        // Classic 1st-gen field aliases requested by downstream protocol adapters
-        m.insert(
-            "gold_num".into(),
-            JsonValue::from(self.currency(CurrencyType::Gold)),
-        );
-        m.insert(
-            "soul_num".into(),
-            JsonValue::from(self.currency(CurrencyType::HeroSoul)),
-        );
-        m.insert(
-            "prestige_num".into(),
-            JsonValue::from(self.currency(CurrencyType::Prestige)),
-        );
-        m.insert(
-            "stamina".into(),
-            JsonValue::from(self.currency(CurrencyType::Energy)),
-        );
-        m.insert("stamina_time".into(), JsonValue::from(self.energy_time));
+        self.insert_currency_wire_fields(&mut m);
 
         // Timers & purchase accumulators (MUST be numbers for initExecutionTime / initEnergyTime)
         m.insert(
@@ -977,12 +1202,12 @@ impl PlayerProfile {
             JsonValue::from(self.buy_copper_time),
         );
 
-        // Fight force (`fc` number + `fight_force_max` string/number via tonumber + `fight_force` alias)
+        // Fight force (`fc` + `fight_force_max` numeric within Lua double precision + `fight_force` alias)
         m.insert("fc".into(), JsonValue::from(self.fc));
         m.insert("fight_force".into(), JsonValue::from(self.fc));
         m.insert(
             "fight_force_max".into(),
-            JsonValue::from(self.fight_force_max.to_string()),
+            JsonValue::from(self.fight_force_max.min(MAX_LUA_SAFE_INT)),
         );
 
         m.insert("is_recharge".into(), JsonValue::from(self.is_recharge));
@@ -1114,6 +1339,11 @@ impl PlayerProfile {
         JsonValue::Object(m)
     }
 
+    /// Delegate helper for `formation.getOtherPositionInfo` (`HeroFormationInfo.lua`).
+    pub fn to_vnsg2_other_position_info(&self) -> JsonValue {
+        self.formation.to_vnsg2_other_position_info(self)
+    }
+
     /// Exact `user.getVaConfig` payload (`ConfigData.lua`).
     pub fn to_vnsg2_va_config(&self) -> JsonValue {
         JsonValue::Object(self.va_config.clone())
@@ -1141,7 +1371,7 @@ impl PlayerProfile {
         m.insert("fc".into(), JsonValue::from(self.fc));
         m.insert(
             "fight_force_max".into(),
-            JsonValue::from(self.fight_force_max),
+            JsonValue::from(self.fight_force_max.min(MAX_LUA_SAFE_INT)),
         );
         m.insert("is_recharge".into(), JsonValue::from(self.is_recharge));
         m.insert(
@@ -1149,6 +1379,7 @@ impl PlayerProfile {
             JsonValue::from(self.gold_recharge_accum_all),
         );
 
+        // Persist all core & shop currencies (plus explicit alias keys) so zero/updated balances roundtrip cleanly
         let mut curr_obj = BTreeMap::new();
         for c in CurrencyType::ALL {
             let v = self.currency(c);
@@ -1156,7 +1387,21 @@ impl PlayerProfile {
                 || matches!(
                     c,
                     CurrencyType::Gold
+                        | CurrencyType::GoldBind
                         | CurrencyType::Copper
+                        | CurrencyType::HeroSoul
+                        | CurrencyType::Prestige
+                        | CurrencyType::ArenaCoin
+                        | CurrencyType::TowerCoin
+                        | CurrencyType::JewelNum
+                        | CurrencyType::AwakeArmCoin
+                        | CurrencyType::GuildPoint
+                        | CurrencyType::ClanContri
+                        | CurrencyType::GodarmCoin
+                        | CurrencyType::PetCoin
+                        | CurrencyType::GodanimalCoin
+                        | CurrencyType::WorldTeamCoin
+                        | CurrencyType::WorldCoin
                         | CurrencyType::Execution
                         | CurrencyType::Energy
                 )
@@ -1164,6 +1409,33 @@ impl PlayerProfile {
                 curr_obj.insert(c.vnsg2_key().into(), JsonValue::from(v));
             }
         }
+        curr_obj.insert(
+            "soul_num".into(),
+            JsonValue::from(self.currency(CurrencyType::HeroSoul)),
+        );
+        curr_obj.insert(
+            "tower_num".into(),
+            JsonValue::from(self.currency(CurrencyType::TowerCoin)),
+        );
+        curr_obj.insert(
+            "jewel".into(),
+            JsonValue::from(
+                self.currency(CurrencyType::JewelNum)
+                    .max(self.currency(CurrencyType::AwakeArmCoin)),
+            ),
+        );
+        curr_obj.insert(
+            "awake_coin".into(),
+            JsonValue::from(self.currency(CurrencyType::AwakeArmCoin)),
+        );
+        curr_obj.insert(
+            "god_animal_coin".into(),
+            JsonValue::from(self.currency(CurrencyType::GodanimalCoin)),
+        );
+        curr_obj.insert(
+            "stamina".into(),
+            JsonValue::from(self.currency(CurrencyType::Energy)),
+        );
         m.insert("currencies".into(), JsonValue::Object(curr_obj));
 
         m.insert(
@@ -1264,6 +1536,10 @@ impl PlayerProfile {
                 JsonValue::Object(self.copy_progress.clone()),
             );
         }
+        m.insert(
+            "raffle_state".into(),
+            JsonValue::Object(self.raffle_state.clone()),
+        );
         if !self.act_star_claimed.is_empty() {
             m.insert(
                 "act_star_claimed".into(),
@@ -1307,12 +1583,37 @@ impl PlayerProfile {
             currencies.insert(c, 0);
         }
         if let Some(curr_obj) = r.opt_obj("currencies")? {
+            // Pass 1: read canonical keys first, then apply alias keys only if canonical was 0
             for (k, v) in curr_obj {
-                if let Some(ct) = CurrencyType::from_key(k) {
-                    let amount = v
-                        .as_u64()
-                        .ok_or_else(|| PlayerError::Json(format!("invalid currency '{k}'")))?;
-                    currencies.insert(ct, amount);
+                let amount = v
+                    .as_u64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                    .ok_or_else(|| PlayerError::Json(format!("invalid currency '{k}'")))?;
+                if let Some(ct) = Self::canonical_currency_key(k) {
+                    let capped = if ct == CurrencyType::Copper {
+                        amount.min(MAX_LUA_SAFE_INT)
+                    } else {
+                        amount
+                    };
+                    currencies.insert(ct, capped);
+                }
+            }
+            for (k, v) in curr_obj {
+                if Self::canonical_currency_key(k).is_none() {
+                    if let Some(ct) = CurrencyType::from_key(k) {
+                        let amount = v
+                            .as_u64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                            .unwrap_or(0);
+                        let entry = currencies.entry(ct).or_insert(0);
+                        if *entry == 0 && amount > 0 {
+                            *entry = if ct == CurrencyType::Copper {
+                                amount.min(MAX_LUA_SAFE_INT)
+                            } else {
+                                amount
+                            };
+                        }
+                    }
                 }
             }
         }
@@ -1375,6 +1676,7 @@ impl PlayerProfile {
         let formation = FormationState::from_storage_json(r.req_val("formation")?)?;
         let inventory = InventoryState::from_storage_json(r.req_val("inventory")?)?;
         let copy_progress = r.opt_obj("copy_progress")?.cloned().unwrap_or_default();
+        let raffle_state = r.opt_obj("raffle_state")?.cloned().unwrap_or_default();
         let mut act_star_claimed = Vec::new();
         if let Some(arr) = r.opt_arr("act_star_claimed")? {
             for v in arr {
@@ -1411,7 +1713,7 @@ impl PlayerProfile {
             vip: r.opt_u32("vip", 0)?,
             vip_exp: r.opt_u64("vip_exp", 0)?,
             fc: r.opt_u64("fc", 0)?,
-            fight_force_max: r.opt_u64("fight_force_max", 0)?,
+            fight_force_max: r.opt_u64("fight_force_max", 0)?.min(MAX_LUA_SAFE_INT),
             is_recharge: r.opt_u8("is_recharge", 0)?,
             gold_recharge_accum_all: r.opt_u64("gold_recharge_accum_all", 0)?,
             currencies,
@@ -1447,6 +1749,7 @@ impl PlayerProfile {
                 .unwrap_or_else(|| "20261124090000".into()),
             va_config: r.opt_obj("va_config")?.cloned().unwrap_or_default(),
             copy_progress,
+            raffle_state,
             act_star_claimed,
             act_star_sign_claimed,
             heroes,
@@ -1457,6 +1760,15 @@ impl PlayerProfile {
             revision: r.opt_u64("revision", 1)?,
         })
     }
+
+    fn canonical_currency_key(key: &str) -> Option<CurrencyType> {
+        CurrencyType::ALL.into_iter().find(|c| c.vnsg2_key() == key)
+    }
+}
+
+/// Top-level helper returning `formation.getOtherPositionInfo` payload for `profile`.
+pub fn to_vnsg2_other_position_info(profile: &PlayerProfile) -> JsonValue {
+    profile.to_vnsg2_other_position_info()
 }
 
 // Re-export BagItem for convenience when working with models

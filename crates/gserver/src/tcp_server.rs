@@ -291,9 +291,34 @@ fn handle_client_connection(
                     match rx.next_frame() {
                         Ok(Some(frame)) => {
                             frames_decoded += 1;
-                            let Ok(req) = RpcRequest::from_amf3_bytes(&frame.amf3_payload) else {
-                                protocol_rejected = true;
-                                break 'conn_loop TcpShutdownReason::InvalidRpcPayload;
+                            let req = match RpcRequest::from_amf3_bytes(&frame.amf3_payload) {
+                                Ok(r) => r,
+                                Err(decode_err) => {
+                                    telemetry
+                                        .rejected_protocol_frames
+                                        .fetch_add(1, Ordering::Release);
+                                    eprintln!(
+                                        "[gserver-tcp] conn={conn_id} peer={peer_addr:?}: skipping malformed AMF3 RPC payload ({}B): {decode_err}",
+                                        frame.amf3_payload.len()
+                                    );
+                                    if let Ok((raw_val, _)) =
+                                        gserver_protocol::amf3::decode(&frame.amf3_payload)
+                                    {
+                                        if let Some(cb) = raw_val
+                                            .get_field("callback")
+                                            .and_then(|c| c.get_field("callbackName"))
+                                            .and_then(gserver_protocol::Value::as_str)
+                                        {
+                                            let err_env = gserver_protocol::S2cEnvelope::error_response(
+                                                cb,
+                                                "invalid_rpc_payload",
+                                            );
+                                            let _ = world.write_envelope(&writer, &err_env);
+                                            responses_sent += 1;
+                                        }
+                                    }
+                                    continue;
+                                }
                             };
                             let was_logged_in = session.logged_in_uid;
                             let handled = world.handle_rpc(&mut session, &req);
