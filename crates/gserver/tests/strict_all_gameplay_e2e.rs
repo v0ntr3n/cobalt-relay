@@ -740,7 +740,8 @@ fn strict_all_12_domains_gameplay_security_and_wal_recovery() {
     );
     let user1 = client_a.call_rpc("user.getUser", vec![], false).ret;
     assert_eq!(user1.get_field("uname").and_then(Value::as_str), Some("LongĐởmThần"));
-    assert_eq!(parse_copper(&user1), copper0 + 200_000);
+    // buyCopper(2) grants +200_000 silver and buyVipGift(1) grants +100_000 silver from vip.db
+    assert_eq!(parse_copper(&user1), copper0 + 300_000);
     assert_eq!(
         user1.get_field("execution").and_then(Value::as_i64),
         Some(exec0 + 25)
@@ -4596,6 +4597,805 @@ fn wave2_all_playable_modes_pipelined_resilience_and_b08_b19_restart_e2e() {
     let post_u = cold_client.call_rpc("user.getUser", vec![], false).ret;
     assert_eq!(post_u.get_field("tower_num").and_then(Value::as_i64), Some(pre_tower));
     assert_eq!(post_u.get_field("hero_soul").and_then(Value::as_i64), Some(pre_soul));
+
+    drop(cold_client);
+    server2.shutdown();
+}
+
+
+fn val_bool(v: &Value) -> Option<bool> {
+    match v {
+        Value::Bool(b) => Some(*b),
+        _ => None,
+    }
+}
+
+#[test]
+fn active_events_instant_buy_welfare_passes_vip_and_wal_restart_e2e() {
+    // 0. Verify `platform_override/platform/config.json` uses `"pl": "vngandroid"`
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let plat_cfg_path = manifest_dir
+        .parent()
+        .unwrap()
+        .join("gserver-qa-harness/client_launcher/platform_override/platform/config.json");
+    let plat_cfg_str = fs::read_to_string(&plat_cfg_path).expect("read platform_override config.json");
+    let plat_cfg_json = parse_json(&plat_cfg_str).expect("parse platform_override config.json");
+    assert_eq!(
+        plat_cfg_json.get("pl").and_then(JsonValue::as_str),
+        Some("vngandroid"),
+        "platform_override config.json must advertise vngandroid"
+    );
+
+    // Start strict GServer with initial_vip = 2, initial_level = 65 so we can verify VIP progression -> 16!
+    let tmp = TempDirGuard::new("active_events_instant_buy");
+    let mut cfg = DaemonConfig::strict_all(tmp.path.clone());
+    cfg.starter.initial_vip = 2;
+    cfg.starter.initial_level = 65;
+    cfg.starter.gold = 80_000;
+    let server = RunningServer::start(cfg.clone()).expect("start strict server");
+
+    let (mut client, uid, _) = wave2_login_and_enter(
+        server.http_addr,
+        server.tcp_addr,
+        "events_instant_buy_dev1",
+        1,
+        "GiaCátLượngEv",
+        None,
+    );
+    assert!(uid > 0);
+    let _ = client.drain_pushes();
+
+    // =========================================================================
+    // 1. Active Official Event Schedule (`[tm]activity.getActivityConf` & `allActivity.getActivityInfo`)
+    // =========================================================================
+    for m in ["activity.getActivityConf", "tmActivity.getActivityConf"] {
+        let conf_env = client.call_rpc(m, vec![Value::Int(0)], false);
+        assert_eq!(conf_env.err, "ok", "{m} failed: {conf_env:?}");
+        assert!(
+            conf_env.ret.get_field("version").and_then(Value::as_i64).unwrap_or(0) >= 1,
+            "{m} version must be >= 1"
+        );
+        let arr_data = conf_env.ret.get_field("arrData").expect("arrData present");
+        assert!(
+            arr_data.get_field("activity_time_machine").is_some(),
+            "{m} must activate activity_time_machine"
+        );
+        assert!(
+            arr_data.get_field("activity_recharge_double").is_none(),
+            "{m} must NEVER include nil-proxy activity_recharge_double"
+        );
+        for &req_key in gserver_gameplay::festival_conf::ACTIVE_FESTIVAL_KEYS {
+            assert!(
+                arr_data.get_field(req_key).is_some(),
+                "{m} missing expected active festival `{req_key}`"
+            );
+        }
+        if let Value::Object(entries) = arr_data {
+            for (act_name, entry) in entries.iter() {
+                let start_t = entry.get_field("start_time").and_then(Value::as_i64).unwrap_or(0);
+                let end_t = entry.get_field("end_time").and_then(Value::as_i64).unwrap_or(0);
+                assert!(end_t > start_t && start_t > 0, "{act_name} must have active start/end window");
+                let csv_data = entry.get_field("data").and_then(Value::as_str).unwrap_or("");
+                if !csv_data.is_empty() {
+                    gserver_gameplay::festival_conf::validate_base_csv_reader(csv_data)
+                        .unwrap_or_else(|e| panic!("CSV validation failed for {act_name}: {e}"));
+                }
+            }
+        } else if let Value::Array { assoc, .. } = arr_data {
+            assert!(!assoc.is_empty(), "{m} arrData assoc must be non-empty");
+            for (act_name, entry) in assoc {
+                let start_t = entry.get_field("start_time").and_then(Value::as_i64).unwrap_or(0);
+                let end_t = entry.get_field("end_time").and_then(Value::as_i64).unwrap_or(0);
+                assert!(end_t > start_t && start_t > 0, "{act_name} must have active start/end window");
+                let csv_data = entry.get_field("data").and_then(Value::as_str).unwrap_or("");
+                if !csv_data.is_empty() {
+                    gserver_gameplay::festival_conf::validate_base_csv_reader(csv_data)
+                        .unwrap_or_else(|e| panic!("CSV validation failed for {act_name}: {e}"));
+                }
+            }
+        }
+    }
+
+    let all_act = client.call_rpc("allActivity.getActivityInfo", vec![], false);
+    assert_eq!(all_act.err, "ok");
+    assert!(
+        all_act.ret.get_field("activity_login_reward").is_some()
+            && all_act.ret.get_field("activity_recharge").is_some()
+            && all_act.ret.get_field("activity_consume").is_some(),
+        "allActivity.getActivityInfo must expose active festival player state"
+    );
+    assert_eq!(client.call_rpc("tmAllActivity.getActivityInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("switchfunc.getSwitch", vec![], false).err, "ok");
+
+    // =========================================================================
+    // 2. `Ưu Đãi Mỗi Ngày/Tuần/Tháng/Shop/Quà` (`[tm]dailyDiscount.*` + `buy_type = 4`)
+    // =========================================================================
+    let dd0 = client.call_rpc("dailyDiscount.getInfo", vec![], false);
+    assert_eq!(dd0.err, "ok");
+    assert_eq!(
+        dd0.ret
+            .get_field("canRecDayPreBuy")
+            .and_then(|m| m.get_field("1"))
+            .and_then(Value::as_i64),
+        Some(1),
+        "0 VND free pack (id=1) must be immediately claimable on fresh character"
+    );
+    assert_eq!(dd0.ret.get_field("canDayPreBuy").and_then(val_bool), Some(true));
+    assert_eq!(dd0.ret.get_field("dayPreBuyTomorrow").and_then(val_bool), Some(false));
+
+    let g_before_free = client
+        .call_rpc("user.getUser", vec![], false)
+        .ret
+        .get_field("gold")
+        .and_then(Value::as_i64)
+        .unwrap();
+    let (dd_free_envs, dd_free_midx, dd_free_main) = client.call_rpc_with_raw_ordered(
+        "dailyDiscount.receive",
+        vec![Value::Int(1)],
+        None,
+        Some("user.updateUser"),
+    );
+    assert_eq!(dd_free_main.err, "ok");
+    assert_eq!(dd_free_main.ret.as_str(), Some("ok"));
+    let bag_idx_free = dd_free_envs
+        .iter()
+        .position(|e| e.callback_name.as_deref() == Some("bag.update"))
+        .expect("bag.update before dailyDiscount.receive");
+    let usr_idx_free = dd_free_envs
+        .iter()
+        .position(|e| e.callback_name.as_deref() == Some("user.updateUser"))
+        .expect("user.updateUser after dailyDiscount.receive");
+    assert!(bag_idx_free < dd_free_midx && dd_free_midx < usr_idx_free);
+    let g_after_free = client
+        .call_rpc("user.getUser", vec![], false)
+        .ret
+        .get_field("gold")
+        .and_then(Value::as_i64)
+        .unwrap();
+    assert_eq!(g_after_free - g_before_free, 20, "0 VND free pack must grant +20 NB");
+
+    // 1-Click `pay.instantBuy` on `5000 VND` (`buy_type = 4, item_id = 2`)!
+    let (ib2_envs, ib2_midx, ib2_main) = client.call_rpc_with_raw_ordered(
+        "pay.instantBuy",
+        vec![Value::map([
+            ("pay_id", Value::Int(102)),
+            ("pay_price", Value::Int(5_000)),
+            ("pay_type", Value::String("04".into())),
+            ("product_name", Value::String("Gói Ưu Đãi 5K".into())),
+            (
+                "extra_data",
+                Value::Array {
+                    dense: vec![Value::Int(4), Value::Int(2), Value::Int(102)],
+                    assoc: vec![],
+                },
+            ),
+        ])],
+        None,
+        Some("dailyDiscount.normalUpdate"),
+    );
+    assert_eq!(ib2_main.err, "ok");
+    let ib2_bag_idx = ib2_envs
+        .iter()
+        .position(|e| e.callback_name.as_deref() == Some("bag.update"))
+        .expect("bag.update on 5000 VND ActDaily");
+    let ib2_usr_idx = ib2_envs
+        .iter()
+        .position(|e| e.callback_name.as_deref() == Some("user.updateUser"))
+        .expect("user.updateUser on 5000 VND ActDaily");
+    let ib2_norm_idx = ib2_envs
+        .iter()
+        .position(|e| e.callback_name.as_deref() == Some("dailyDiscount.normalUpdate"))
+        .expect("dailyDiscount.normalUpdate on 5000 VND ActDaily");
+    assert!(
+        ib2_bag_idx < ib2_midx && ib2_midx < ib2_usr_idx && ib2_midx < ib2_norm_idx,
+        "S2C payment pushes must follow strict pre/post main_env ordering"
+    );
+    assert_eq!(
+        ib2_envs[ib2_norm_idx].ret.get_field("voucher").and_then(val_bool),
+        Some(false),
+        "voucher must NEVER be true on dailyDiscount.normalUpdate"
+    );
+
+    // 1-Click `pay.instantBuy` on `249000 VND` 8-day pre-buy (`buy_type = 4, item_id = 5`)!
+    let (ib5_envs, ib5_midx, ib5_main) = client.call_rpc_with_raw_ordered(
+        "pay.instantBuy",
+        vec![Value::map([
+            ("pay_id", Value::Int(105)),
+            ("pay_price", Value::Int(249_000)),
+            ("pay_type", Value::String("04".into())),
+            ("buy_type", Value::Int(4)),
+            ("item_id", Value::Int(5)),
+        ])],
+        None,
+        Some("dailyDiscount.preBuyUpdate"),
+    );
+    assert_eq!(ib5_main.err, "ok");
+    let ib5_pre_idx = ib5_envs
+        .iter()
+        .position(|e| e.callback_name.as_deref() == Some("dailyDiscount.preBuyUpdate"))
+        .expect("dailyDiscount.preBuyUpdate after 8-day prebuy");
+    assert!(ib5_pre_idx > ib5_midx);
+    assert_eq!(
+        ib5_envs[ib5_pre_idx].ret.get_field("voucher").and_then(val_bool),
+        Some(false)
+    );
+
+    // `receiveAllReward` (`Nhận nhanh`) claims unlocked daily packs 3 & 4!
+    let rec_all = client.call_rpc("dailyDiscount.receiveAllReward", vec![], false);
+    assert_eq!(rec_all.err, "ok");
+    assert_eq!(rec_all.ret.as_str(), Some("ok"));
+
+    let dd_after_pre = client.call_rpc("dailyDiscount.getInfo", vec![], false).ret;
+    assert_eq!(dd_after_pre.get_field("canDayPreBuy").and_then(val_bool), Some(false));
+    assert!(dd_after_pre.get_field("dayRecNum").and_then(Value::as_i64).unwrap_or(0) >= 1);
+    assert_eq!(
+        dd_after_pre
+            .get_field("rechargePointRec")
+            .and_then(|m| m.get_field("1"))
+            .and_then(Value::as_i64),
+        Some(2),
+        "300-point milestone must be state=2 (claimable) after 600+ NB recharge"
+    );
+
+    // `Shop Ưu Đãi` (`dailyDiscount.redeem`) using `Vé Ưu Đãi` (`14374`)
+    let red = client.call_rpc(
+        "dailyDiscount.redeem",
+        vec![Value::Int(15), Value::Int(1)],
+        false,
+    );
+    assert_eq!(red.err, "ok", "dailyDiscount.redeem failed: {red:?}");
+
+    // `Quà Ưu Đãi` milestone claim (`dailyDiscount.recRechargeReward(1)`)
+    let rec_pt = client.call_rpc("dailyDiscount.recRechargeReward", vec![Value::Int(1)], false);
+    assert_eq!(rec_pt.err, "ok");
+
+    // `dailyDiscount.useVoucher(6)` -> `voucher == false`
+    let (uv6_envs, uv6_midx, uv6_main) = client.call_rpc_with_raw_ordered(
+        "dailyDiscount.useVoucher",
+        vec![Value::Int(6)],
+        None,
+        Some("dailyDiscount.normalUpdate"),
+    );
+    assert_eq!(uv6_main.err, "ok");
+    let uv6_pidx = uv6_envs
+        .iter()
+        .position(|e| e.callback_name.as_deref() == Some("dailyDiscount.normalUpdate"))
+        .unwrap();
+    assert!(uv6_pidx > uv6_midx);
+    assert_eq!(
+        uv6_envs[uv6_pidx].ret.get_field("voucher").and_then(val_bool),
+        Some(false)
+    );
+
+    // =========================================================================
+    // 3. `Quà Ngày` (`activityDailyRecharge2`), `Quà Siêu Ưu Đãi` (`activityWeekGift`),
+    //    `Tam Quốc Chí Tôn Lệnh` (`activityQuarter`)
+    // =========================================================================
+    assert_eq!(client.call_rpc("activityDailyRecharge2.getInfo", vec![], false).err, "ok");
+    let (dr2_envs, dr2_midx, dr2_main) = client.call_rpc_with_raw_ordered(
+        "pay.instantBuy",
+        vec![Value::map([
+            ("pay_id", Value::Int(201)),
+            ("pay_price", Value::Int(25_000)),
+            ("pay_type", Value::String("04".into())),
+            ("buy_type", Value::Int(12)),
+            ("item_id", Value::Int(1)),
+        ])],
+        None,
+        Some("activityDailyRecharge2.update"),
+    );
+    assert_eq!(dr2_main.err, "ok");
+    let dr2_pidx = dr2_envs
+        .iter()
+        .position(|e| e.callback_name.as_deref() == Some("activityDailyRecharge2.update"))
+        .unwrap();
+    assert!(dr2_pidx > dr2_midx);
+    assert_eq!(
+        dr2_envs[dr2_pidx].ret.get_field("voucher").and_then(val_bool),
+        Some(false)
+    );
+    assert_eq!(
+        client
+            .call_rpc("tmActivityDailyRecharge2.useVoucher", vec![Value::Int(2)], false)
+            .err,
+        "ok"
+    );
+
+    // `activityWeekGift`: `getInfo` + `buyGift(1)` (type=1 gold gift) + recharge unlock `type=2`
+    let wg0 = client.call_rpc("activityWeekGift.getInfo", vec![], false);
+    assert_eq!(wg0.err, "ok");
+    assert_eq!(wg0.ret.get_field("day_level").and_then(Value::as_i64), Some(65));
+    assert_eq!(
+        client.call_rpc("activityWeekGift.buyGift", vec![Value::Int(1)], false).err,
+        "ok"
+    );
+    // Recharge exact 300 NB (`30 RMB`) and claim any unlocked `type=2` gift from `wg_after["2"]`!
+    assert_eq!(
+        client
+            .call_rpc(
+                "pay.instantBuy",
+                vec![Value::map([
+                    ("pay_id", Value::Int(1003)),
+                    ("pay_price", Value::Int(99_000)),
+                    ("pay_type", Value::String("00".into())),
+                    ("pay_row", Value::map([("vip_exp", Value::Int(300)), ("base_reward", Value::Int(300))])),
+                ])],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    let wg1 = client.call_rpc("activityWeekGift.getInfo", vec![], false).ret;
+    if let Some(Value::Object(t2_map)) = wg1.get_field("2") {
+        if let Some((unlocked_k, _)) = t2_map.iter().next() {
+            if let Ok(gid) = unlocked_k.parse::<i32>() {
+                assert_eq!(
+                    client
+                        .call_rpc("activityWeekGift.receiveReward", vec![Value::Int(gid)], false)
+                        .err,
+                    "ok"
+                );
+            }
+        }
+    }
+
+    // `Tam Quốc Chí Tôn Lệnh` (`activityQuarter`, `buy_type = 8`)
+    let aq0 = client.call_rpc("activityQuarter.getInfo", vec![], false);
+    assert_eq!(aq0.err, "ok");
+    assert_eq!(aq0.ret.get_field("buyTime").and_then(Value::as_i64), Some(0));
+    let (aq_envs, aq_midx, aq_main) = client.call_rpc_with_raw_ordered(
+        "pay.instantBuy",
+        vec![Value::map([
+            ("pay_id", Value::Int(301)),
+            ("pay_price", Value::Int(349_000)),
+            ("pay_type", Value::String("04".into())),
+            ("buy_type", Value::Int(8)),
+            ("item_id", Value::Int(1)),
+        ])],
+        None,
+        Some("activityQuarter.update"),
+    );
+    assert_eq!(aq_main.err, "ok");
+    let aq_pidx = aq_envs
+        .iter()
+        .position(|e| e.callback_name.as_deref() == Some("activityQuarter.update"))
+        .unwrap();
+    assert!(aq_pidx > aq_midx);
+    let aq_rec = client.call_rpc("activityQuarter.recReward", vec![Value::Int(1)], false);
+    assert_eq!(aq_rec.err, "ok");
+    assert!(
+        aq_rec
+            .ret
+            .get_field("rewardRec")
+            .and_then(|r| r.get_field("1"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            > 0
+    );
+
+    // =========================================================================
+    // 4. Gold Pack (`"00"`), Voucher Coin (`"05"`), `Nạp lần đầu` (`firstGift`),
+    //    `Báo Danh VIP` (`sign.*` & `superSign.*`), and `Thẻ Tháng / Thẻ Chí Tôn` (`monthCard.*`)
+    // =========================================================================
+    let mc_empty = client.call_rpc("monthCard.getInfo", vec![], false);
+    assert_eq!(mc_empty.err, "ok");
+    if let Value::Object(m) = &mc_empty.ret {
+        assert!(
+            m.dynamic_members.is_empty() && m.sealed_members.is_empty(),
+            "unbought monthCard.getInfo must be empty"
+        );
+    }
+
+    // Gold Pack (`"00"`, `999_000 VND` -> `2500 NB` + first-recharge bonus + `show_gain_popup = true`)
+    let gp_buy = client.call_rpc(
+        "pay.instantBuy",
+        vec![Value::map([
+            ("pay_id", Value::Int(9)),
+            ("pay_price", Value::Int(999_000)),
+            ("pay_type", Value::String("00".into())),
+        ])],
+        false,
+    );
+    assert_eq!(gp_buy.err, "ok");
+    assert_eq!(gp_buy.ret.get_field("show_gain_popup").and_then(val_bool), Some(true));
+
+    // Voucher Coin (`"05"`, `recharge_dianquan.db` `id = 1` -> `voucher_coin` + `voucher.recharge` push)
+    let (vc_envs, vc_midx, vc_main) = client.call_rpc_with_raw_ordered(
+        "pay.instantBuy",
+        vec![Value::map([
+            ("pay_id", Value::Int(501)),
+            ("pay_price", Value::Int(25_000)),
+            ("pay_type", Value::String("05".into())),
+            (
+                "extra_data",
+                Value::Array {
+                    dense: vec![Value::Int(1), Value::Int(501)],
+                    assoc: vec![],
+                },
+            ),
+        ])],
+        None,
+        Some("voucher.recharge"),
+    );
+    assert_eq!(vc_main.err, "ok");
+    let vc_pidx = vc_envs
+        .iter()
+        .position(|e| e.callback_name.as_deref() == Some("voucher.recharge"))
+        .unwrap();
+    assert!(vc_pidx > vc_midx);
+
+    // `firstGift`: total recharged NB is now > 2880 -> claim all 3 tiers (`60 / 980 / 2880`)!
+    let fg_nb = client.call_rpc("firstGift.getRechargeGold", vec![], false);
+    assert_eq!(fg_nb.err, "ok");
+    assert!(fg_nb.ret.as_i64().unwrap_or(0) >= 2_880);
+    for tier in [1, 2, 3] {
+        let fg = client.call_rpc("firstGift.receiveReward", vec![Value::Int(tier)], false);
+        assert_eq!(fg.err, "ok", "firstGift tier {tier} failed: {fg:?}");
+    }
+    assert_ne!(
+        client.call_rpc("firstGift.receiveReward", vec![Value::Int(1)], false).err,
+        "ok",
+        "duplicate firstGift claim must be rejected"
+    );
+
+    // `Báo Danh` & `Báo Danh VIP` (`sign.*` & `tmSuperSign.*`)
+    let s_info = client.call_rpc("sign.getSignInfo", vec![], false);
+    assert_eq!(s_info.err, "ok");
+    assert_eq!(
+        s_info
+            .ret
+            .get_field("va_recharge_sign")
+            .and_then(|v| v.get_field("8"))
+            .and_then(val_bool),
+        Some(false),
+        "va_recharge_sign['8'] must be false (unlocked, unclaimed) after recharge"
+    );
+    assert_eq!(
+        client.call_rpc("sign.gainRechargeSignReward", vec![Value::Int(8)], false).err,
+        "ok"
+    );
+    assert_eq!(
+        client.call_rpc("sign.gainRechargeSignReward", vec![Value::Int(40)], false).err,
+        "ok"
+    );
+    assert_eq!(
+        client.call_rpc("tmSign.gainRechargeSignReward", vec![Value::Int(100)], false).err,
+        "ok"
+    );
+    let s_info2 = client.call_rpc("sign.getSignInfo", vec![], false).ret;
+    assert_eq!(
+        s_info2
+            .get_field("va_recharge_sign")
+            .and_then(|v| v.get_field("8"))
+            .and_then(val_bool),
+        Some(true),
+        "va_recharge_sign['8'] must become true once claimed"
+    );
+    assert_eq!(client.call_rpc("sign.signToday", vec![Value::Int(1)], false).err, "ok");
+    assert_eq!(client.call_rpc("sign.gainVipSignReward", vec![Value::Int(1)], false).err, "ok");
+    assert_eq!(client.call_rpc("sign.gainAccSignReward", vec![Value::Int(1)], false).err, "ok");
+    assert_eq!(client.call_rpc("tmSuperSign.getInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("tmSuperSign.sign", vec![Value::Int(1)], false).err, "ok");
+
+    // `MonthCard` (`"01"`) + `SupremeCard` (`"02"` via `tmPay.instantBuy`) + daily claims!
+    let (mc1_envs, mc1_midx, mc1_main) = client.call_rpc_with_raw_ordered(
+        "pay.instantBuy",
+        vec![Value::map([
+            ("pay_id", Value::Int(1)),
+            ("pay_price", Value::Int(99_000)),
+            ("pay_type", Value::String("01".into())),
+        ])],
+        None,
+        Some("re.monthCard.updateCardInfo"),
+    );
+    assert_eq!(mc1_main.err, "ok");
+    assert!(
+        mc1_envs
+            .iter()
+            .position(|e| e.callback_name.as_deref() == Some("re.monthCard.updateCardInfo"))
+            .unwrap()
+            > mc1_midx
+    );
+    let (mc2_envs, mc2_midx, mc2_main) = client.call_rpc_with_raw_ordered(
+        "tmPay.instantBuy",
+        vec![Value::map([
+            ("pay_id", Value::Int(2)),
+            ("pay_price", Value::Int(249_000)),
+            ("pay_type", Value::String("02".into())),
+        ])],
+        None,
+        Some("tmRe.monthCard.updateCardInfo"),
+    );
+    assert_eq!(mc2_main.err, "ok");
+    assert!(
+        mc2_envs
+            .iter()
+            .position(|e| e.callback_name.as_deref() == Some("tmRe.monthCard.updateCardInfo"))
+            .unwrap()
+            > mc2_midx
+    );
+    assert_eq!(client.call_rpc("monthCard.receiveReward", vec![Value::Int(1)], false).err, "ok");
+    assert_eq!(client.call_rpc("tmMonthCard.receiveReward", vec![Value::Int(2)], false).err, "ok");
+
+    // =========================================================================
+    // 5. Card Passes (`Weekly/Monthly/Beauty`), Funds, `Hoạt động`, `activeTaskShop`,
+    //    `activity8Years`, `activityBattlePass`, `crossGuildWar` (`buy_type = 10 & 27`)
+    // =========================================================================
+    for (m_info, bt, push_cb) in [
+        ("activityWeekly.getInfo", 1, "activityWeekly.update"),
+        ("activityMonthly.getInfo", 2, "activityMonthly.update"),
+        ("activityBeauty.getInfo", 15, "activityBeauty.update"),
+    ] {
+        assert_eq!(client.call_rpc(m_info, vec![], false).err, "ok");
+        let (p_envs, p_midx, p_main) = client.call_rpc_with_raw_ordered(
+            "pay.instantBuy",
+            vec![Value::map([
+                ("pay_id", Value::Int(600 + bt)),
+                ("pay_price", Value::Int(99_000)),
+                ("pay_type", Value::String("04".into())),
+                ("buy_type", Value::Int(bt)),
+                ("item_id", Value::Int(1)),
+            ])],
+            None,
+            Some(push_cb),
+        );
+        assert_eq!(p_main.err, "ok");
+        assert!(
+            p_envs
+                .iter()
+                .position(|e| e.callback_name.as_deref() == Some(push_cb))
+                .unwrap()
+                > p_midx
+        );
+    }
+    assert_eq!(client.call_rpc("activityWeekly.oneKeyRec", vec![], false).err, "ok");
+
+    // VIP Benefits, Growth, Funds & `Hoạt động`
+    assert_eq!(client.call_rpc("vipBenefit.getBenefitInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("vipBenefit.makeDailyBenefit", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("weekGift.buy", vec![Value::Int(1)], false).err, "ok");
+    assert_eq!(client.call_rpc("growUp.getInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("growth.getInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("growth.getNum", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("growth.buy", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("growth.receiveReward", vec![Value::Int(1)], false).err, "ok");
+    assert_eq!(client.call_rpc("firstWeek.getInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("activityMonthFund.getInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("activityWeekFund.getInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("activityRechargeFund.getInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("multipleFunds.getInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("multipleFunds.useVoucher", vec![Value::Int(1)], false).err, "ok");
+
+    assert_eq!(client.call_rpc("discount.getInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("discount.buy", vec![Value::Int(1), Value::Int(3)], false).err, "ok");
+    assert_eq!(client.call_rpc("loginReward.getInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("loginReward.make", vec![Value::Int(1)], false).err, "ok");
+    assert_eq!(client.call_rpc("consume.getInfo", vec![], false).err, "ok");
+    // Player spent 1000+ gold on growth.buy + discount.buy -> claim 200-gold consume milestone!
+    assert_eq!(client.call_rpc("consume.recieveReward", vec![Value::Int(200)], false).err, "ok");
+    assert_eq!(client.call_rpc("recharge.getInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("recharge.recieveReward", vec![Value::Int(1)], false).err, "ok");
+    assert_eq!(client.call_rpc("activityRechargeReward.getInfo", vec![], false).err, "ok");
+    assert_eq!(
+        client
+            .call_rpc("activityRechargeReward.recieveReward", vec![Value::Int(1)], false)
+            .err,
+        "ok"
+    );
+
+    // `activeTaskShop` (`buy_type = 14`), `activity8Years` (`buy_type = 21`), `activityBattlePass` (`buy_type = 29`)
+    assert_eq!(client.call_rpc("activityActiveTaskShop.getTaskInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("activityActiveTaskShop.getShopInfo", vec![], false).err, "ok");
+    assert_eq!(
+        client
+            .call_rpc(
+                "pay.instantBuy",
+                vec![Value::map([
+                    ("pay_id", Value::Int(714)),
+                    ("pay_price", Value::Int(25_000)),
+                    ("pay_type", Value::String("04".into())),
+                    ("buy_type", Value::Int(14)),
+                    ("item_id", Value::Int(2)),
+                ])],
+                false,
+            )
+            .err,
+        "ok"
+    );
+
+    assert_eq!(client.call_rpc("activity8Years.getInfo", vec![], false).err, "ok");
+    assert_eq!(client.call_rpc("activity8Years.buyFreeGift", vec![], false).err, "ok");
+    assert_eq!(
+        client
+            .call_rpc(
+                "pay.instantBuy",
+                vec![Value::map([
+                    ("pay_id", Value::Int(721)),
+                    ("pay_price", Value::Int(25_000)),
+                    ("pay_type", Value::String("04".into())),
+                    ("buy_type", Value::Int(21)),
+                    ("item_id", Value::Int(1)),
+                ])],
+                false,
+            )
+            .err,
+        "ok"
+    );
+
+    assert_eq!(client.call_rpc("activityBattlePass.getInfo", vec![], false).err, "ok");
+    assert_eq!(
+        client
+            .call_rpc(
+                "pay.instantBuy",
+                vec![Value::map([
+                    ("pay_id", Value::Int(729)),
+                    ("pay_price", Value::Int(99_000)),
+                    ("pay_type", Value::String("04".into())),
+                    ("buy_type", Value::Int(29)),
+                    ("item_id", Value::Int(1)),
+                ])],
+                false,
+            )
+            .err,
+        "ok"
+    );
+
+    // `SuperMapDirectRecharge2` (`crossGuildWar` `buy_type = 10` & `tmPay.instantBuy` `buy_type = 27`)
+    assert_eq!(client.call_rpc("crossGuildWar.getBaseInfo", vec![], false).err, "ok");
+    assert_eq!(
+        client
+            .call_rpc(
+                "pay.instantBuy",
+                vec![Value::map([
+                    ("pay_id", Value::Int(810)),
+                    ("pay_price", Value::Int(25_000)),
+                    ("pay_type", Value::String("04".into())),
+                    ("buy_type", Value::Int(10)),
+                    ("item_id", Value::Int(1)),
+                ])],
+                false,
+            )
+            .err,
+        "ok"
+    );
+    let (tm_cgw_envs, tm_cgw_midx, tm_cgw_main) = client.call_rpc_with_raw_ordered(
+        "tmPay.instantBuy",
+        vec![Value::map([
+            ("pay_id", Value::Int(827)),
+            ("pay_price", Value::Int(25_000)),
+            ("pay_type", Value::String("04".into())),
+            ("buy_type", Value::Int(27)),
+            ("item_id", Value::Int(1)),
+        ])],
+        None,
+        Some("re.tmCrossGuildWar.buyUpdate"),
+    );
+    assert_eq!(tm_cgw_main.err, "ok");
+    assert!(
+        tm_cgw_envs
+            .iter()
+            .position(|e| e.callback_name.as_deref() == Some("re.tmCrossGuildWar.buyUpdate"))
+            .unwrap()
+            > tm_cgw_midx
+    );
+
+    // =========================================================================
+    // 6. `/recharge <nb>` Chat GM Command + VIP 0..16 Progression & Exact `vip.db` Gift Costs
+    // =========================================================================
+    client.gm("/recharge 1000000");
+    let _ = client.drain_pushes();
+
+    let u_vip16 = client.call_rpc("user.getUser", vec![], false).ret;
+    assert_eq!(
+        u_vip16.get_field("vip").and_then(Value::as_i64),
+        Some(16),
+        "/recharge 1000000 must promote player to VIP 16 per vip.db"
+    );
+    let pre_accum_nb = client
+        .call_rpc("firstGift.getRechargeGold", vec![], false)
+        .ret
+        .as_i64()
+        .unwrap();
+    assert!(pre_accum_nb >= 1_000_000);
+
+    // Verify exact `vip.db` gold costs on `user.buyVipGift`:
+    // VIP 0 => 88, VIP 8 => 1288, VIP 16 => 6688!
+    for (vip_lv, expected_cost) in [(0, 88), (8, 1_288), (16, 6_688)] {
+        let g0 = client
+            .call_rpc("user.getUser", vec![], false)
+            .ret
+            .get_field("gold")
+            .and_then(Value::as_i64)
+            .unwrap();
+        let buy_vg = client.call_rpc("user.buyVipGift", vec![Value::Int(vip_lv)], false);
+        assert_eq!(buy_vg.err, "ok", "buyVipGift({vip_lv}) failed: {buy_vg:?}");
+        let g1 = client
+            .call_rpc("user.getUser", vec![], false)
+            .ret
+            .get_field("gold")
+            .and_then(Value::as_i64)
+            .unwrap();
+        assert_eq!(
+            g0 - g1,
+            expected_cost,
+            "VIP-{vip_lv} gift must cost exact {expected_cost} gold per vip.db"
+        );
+    }
+
+    // =========================================================================
+    // 7. Cold `RunningServer` WAL Restart Persistence
+    // =========================================================================
+    drop(client);
+    server.shutdown();
+
+    let server2 = RunningServer::start(cfg).expect("cold restart server");
+    let (mut cold_client, _, _) = wave2_login_and_enter(
+        server2.http_addr,
+        server2.tcp_addr,
+        "events_instant_buy_dev1",
+        1,
+        "GiaCátLượngEv",
+        Some(uid),
+    );
+
+    let post_u = cold_client.call_rpc("user.getUser", vec![], false).ret;
+    assert_eq!(post_u.get_field("vip").and_then(Value::as_i64), Some(16));
+    assert_eq!(post_u.get_field("is_recharge").and_then(Value::as_i64), Some(1));
+    assert_eq!(
+        cold_client
+            .call_rpc("firstGift.getRechargeGold", vec![], false)
+            .ret
+            .as_i64(),
+        Some(pre_accum_nb),
+        "gold_recharge_accum_all must survive cold WAL restart"
+    );
+
+    let post_dd = cold_client.call_rpc("dailyDiscount.getInfo", vec![], false).ret;
+    assert_eq!(post_dd.get_field("canDayPreBuy").and_then(val_bool), Some(false));
+    assert_eq!(
+        post_dd
+            .get_field("redeem")
+            .and_then(|r| r.get_field("15"))
+            .and_then(Value::as_i64),
+        Some(1),
+        "Shop Ưu Đãi redeem state must survive cold WAL restart"
+    );
+    assert_eq!(
+        post_dd
+            .get_field("rechargePointRec")
+            .and_then(|r| r.get_field("1"))
+            .and_then(Value::as_i64),
+        Some(3),
+        "Quà Ưu Đãi claimed milestone must survive cold WAL restart"
+    );
+
+    let post_aq = cold_client.call_rpc("activityQuarter.getInfo", vec![], false).ret;
+    assert!(post_aq.get_field("buyTime").and_then(Value::as_i64).unwrap_or(0) > 0);
+    assert!(
+        post_aq
+            .get_field("rewardRec")
+            .and_then(|r| r.get_field("1"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            > 0
+    );
+
+    let post_mc = cold_client.call_rpc("monthCard.getInfo", vec![], false).ret;
+    let mc_entries = match &post_mc {
+        Value::Object(m) => m.dynamic_members.len() + m.sealed_members.len(),
+        Value::Array { assoc, .. } => assoc.len(),
+        _ => 0,
+    };
+    assert!(
+        mc_entries >= 2,
+        "Both MonthCard and SupremeCard entries must survive cold WAL restart: {post_mc:?}"
+    );
+
+    assert_eq!(
+        cold_client.call_rpc("user.buyVipGift", vec![Value::Int(16)], false).err,
+        "vip_gift_already_bought",
+        "VIP-16 gift purchase state must survive cold WAL restart"
+    );
 
     drop(cold_client);
     server2.shutdown();

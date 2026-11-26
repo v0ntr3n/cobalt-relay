@@ -12,6 +12,7 @@
 pub mod bridge;
 pub mod bxh_snapshot;
 pub mod config;
+pub mod event_pay_rpcs;
 pub mod player_rpcs;
 pub mod tcp_server;
 pub mod world;

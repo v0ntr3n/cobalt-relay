@@ -66,7 +66,7 @@ pub fn normalize_player_method(method: &str) -> (String, bool) {
     (method.to_owned(), false)
 }
 
-fn map_player_err(err: PlayerError) -> String {
+pub(crate) fn map_player_err(err: PlayerError) -> String {
     match err {
         PlayerError::InsufficientCurrency { currency, .. } => {
             format!("insufficient_currency:{currency}")
@@ -99,7 +99,7 @@ fn map_player_err(err: PlayerError) -> String {
     }
 }
 
-fn build_user_update_env(profile: &PlayerProfile, is_tm: bool, now_i64: i64) -> S2cEnvelope {
+pub(crate) fn build_user_update_env(profile: &PlayerProfile, is_tm: bool, now_i64: i64) -> S2cEnvelope {
     let cb = if is_tm {
         "tmUser.updateUser"
     } else {
@@ -109,7 +109,7 @@ fn build_user_update_env(profile: &PlayerProfile, is_tm: bool, now_i64: i64) -> 
     S2cEnvelope::push(cb, payload).with_time(now_i64)
 }
 
-fn build_bag_delta_env(delta: &BagDelta, is_tm: bool, now_i64: i64) -> Option<S2cEnvelope> {
+pub(crate) fn build_bag_delta_env(delta: &BagDelta, is_tm: bool, now_i64: i64) -> Option<S2cEnvelope> {
     if delta.is_empty() {
         return None;
     }
@@ -135,7 +135,7 @@ fn build_bag_update_env(
     build_bag_delta_env(&delta, is_tm, now_i64)
 }
 
-fn build_new_heroes_env(
+pub(crate) fn build_new_heroes_env(
     profile: &PlayerProfile,
     hids: &[u64],
     is_tm: bool,
@@ -160,7 +160,7 @@ fn build_new_heroes_env(
     Some(S2cEnvelope::push(cb, Value::map(entries)).with_time(now_i64))
 }
 
-fn resync_gameplay_with_store(
+pub(crate) fn resync_gameplay_with_store(
     store: &PlayerStore,
     gameplay: &mut GameplayEngine,
     data_store: &GameDataStore,
@@ -177,7 +177,7 @@ fn resync_gameplay_with_store(
 }
 
 /// Reads an integer argument trying 1-based `args[idx]` first, or `arg_zero` when `idx == 0` and `args` is empty.
-fn arg_i64(req: &RpcRequest, idx: usize) -> Option<i64> {
+pub(crate) fn arg_i64(req: &RpcRequest, idx: usize) -> Option<i64> {
     if let Some(v) = req.args.get(idx) {
         if let Some(n) = val_as_i64_loose(v) {
             return Some(n);
@@ -191,7 +191,7 @@ fn arg_i64(req: &RpcRequest, idx: usize) -> Option<i64> {
     req.arg_at_lua0(idx + 1).and_then(val_as_i64_loose)
 }
 
-fn val_as_i64_loose(v: &Value) -> Option<i64> {
+pub(crate) fn val_as_i64_loose(v: &Value) -> Option<i64> {
     v.as_i64()
         .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
 }
@@ -685,24 +685,48 @@ fn write_u32_set_to_va(profile: &mut PlayerProfile, key: &str, vals: &[u32]) {
     let _ = profile.set_user_config(key, PlayerJson::Array(arr));
 }
 
-fn vip_gift_gold_cost(vip_lv: u32) -> u64 {
+pub fn vip_gift_gold_cost(vip_lv: u32) -> u64 {
     match vip_lv {
-        0 | 1 => 88,
-        2 => 188,
-        3 => 288,
-        4 => 388,
-        5 => 488,
-        6 => 688,
-        7 => 888,
-        8 => 1_088,
-        9 => 1_288,
-        10 => 1_688,
-        11 => 2_088,
-        12 => 2_688,
-        13 => 3_288,
-        14 => 3_888,
-        15 => 4_688,
-        _ => 5_688,
+        0 => 88,
+        1 => 188,
+        2 => 288,
+        3 => 388,
+        4 => 488,
+        5 => 688,
+        6 => 888,
+        7 => 1_088,
+        8 => 1_288,
+        9 => 1_688,
+        10 => 2_088,
+        11 => 2_688,
+        12 => 3_288,
+        13 => 3_888,
+        14 => 4_688,
+        15 => 5_688,
+        _ => 6_688,
+    }
+}
+
+/// Authentic `vip.db` `vip_gift` `(price_type, tid, qty)` reward rows for VIP `0..=16`.
+pub fn vip_gift_reward_triplets(vip_lv: u32) -> &'static [(u32, u32, u64)] {
+    match vip_lv {
+        0 => &[(4, 33_011, 1), (4, 22_102, 1), (4, 22_202, 1), (1, 0, 50_000)],
+        1 => &[(4, 16_012, 2), (4, 22_202, 2), (1, 0, 100_000)],
+        2 => &[(4, 124_003, 1), (4, 22_102, 2), (4, 17_003, 5), (1, 0, 150_000)],
+        3 => &[(4, 134_003, 1), (4, 22_202, 3), (4, 181_001, 5), (1, 0, 200_000)],
+        4 => &[(4, 144_003, 1), (4, 22_102, 3), (4, 17_004, 10), (1, 0, 300_000)],
+        5 => &[(4, 114_003, 1), (4, 22_202, 5), (4, 181_001, 10), (1, 0, 500_000)],
+        6 => &[(4, 27_215, 1), (4, 22_102, 5), (4, 10_014, 200), (4, 33_002, 5)],
+        7 => &[(4, 125_001, 1), (4, 22_202, 8), (4, 10_012, 200), (1, 0, 800_000)],
+        8 => &[(4, 135_001, 1), (4, 22_102, 8), (4, 10_014, 400), (4, 33_002, 10)],
+        9 => &[(4, 115_001, 1), (4, 145_001, 1), (4, 22_202, 10), (4, 10_012, 400), (1, 0, 1_000_000)],
+        10 => &[(4, 27_501, 1), (4, 28_006, 1), (4, 22_102, 10), (4, 10_204, 50), (4, 33_003, 10)],
+        11 => &[(4, 28_202, 1), (4, 22_202, 12), (4, 15_005, 2_000), (1, 0, 1_500_000)],
+        12 => &[(4, 135_004, 1), (4, 125_004, 1), (4, 22_102, 12), (4, 10_204, 100), (4, 33_003, 20)],
+        13 => &[(4, 145_004, 1), (4, 115_004, 1), (4, 22_202, 15), (4, 15_005, 3_000), (1, 0, 2_000_000)],
+        14 => &[(4, 27_506, 2), (4, 28_006, 1), (4, 22_102, 15), (4, 10_014, 5_000), (1, 0, 3_000_000)],
+        15 => &[(4, 204_019, 1), (4, 28_006, 1), (4, 22_202, 20), (4, 181_002, 30), (1, 0, 4_000_000)],
+        _ => &[(4, 28_301, 1), (4, 22_102, 20), (4, 10_014, 8_000), (1, 0, 5_000_000)],
     }
 }
 
@@ -769,7 +793,7 @@ const ACT_STAR_GIFT_TIERS: &[ActStarGiftTier] = &[
 
 const ACT_STAR_SIGN_LEVELS: &[u32] = &[5, 10, 20, 30, 40, 50, 60];
 
-fn parse_positive_u32_arg(val: Option<&Value>) -> Option<u32> {
+pub(crate) fn parse_positive_u32_arg(val: Option<&Value>) -> Option<u32> {
     let v = val?;
     val_as_i64_loose(v)
         .filter(|&n| n > 0)
@@ -1154,13 +1178,12 @@ pub fn try_handle_player_rpc(
             }
 
             let cost_gold = vip_gift_gold_cost(vip_u32);
+            let gift_triplets = vip_gift_reward_triplets(vip_u32);
             let mut delta = BagDelta::new();
             let res = store.mutate_player(uid, now_ts, |p| {
                 p.consume_currency(CurrencyType::Gold, cost_gold, now_ts)?;
-                let (_, d1) = p.add_item_with_delta(16_012, (vip_u32 + 1) * 5, now_ts)?;
-                let (_, d2) = p.add_item_with_delta(10_010, (vip_u32 + 1) * 10, now_ts)?;
-                delta.merge(d1);
-                delta.merge(d2);
+                let (d_gift, _) = crate::event_pay_rpcs::grant_triplets(p, gift_triplets, now_ts)?;
+                delta.merge(d_gift);
                 bought.push(vip_u32);
                 bought.sort_unstable();
                 bought.dedup();
@@ -3988,6 +4011,8 @@ pub fn try_handle_player_rpc(
             }))
         }
 
-        _ => None,
+        _ => crate::event_pay_rpcs::try_handle_event_or_pay_rpc(
+            store, gameplay, data_store, uid, req, m, is_tm, now_ts,
+        ),
     }
 }

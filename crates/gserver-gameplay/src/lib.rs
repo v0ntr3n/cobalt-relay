@@ -14,6 +14,7 @@
 pub mod battle_copy;
 pub mod chat_gm;
 pub mod engine;
+pub mod festival_conf;
 pub mod mail;
 pub mod player;
 pub mod protocol;

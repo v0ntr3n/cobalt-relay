@@ -4580,6 +4580,15 @@ impl SignAndOnlineService {
     /// Returns `sign.getInfo` / `tmSign.getInfo` fixing all 4 Sign-In bugs (`Section 4.4`):
     /// includes `level_sign = 0`, `last_sign_vip_multi`, `month_sign_num`, `va_sign`, and real `last_sign_time`!
     pub fn get_sign_info(&self, uid: u64, now_ts: u64) -> DtoValue {
+        self.get_sign_info_with_recharge(uid, 0, now_ts)
+    }
+
+    pub fn get_sign_info_with_recharge(
+        &self,
+        uid: u64,
+        recharge_nb: u64,
+        now_ts: u64,
+    ) -> DtoValue {
         let day_bucket = now_ts / 86_400;
         let signed_today = self.last_sign_day_bucket.get(&uid).copied() == Some(day_bucket);
         let sign_num = self.sign_days.get(&uid).copied().unwrap_or(0);
@@ -4589,6 +4598,11 @@ impl SignAndOnlineService {
 
         let va_sign: Vec<DtoValue> = (1..=sign_num).map(DtoValue::from).collect();
         let mut va_recharge_sign = BTreeMap::new();
+        for tier in [8u32, 40, 100] {
+            if recharge_nb >= u64::from(tier) {
+                va_recharge_sign.insert(tier.to_string(), DtoValue::from(false));
+            }
+        }
         if let Some(claimed) = self.recharge_sign_claimed.get(&uid) {
             for &tier in claimed {
                 va_recharge_sign.insert(tier.to_string(), DtoValue::from(true));

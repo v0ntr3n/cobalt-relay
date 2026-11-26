@@ -60,6 +60,7 @@ pub enum ChatErrorCode {
 pub enum GmCommand {
     Help,
     Gold(i64),
+    Recharge(u64),
     Silver(i64),
     Vip(u32),
     Level(u32),
@@ -98,6 +99,18 @@ pub fn parse_gm_command(input: &str) -> Result<GmCommand, GmParseError> {
                 .parse::<i64>()
                 .map_err(|_| GmParseError::InvalidNumber("gold amount"))?;
             Ok(GmCommand::Gold(amt))
+        }
+        "recharge" => {
+            let s = parts
+                .next()
+                .ok_or(GmParseError::MissingArg("/recharge <nb>"))?;
+            let nb = s
+                .parse::<u64>()
+                .map_err(|_| GmParseError::InvalidNumber("recharge nb"))?;
+            if nb == 0 {
+                return Err(GmParseError::InvalidNumber("recharge nb must be >= 1"));
+            }
+            Ok(GmCommand::Recharge(nb))
         }
         "silver" | "copper" => {
             let s = parts
@@ -201,7 +214,7 @@ pub fn execute_gm_command(
 
     let summary = match cmd {
         GmCommand::Help => {
-            "GM Commands: /help | /gold <amt> | /silver <amt> | /vip <0..18> | /level <1..200> | /item <tid> <qty> | /hero <htid> | /mail [tid] [qty] | /heal".to_owned()
+            "GM Commands: /help | /gold <amt> | /recharge <nb> | /silver <amt> | /vip <0..16> | /level <1..200> | /item <tid> <qty> | /hero <htid> | /mail [tid] [qty] | /heal".to_owned()
         }
         GmCommand::Gold(delta) => {
             player.gold = (player.gold + delta).max(0);
@@ -210,6 +223,30 @@ pub fn execute_gm_command(
                 now_ts,
             ));
             format!("[GM] Gold updated -> {}", player.gold)
+        }
+        GmCommand::Recharge(nb) => {
+            let prev_vip = player.vip;
+            player.record_recharge_nb(nb);
+            client_pushes.push(PlayerState::build_user_update_push(
+                [
+                    ("gold", DtoValue::from(player.gold)),
+                    ("vip", DtoValue::from(player.vip)),
+                    ("vip_exp", DtoValue::from(player.vip_exp)),
+                    ("is_recharge", DtoValue::from(u32::from(player.is_recharge))),
+                    (
+                        "gold_recharge_accum_all",
+                        DtoValue::from(player.gold_recharge_accum_all),
+                    ),
+                ],
+                now_ts,
+            ));
+            if player.vip != prev_vip {
+                town_broadcasts.extend(town_mgr.sync_player_appearance(player, now_ts));
+            }
+            format!(
+                "[GM] Recharged +{nb} NB -> gold={}, vip={} (vip_exp={}, accum={})",
+                player.gold, player.vip, player.vip_exp, player.gold_recharge_accum_all
+            )
         }
         GmCommand::Silver(delta) => {
             let raw = (player.copper + delta).max(0);

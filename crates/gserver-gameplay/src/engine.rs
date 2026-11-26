@@ -1686,7 +1686,13 @@ impl GameplayEngine {
 
                 // --- Sign, SuperCheckin, Online, DailyTask, MainTask, Achievements & EatChicken ---
                 rpc::SIGN_GET_INFO | "sign.getSignInfo" | "sign.getNormalInfo" => {
-                    Ok(self.sign_online.get_sign_info(uid, now_ts))
+                    let rech_nb = self
+                        .players
+                        .get(&uid)
+                        .map_or(0, |p| p.gold_recharge_accum_all);
+                    Ok(self
+                        .sign_online
+                        .get_sign_info_with_recharge(uid, rech_nb, now_ts))
                 }
                 rpc::SIGN_TODAY | rpc::SIGN_GAIN_NORMAL => {
                     let player = self.players.get_mut(&uid).unwrap();
@@ -1727,10 +1733,10 @@ impl GameplayEngine {
                             ret
                         })
                 }
-                rpc::SUPER_CHECKIN_GET_INFO => {
+                rpc::SUPER_CHECKIN_GET_INFO | "superSign.getInfo" => {
                     Ok(self.sign_online.get_super_checkin_info(uid, now_ts))
                 }
-                rpc::SUPER_CHECKIN_SIGN => {
+                rpc::SUPER_CHECKIN_SIGN | "superSign.sign" => {
                     let default_day = (((now_ts / 86_400) % 30) + 1) as u32;
                     let day = req
                         .args
@@ -1745,7 +1751,7 @@ impl GameplayEngine {
                             ret
                         })
                 }
-                rpc::SUPER_CHECKIN_FETCH | "superCheckin.fetch" | "superCheckin.gainReward" => {
+                rpc::SUPER_CHECKIN_FETCH | "superSign.receiveAccReward" | "superCheckin.fetch" | "superCheckin.gainReward" => {
                     let player = self.players.get_mut(&uid).unwrap();
                     self.sign_online
                         .super_checkin_fetch_reward(player, now_ts)
@@ -1848,10 +1854,7 @@ impl GameplayEngine {
                             ret
                         })
                 }
-                rpc::ACTIVITY_GET_CONF => Ok(DtoValue::map([
-                    ("version", DtoValue::from(1u32)),
-                    ("arrData", DtoValue::Map(BTreeMap::new())),
-                ])),
+                rpc::ACTIVITY_GET_CONF => Ok(crate::festival_conf::build_activity_conf_dto(now_ts)),
 
                 _ => Err("unsupported_method"),
             }
