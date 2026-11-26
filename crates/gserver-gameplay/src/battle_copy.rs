@@ -5166,7 +5166,8 @@ impl AchievementEngine {
     pub fn get_show_achievements(&mut self, uid: u64) -> DtoValue {
         let map = self.progress.entry(uid).or_default();
         if map.is_empty() {
-            map.insert(1, (1, 0));
+            // Seed with a valid achievement.db ID (100001); ID 1 does not exist in achievement.db.
+            map.insert(100_001, (1, 0));
         }
         let achievements_arr: Vec<DtoValue> = map
             .iter()

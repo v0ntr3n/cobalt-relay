@@ -805,7 +805,11 @@ impl TavernRaffleEngine {
         pre_pushes.push(PlayerState::build_user_update_push(user_fields, now_ts));
 
         let cur_luck = self.states.get(&player.uid).map_or(0, |s| s.divine_luck);
-        let ret = if count == 1 {
+        let ret = if matches!(pool, RafflePool::Warrior) {
+            // Pool 1 (Warrior) has no luck gauge in raffle.db (`getMaxLuckNum(1)` is nil);
+            // omitting `senior_luck_num` lets `RaffleData:setCurLuckNumOfGod` return cleanly.
+            DtoValue::map([("reward", DtoValue::Array(reward_list))])
+        } else if count == 1 {
             DtoValue::map([
                 ("reward", DtoValue::Array(reward_list)),
                 ("senior_luck_num", DtoValue::from(cur_luck)),

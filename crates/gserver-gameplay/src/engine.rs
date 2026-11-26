@@ -975,7 +975,7 @@ impl GameplayEngine {
                     let out = self.copy.pass_stage(player, chapter_id, copy_id, now_ts);
                     if out.is_ok() {
                         self.daily_task.record_progress(uid, 1, 1, 1);
-                        self.achievements.record_achievement(uid, 1, 1);
+                        self.achievements.record_achievement(uid, 100_001, 1);
                     }
                     out.map(|(ret, pushes)| {
                         client_pushes.extend(pushes);
