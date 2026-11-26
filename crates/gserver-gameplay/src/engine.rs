@@ -404,26 +404,39 @@ impl GameplayEngine {
             }
 
             // --- PvE Campaign Copy & Battle Record ---
-            rpc::COPY_GET_LIST => {
+            rpc::COPY_GET_LIST | "timeMachineCopy.getList" => {
                 let copy_type = req.args.first().and_then(DtoValue::as_u32).unwrap_or(1);
                 Ok(self.copy.get_list(uid, copy_type))
             }
-            rpc::COPY_GET_COPY => {
+            rpc::COPY_GET_COPY | "timeMachineCopy.getCopy" => {
                 let chapter_id = req.args.first().and_then(DtoValue::as_u32).unwrap_or(1001);
                 Ok(self.copy.get_chapter(uid, chapter_id))
             }
             rpc::USER_BEFORE_LOGIN_BATTLE => {
-                self.copy.attack_stage(&self.players[&uid], 1001, 100101, true)
+                self.copy
+                    .attack_stage(&self.players[&uid], 1001, 100101, true)
             }
-            rpc::COPY_ATTACK => {
-                let chapter_id = req.args.first().and_then(DtoValue::as_u32).unwrap_or(1001);
-                let copy_id = req.args.get(1).and_then(DtoValue::as_u32).unwrap_or(100101);
+            rpc::COPY_ATTACK | "timeMachineCopy.attack" => {
+                let chapter_id = match req.args.first() {
+                    Some(v) => v.as_i64().filter(|&n| n > 0).map_or(0, |n| n as u32),
+                    None => 1001,
+                };
+                let copy_id = match req.args.get(1) {
+                    Some(v) => v.as_i64().filter(|&n| n > 0).map_or(0, |n| n as u32),
+                    None => 100101,
+                };
                 self.copy
                     .attack_stage(&self.players[&uid], chapter_id, copy_id, false)
             }
-            rpc::COPY_PASS => {
-                let chapter_id = req.args.first().and_then(DtoValue::as_u32).unwrap_or(1001);
-                let copy_id = req.args.get(1).and_then(DtoValue::as_u32).unwrap_or(100101);
+            rpc::COPY_PASS | "timeMachineCopy.pass" => {
+                let chapter_id = match req.args.first() {
+                    Some(v) => v.as_i64().filter(|&n| n > 0).map_or(0, |n| n as u32),
+                    None => 1001,
+                };
+                let copy_id = match req.args.get(1) {
+                    Some(v) => v.as_i64().filter(|&n| n > 0).map_or(0, |n| n as u32),
+                    None => 100101,
+                };
                 let player = self.players.get_mut(&uid).unwrap();
                 self.copy
                     .pass_stage(player, chapter_id, copy_id, now_ts)
@@ -432,12 +445,12 @@ impl GameplayEngine {
                         ret
                     })
             }
-            rpc::COPY_FAIL => {
+            rpc::COPY_FAIL | "timeMachineCopy.fail" => {
                 let chapter_id = req.args.first().and_then(DtoValue::as_u32).unwrap_or(1001);
                 let copy_id = req.args.get(1).and_then(DtoValue::as_u32).unwrap_or(100101);
                 Ok(self.copy.battle_fail(uid, chapter_id, copy_id))
             }
-            rpc::COPY_SWEEP => {
+            rpc::COPY_SWEEP | "timeMachineCopy.sweep" => {
                 let chapter_id = req.args.first().and_then(DtoValue::as_u32).unwrap_or(1001);
                 let copy_id = req.args.get(1).and_then(DtoValue::as_u32).unwrap_or(100101);
                 let num = req.args.get(2).and_then(DtoValue::as_u32).unwrap_or(1);
@@ -508,7 +521,9 @@ impl GameplayEngine {
             }
 
             // --- Sign, Online & Activity ---
-            rpc::SIGN_GET_INFO | "sign.getSignInfo" => Ok(self.sign_online.get_sign_info(uid, now_ts)),
+            rpc::SIGN_GET_INFO | "sign.getSignInfo" => {
+                Ok(self.sign_online.get_sign_info(uid, now_ts))
+            }
             rpc::SIGN_TODAY => {
                 let player = self.players.get_mut(&uid).unwrap();
                 self.sign_online

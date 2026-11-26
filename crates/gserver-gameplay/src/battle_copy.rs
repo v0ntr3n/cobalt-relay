@@ -186,6 +186,33 @@ impl SimulatedBattle {
     }
 }
 
+/// Builds the `CopyProxy:groupDrops(data)` drop dictionary (`CopyProxy.lua:995-1008`):
+/// `{ copper = <int>, soul = <int>, item = { ["<item_tid>"] = <num>, ... } }`.
+pub fn build_copy_drop_dto(drops: &[RewardEntry]) -> DtoValue {
+    let mut copper: i64 = 0;
+    let mut soul: u64 = 0;
+    let mut item_map: BTreeMap<String, DtoValue> = BTreeMap::new();
+    for entry in drops {
+        match *entry {
+            RewardEntry::Copper(c) => copper = copper.saturating_add(c),
+            RewardEntry::HeroSoul(s) => soul = soul.saturating_add(s),
+            RewardEntry::Item { tid, qty } => {
+                let prev = item_map
+                    .get(&tid.to_string())
+                    .and_then(DtoValue::as_u64)
+                    .unwrap_or(0);
+                item_map.insert(tid.to_string(), DtoValue::from(prev + u64::from(qty)));
+            }
+            _ => {}
+        }
+    }
+    DtoValue::map([
+        ("copper", DtoValue::from(copper)),
+        ("soul", DtoValue::from(soul)),
+        ("item", DtoValue::Map(item_map)),
+    ])
+}
+
 /// Builds the crash-proof `copy.attack` / `serverData` DTO verified from `FightProxy:parseBattleInfo`
 /// and `FightOperateLogic:startFight` (`brid`, `drop`, `battleInfo`, `userInfo`).
 #[allow(clippy::too_many_arguments)]
@@ -231,13 +258,7 @@ pub fn build_attack_server_dto(
         ("skillRate", DtoValue::Map(BTreeMap::new())),
     ]);
 
-    let drop_dto = DtoValue::Array(
-        drops
-            .iter()
-            .copied()
-            .map(RewardEntry::to_triplet_dto)
-            .collect(),
-    );
+    let drop_dto = build_copy_drop_dto(drops);
 
     DtoValue::map([
         ("brid", DtoValue::from(brid)),
@@ -566,20 +587,14 @@ impl CopyCampaignEngine {
         let mut copy_data = BTreeMap::new();
         for (&chap_id, chap) in chapters.iter() {
             let total_star: u32 = chap.stages.values().map(|s| s.stars).sum();
-            let max_passed = chap
-                .stages
-                .iter()
-                .filter(|(_, s)| s.stars > 0)
-                .map(|(&cid, _)| cid)
-                .max()
-                .unwrap_or(0);
+            let passed_count = chap.stages.values().filter(|s| s.stars > 0).count() as u32;
             let box_num = chap.stages.values().filter(|s| s.box_claimed).count() as u32;
             copy_data.insert(
                 chap_id.to_string(),
                 DtoValue::map([
                     ("star", DtoValue::from(total_star)),
                     ("prize", DtoValue::from(chap.prize_mask)),
-                    ("pass_strongh", DtoValue::from(max_passed)),
+                    ("pass_strongh", DtoValue::from(passed_count)),
                     ("box_reward_num", DtoValue::from(box_num)),
                 ]),
             );
@@ -629,18 +644,20 @@ impl CopyCampaignEngine {
         copy_id: u32,
         is_tutorial_before_login: bool,
     ) -> Result<DtoValue, &'static str> {
+        if chapter_id < 1000 || copy_id < 100_000 || copy_id / 100 != chapter_id {
+            return Err("invalid_copy_stage");
+        }
         if !is_tutorial_before_login {
             if player.execution < Self::EXEC_COST_PER_STAGE {
                 return Err("not_enough_execution");
             }
-            let chapters = self.ensure_player_chapters(player.uid, 1);
-            let rec = chapters
-                .entry(chapter_id)
-                .or_default()
-                .stages
-                .entry(copy_id)
-                .or_default();
-            if rec.attacks_today >= Self::MAX_DAILY_ATTACKS {
+            let attacks_today = self
+                .progress
+                .get(&(player.uid, 1))
+                .and_then(|chaps| chaps.get(&chapter_id))
+                .and_then(|chap| chap.stages.get(&copy_id))
+                .map_or(0, |rec| rec.attacks_today);
+            if attacks_today >= Self::MAX_DAILY_ATTACKS {
                 return Err("attack_limit_reached");
             }
         }
@@ -661,6 +678,7 @@ impl CopyCampaignEngine {
 
         let drops = vec![
             RewardEntry::Copper(1_500 + i64::from(stage_idx) * 250),
+            RewardEntry::HeroSoul(50 + u64::from(stage_idx) * 10),
             RewardEntry::Item { tid: 17002, qty: 1 },
         ];
 
@@ -682,7 +700,15 @@ impl CopyCampaignEngine {
         );
 
         let sim = simulate_battle(brid, false, &team1, &team2, u1, u2, &drops);
-        let attack_dto = sim.server_attack_dto.clone();
+        let mut attack_dto = sim.server_attack_dto.clone();
+        if let DtoValue::Map(ref mut m) = attack_dto {
+            m.insert("ret".to_owned(), DtoValue::from("ok"));
+            m.insert("appraisal".to_owned(), DtoValue::from(sim.appraisal));
+            m.insert(
+                "fightRet".to_owned(),
+                DtoValue::Bytes(sim.to_amf3_report_bytes()),
+            );
+        }
         self.battle_records.insert(brid, sim.clone());
         self.pending_battles.insert(
             player.uid,
@@ -721,7 +747,7 @@ impl CopyCampaignEngine {
                     ("battle_result", DtoValue::from(0u32)),
                     ("star", DtoValue::from(0u32)),
                     ("star_status", DtoValue::from(0u32)),
-                    ("drop", DtoValue::Array(Vec::new())),
+                    ("drop", build_copy_drop_dto(&[])),
                 ]),
                 Vec::new(),
             ));
@@ -768,19 +794,14 @@ impl CopyCampaignEngine {
             ),
         );
 
-        let drop_dto = DtoValue::Array(
-            pending
-                .drops
-                .iter()
-                .copied()
-                .map(RewardEntry::to_triplet_dto)
-                .collect(),
-        );
+        let drop_dto = build_copy_drop_dto(&pending.drops);
         let ret = DtoValue::map([
+            ("ret", DtoValue::from("ok")),
             ("battle_result", DtoValue::from(1u32)),
             ("brid", DtoValue::from(pending.brid)),
             ("star", DtoValue::from(new_stars)),
             ("star_status", DtoValue::from(0u32)),
+            ("exp", DtoValue::from(exp_gain)),
             ("drop", drop_dto),
             ("star_fragment", DtoValue::Map(BTreeMap::new())),
         ]);
@@ -834,16 +855,11 @@ impl CopyCampaignEngine {
         for _ in 0..n {
             let round_drop = [
                 RewardEntry::Copper(1_800),
+                RewardEntry::HeroSoul(50),
                 RewardEntry::Item { tid: 17002, qty: 1 },
             ];
             all_rewards.extend_from_slice(&round_drop);
-            sweep_rounds.push(DtoValue::Array(
-                round_drop
-                    .iter()
-                    .copied()
-                    .map(RewardEntry::to_triplet_dto)
-                    .collect(),
-            ));
+            sweep_rounds.push(build_copy_drop_dto(&round_drop));
         }
 
         let mut pushes = grant_rewards_to_player(player, &all_rewards, now_ts)?;
@@ -970,6 +986,91 @@ impl CopyCampaignEngine {
             now_ts,
         )?;
         Ok((DtoValue::from("ok"), pushes))
+    }
+
+    /// Exports durable per-player campaign progress for WAL + `PlayerProfile` snapshot persistence.
+    pub fn export_player_progress(&self, uid: u64) -> DtoValue {
+        let mut by_type = BTreeMap::new();
+        for (&(p_uid, copy_type), chapters) in &self.progress {
+            if p_uid != uid {
+                continue;
+            }
+            let mut chap_map = BTreeMap::new();
+            for (&chap_id, chap) in chapters {
+                let mut stages_map = BTreeMap::new();
+                for (&copy_id, rec) in &chap.stages {
+                    stages_map.insert(
+                        copy_id.to_string(),
+                        DtoValue::map([
+                            ("stars", DtoValue::from(rec.stars)),
+                            ("attacks_today", DtoValue::from(rec.attacks_today)),
+                            ("resets_today", DtoValue::from(rec.resets_today)),
+                            ("box_claimed", DtoValue::from(rec.box_claimed)),
+                        ]),
+                    );
+                }
+                if !stages_map.is_empty() || chap.prize_mask != 0 || chap_id != 1001 {
+                    chap_map.insert(
+                        chap_id.to_string(),
+                        DtoValue::map([
+                            ("prize_mask", DtoValue::from(chap.prize_mask)),
+                            ("stages", DtoValue::Map(stages_map)),
+                        ]),
+                    );
+                }
+            }
+            if !chap_map.is_empty() {
+                by_type.insert(copy_type.to_string(), DtoValue::Map(chap_map));
+            }
+        }
+        DtoValue::Map(by_type)
+    }
+
+    /// Hydrates durable per-player campaign progress from `PlayerProfile` on startup/login.
+    pub fn import_player_progress(&mut self, uid: u64, data: &DtoValue) {
+        let Some(by_type) = data.as_map() else {
+            return;
+        };
+        for (type_k, chaps_val) in by_type {
+            let Ok(copy_type) = type_k.parse::<u32>() else {
+                continue;
+            };
+            let Some(chaps_map) = chaps_val.as_map() else {
+                continue;
+            };
+            let dst_chaps = self.progress.entry((uid, copy_type)).or_default();
+            dst_chaps.entry(1001).or_default();
+            for (chap_k, chap_val) in chaps_map {
+                let Ok(chap_id) = chap_k.parse::<u32>() else {
+                    continue;
+                };
+                let dst_chap = dst_chaps.entry(chap_id).or_default();
+                if let Some(pm) = chap_val.get("prize_mask").and_then(DtoValue::as_u32) {
+                    dst_chap.prize_mask = pm;
+                }
+                if let Some(stages_map) = chap_val.get("stages").and_then(DtoValue::as_map) {
+                    for (stage_k, rec_val) in stages_map {
+                        let Ok(copy_id) = stage_k.parse::<u32>() else {
+                            continue;
+                        };
+                        let rec = dst_chap.stages.entry(copy_id).or_default();
+                        rec.stars = rec_val.get("stars").and_then(DtoValue::as_u32).unwrap_or(0);
+                        rec.attacks_today = rec_val
+                            .get("attacks_today")
+                            .and_then(DtoValue::as_u32)
+                            .unwrap_or(0);
+                        rec.resets_today = rec_val
+                            .get("resets_today")
+                            .and_then(DtoValue::as_u32)
+                            .unwrap_or(0);
+                        rec.box_claimed = rec_val
+                            .get("box_claimed")
+                            .and_then(DtoValue::as_bool)
+                            .unwrap_or(false);
+                    }
+                }
+            }
+        }
     }
 }
 

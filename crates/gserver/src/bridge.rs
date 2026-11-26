@@ -49,10 +49,7 @@ pub fn player_json_to_amf3(val: &PlayerJson) -> Value {
             if map.is_empty() {
                 Value::empty_array()
             } else {
-                Value::map(
-                    map.iter()
-                        .map(|(k, v)| (k.clone(), player_json_to_amf3(v))),
-                )
+                Value::map(map.iter().map(|(k, v)| (k.clone(), player_json_to_amf3(v))))
             }
         }
     }
@@ -410,4 +407,50 @@ pub fn sync_gameplay_back_to_profile(
     }
 
     profile.recalculate_fight_force();
+}
+
+/// Converts `DtoValue` into `gserver_player::JsonValue` for durable `PlayerProfile` storage.
+pub fn dto_to_player_json(val: &DtoValue) -> PlayerJson {
+    match val {
+        DtoValue::Null => PlayerJson::Null,
+        DtoValue::Bool(b) => PlayerJson::Bool(*b),
+        DtoValue::Int(i) => {
+            if *i >= 0 {
+                PlayerJson::UInt(*i as u64)
+            } else {
+                PlayerJson::Int(*i)
+            }
+        }
+        DtoValue::Float(f) => PlayerJson::Float(*f),
+        DtoValue::Str(s) => PlayerJson::Str(s.clone()),
+        DtoValue::Bytes(b) => PlayerJson::Str(String::from_utf8_lossy(b).into_owned()),
+        DtoValue::Array(arr) => PlayerJson::Array(arr.iter().map(dto_to_player_json).collect()),
+        DtoValue::Map(map) => {
+            let mut m = BTreeMap::new();
+            for (k, v) in map {
+                m.insert(k.clone(), dto_to_player_json(v));
+            }
+            PlayerJson::Object(m)
+        }
+    }
+}
+
+/// Converts `gserver_player::JsonValue` back into `DtoValue` for `GameplayEngine` hydration.
+pub fn player_json_to_dto(val: &PlayerJson) -> DtoValue {
+    match val {
+        PlayerJson::Null => DtoValue::Null,
+        PlayerJson::Bool(b) => DtoValue::Bool(*b),
+        PlayerJson::Int(i) => DtoValue::Int(*i),
+        PlayerJson::UInt(u) => DtoValue::Int((*u).min(i64::MAX as u64) as i64),
+        PlayerJson::Float(f) => DtoValue::Float(*f),
+        PlayerJson::Str(s) => DtoValue::Str(s.clone()),
+        PlayerJson::Array(arr) => DtoValue::Array(arr.iter().map(player_json_to_dto).collect()),
+        PlayerJson::Object(map) => {
+            let mut m = BTreeMap::new();
+            for (k, v) in map {
+                m.insert(k.clone(), player_json_to_dto(v));
+            }
+            DtoValue::Map(m)
+        }
+    }
 }

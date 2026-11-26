@@ -683,6 +683,9 @@ pub struct PlayerProfile {
     pub ban_chat_time: u64,
     pub server_open_time: String,
     pub va_config: BTreeMap<String, JsonValue>,
+    pub copy_progress: BTreeMap<String, JsonValue>,
+    pub act_star_claimed: Vec<u32>,
+    pub act_star_sign_claimed: Vec<u32>,
     pub heroes: BTreeMap<u64, HeroInstance>,
     pub formation: FormationState,
     pub inventory: InventoryState,
@@ -791,6 +794,9 @@ impl PlayerProfile {
             ban_chat_time: 0,
             server_open_time: starter.server_open_time.clone(),
             va_config: BTreeMap::new(),
+            copy_progress: BTreeMap::new(),
+            act_star_claimed: Vec::new(),
+            act_star_sign_claimed: Vec::new(),
             heroes,
             formation: FormationState::with_protagonist(protagonist_hid),
             inventory: InventoryState::new(),
@@ -1252,6 +1258,34 @@ impl PlayerProfile {
             "va_config".into(),
             JsonValue::Object(self.va_config.clone()),
         );
+        if !self.copy_progress.is_empty() {
+            m.insert(
+                "copy_progress".into(),
+                JsonValue::Object(self.copy_progress.clone()),
+            );
+        }
+        if !self.act_star_claimed.is_empty() {
+            m.insert(
+                "act_star_claimed".into(),
+                JsonValue::Array(
+                    self.act_star_claimed
+                        .iter()
+                        .map(|&id| JsonValue::from(id))
+                        .collect(),
+                ),
+            );
+        }
+        if !self.act_star_sign_claimed.is_empty() {
+            m.insert(
+                "act_star_sign_claimed".into(),
+                JsonValue::Array(
+                    self.act_star_sign_claimed
+                        .iter()
+                        .map(|&lv| JsonValue::from(lv))
+                        .collect(),
+                ),
+            );
+        }
 
         let mut heroes_obj = BTreeMap::new();
         for (hid, h) in &self.heroes {
@@ -1340,6 +1374,29 @@ impl PlayerProfile {
 
         let formation = FormationState::from_storage_json(r.req_val("formation")?)?;
         let inventory = InventoryState::from_storage_json(r.req_val("inventory")?)?;
+        let copy_progress = r.opt_obj("copy_progress")?.cloned().unwrap_or_default();
+        let mut act_star_claimed = Vec::new();
+        if let Some(arr) = r.opt_arr("act_star_claimed")? {
+            for v in arr {
+                if let Some(id) = v.as_u64().and_then(|n| u32::try_from(n).ok()) {
+                    if !act_star_claimed.contains(&id) {
+                        act_star_claimed.push(id);
+                    }
+                }
+            }
+        }
+        act_star_claimed.sort_unstable();
+        let mut act_star_sign_claimed = Vec::new();
+        if let Some(arr) = r.opt_arr("act_star_sign_claimed")? {
+            for v in arr {
+                if let Some(lv) = v.as_u64().and_then(|n| u32::try_from(n).ok()) {
+                    if !act_star_sign_claimed.contains(&lv) {
+                        act_star_sign_claimed.push(lv);
+                    }
+                }
+            }
+        }
+        act_star_sign_claimed.sort_unstable();
 
         Ok(Self {
             uid: r.req_u64("uid")?,
@@ -1389,6 +1446,9 @@ impl PlayerProfile {
                 .opt_str("server_open_time")?
                 .unwrap_or_else(|| "20261124090000".into()),
             va_config: r.opt_obj("va_config")?.cloned().unwrap_or_default(),
+            copy_progress,
+            act_star_claimed,
+            act_star_sign_claimed,
             heroes,
             formation,
             inventory,

@@ -304,20 +304,32 @@ mod tests {
     fn test_13_gm_command_parser_all_variants() {
         assert_eq!(parse_gm_command("/help"), Ok(GmCommand::Help));
         assert_eq!(parse_gm_command("/gold 5000"), Ok(GmCommand::Gold(5000)));
-        assert_eq!(parse_gm_command("/silver 100000"), Ok(GmCommand::Silver(100000)));
+        assert_eq!(
+            parse_gm_command("/silver 100000"),
+            Ok(GmCommand::Silver(100000))
+        );
         assert_eq!(parse_gm_command("/vip 12"), Ok(GmCommand::Vip(12)));
         assert_eq!(parse_gm_command("/level 85"), Ok(GmCommand::Level(85)));
         assert_eq!(
             parse_gm_command("/item 16012 20"),
-            Ok(GmCommand::Item { tid: 16012, qty: 20 })
+            Ok(GmCommand::Item {
+                tid: 16012,
+                qty: 20
+            })
         );
-        assert_eq!(parse_gm_command("/hero 20008"), Ok(GmCommand::Hero { htid: 20008 }));
+        assert_eq!(
+            parse_gm_command("/hero 20008"),
+            Ok(GmCommand::Hero { htid: 20008 })
+        );
         assert_eq!(
             parse_gm_command("/mail 17002 5"),
             Ok(GmCommand::Mail { tid: 17002, qty: 5 })
         );
         assert_eq!(parse_gm_command("/heal"), Ok(GmCommand::Heal));
-        assert_eq!(parse_gm_command("hello world"), Err(GmParseError::NotAGmCommand));
+        assert_eq!(
+            parse_gm_command("hello world"),
+            Err(GmParseError::NotAGmCommand)
+        );
         assert!(matches!(
             parse_gm_command("/unknown"),
             Err(GmParseError::UnknownCommand(_))
@@ -1066,7 +1078,10 @@ mod tests {
         // Treated as ordinary chat message, gold untouched!
         assert_eq!(eng.players[&1002].gold, gold_before);
         assert_eq!(
-            out.response.ret.get("error_code").and_then(DtoValue::as_i64),
+            out.response
+                .ret
+                .get("error_code")
+                .and_then(DtoValue::as_i64),
             Some(ChatErrorCode::Succ as i64)
         );
     }
@@ -1299,6 +1314,125 @@ mod tests {
                 .iter()
                 .any(|entry| entry.get("skillId").and_then(DtoValue::as_u32) == Some(20101)),
             "rageQueue must contain Triệu Vân's authentic angry_atk 20101: {rage_q:?}"
+        );
+    }
+
+    // 32. `copy.attack` skill IDs, `CopyProxy:groupDrops` drop schema, `pass_strongh` count & progress export/import
+    #[test]
+    fn test_32_copy_attack_skills_group_drops_and_progress_export_import() {
+        let mut eng = make_engine_with_two_players();
+
+        // Invalid stage rejected
+        let bad = eng.dispatch(
+            1001,
+            &RpcRequest::new(
+                rpc::COPY_ATTACK,
+                vec![DtoValue::from(0), DtoValue::from(0)],
+                1,
+            ),
+            NOW,
+        );
+        assert_eq!(bad.response.err, "invalid_copy_stage");
+
+        let atk = eng.dispatch(
+            1001,
+            &RpcRequest::new(
+                rpc::COPY_ATTACK,
+                vec![DtoValue::from(1001u32), DtoValue::from(100_101u32)],
+                2,
+            ),
+            NOW,
+        );
+        assert_eq!(atk.response.err, "ok");
+        assert_eq!(
+            atk.response.ret.get("appraisal").and_then(DtoValue::as_i64),
+            Some(50)
+        );
+        assert!(atk
+            .response
+            .ret
+            .get("fightRet")
+            .and_then(DtoValue::as_bytes)
+            .is_some());
+        let drop = atk.response.ret.get("drop").unwrap();
+        assert_eq!(drop.get("copper").and_then(DtoValue::as_i64), Some(1750));
+        assert_eq!(
+            drop.get("item")
+                .and_then(|m| m.get("17002"))
+                .and_then(DtoValue::as_i64),
+            Some(1)
+        );
+        let unit = atk
+            .response
+            .ret
+            .get("battleInfo")
+            .and_then(|b| b.get("arrTeam1"))
+            .and_then(|t| t.get("1"))
+            .and_then(|t| t.get("arrHero"))
+            .and_then(|h| h.get("1"))
+            .unwrap();
+        let unit_htid = unit.get("htid").and_then(DtoValue::as_i64).unwrap() as u32;
+        let resolved = gserver_data::resolve_hero_battle_skills(unit_htid);
+        assert!(!resolved.used_normal_fallback && !resolved.used_rage_fallback);
+        let skills = unit.get("arrSkill").and_then(DtoValue::as_array).unwrap();
+        assert_eq!(
+            skills[0].as_array().unwrap()[0].as_i64(),
+            Some(resolved.normal_skill_id as i64)
+        );
+        assert_eq!(
+            skills[1].as_array().unwrap()[0].as_i64(),
+            Some(resolved.rage_skill_id as i64)
+        );
+
+        // Before `copy.pass`, `pass_strongh` is 0
+        let l0 = eng.dispatch(
+            1001,
+            &RpcRequest::new(rpc::COPY_GET_LIST, vec![DtoValue::from(1)], 3),
+            NOW,
+        );
+        assert_eq!(
+            l0.response
+                .ret
+                .get("copyData")
+                .and_then(|c| c.get("1001"))
+                .and_then(|c| c.get("pass_strongh"))
+                .and_then(DtoValue::as_i64),
+            Some(0)
+        );
+
+        let pass = eng.dispatch(
+            1001,
+            &RpcRequest::new(
+                rpc::COPY_PASS,
+                vec![
+                    DtoValue::from(1001u32),
+                    DtoValue::from(100_101u32),
+                    DtoValue::Array(vec![]),
+                ],
+                4,
+            ),
+            NOW,
+        );
+        assert_eq!(pass.response.err, "ok");
+
+        let exported = eng.copy.export_player_progress(1001);
+        let mut eng2 = make_engine_with_two_players();
+        eng2.copy.import_player_progress(1001, &exported);
+        let l1 = eng2.dispatch(
+            1001,
+            &RpcRequest::new(rpc::COPY_GET_LIST, vec![DtoValue::from(1)], 5),
+            NOW,
+        );
+        let c1001 = l1
+            .response
+            .ret
+            .get("copyData")
+            .and_then(|c| c.get("1001"))
+            .unwrap();
+        assert_eq!(c1001.get("star").and_then(DtoValue::as_i64), Some(3));
+        assert_eq!(
+            c1001.get("pass_strongh").and_then(DtoValue::as_i64),
+            Some(1)
         );
     }
 }

@@ -1359,3 +1359,47 @@ fn test_35_player_hero_instance_authentic_battle_skill_resolution() {
         (5210102, 5210101)
     );
 }
+
+#[test]
+fn test_36_copy_progress_and_act_star_claimed_wal_and_json_roundtrip() {
+    let dir = TempTestDir::new("copy_actstar_wal");
+    let data_dir = dir.path.join("data");
+    let mut store = PlayerStore::open(&data_dir, StarterPackConfig::default()).unwrap();
+    store
+        .register_account("pid_star", "qid_star", "star_user", "tok", 1_700_000_000)
+        .unwrap();
+    let p = store
+        .create_character("pid_star", "2900161", 1, "ĐiêuThuyềnA6", 1_700_000_005)
+        .unwrap();
+
+    store
+        .mutate_player(p.uid, 1_700_000_050, |pl| {
+            pl.act_star_claimed = vec![1, 3];
+            pl.act_star_sign_claimed = vec![15, 25];
+            let mut chap_map = BTreeMap::new();
+            chap_map.insert("prize_mask".to_string(), JsonValue::from(1u64));
+            pl.copy_progress
+                .insert("1".to_string(), JsonValue::Object(chap_map));
+            Ok(())
+        })
+        .unwrap();
+
+    // Ensure internal fields do not pollute user-facing `va_config`
+    let in_mem = store.get_player(p.uid).unwrap();
+    assert!(!in_mem.va_config.contains_key("copy_progress"));
+    assert!(!in_mem.va_config.contains_key("act_star_claimed"));
+
+    drop(store);
+    let reopened = PlayerStore::open(&data_dir, StarterPackConfig::default()).unwrap();
+    let restored = reopened.get_player(p.uid).unwrap();
+    assert_eq!(restored.act_star_claimed, vec![1, 3]);
+    assert_eq!(restored.act_star_sign_claimed, vec![15, 25]);
+    assert_eq!(
+        restored
+            .copy_progress
+            .get("1")
+            .and_then(|v| v.get("prize_mask"))
+            .and_then(JsonValue::as_u64),
+        Some(1)
+    );
+}

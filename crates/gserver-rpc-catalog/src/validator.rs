@@ -355,6 +355,145 @@ pub fn validate_response_for_method(
                 ));
             }
         }
+        net_const::CS_COPY_ATTACK => {
+            if ret.get_field("brid").and_then(Amf3Value::as_i64).unwrap_or(0) <= 0 {
+                errs.push(LuaSchemaViolation::new(
+                    method,
+                    "ret.brid",
+                    "FightProxy:parseBattleInfo requires positive integer `brid`",
+                ));
+            }
+            match ret.get_field("drop") {
+                Some(d) if d.is_lua_table() => {
+                    if d.get_field("copper").and_then(Amf3Value::as_i64).is_none() {
+                        errs.push(LuaSchemaViolation::new(
+                            method,
+                            "ret.drop.copper",
+                            "CopyProxy:groupDrops reads numeric `data.copper`",
+                        ));
+                    }
+                    if !d.get_field("item").map(Amf3Value::is_lua_table).unwrap_or(false) {
+                        errs.push(LuaSchemaViolation::new(
+                            method,
+                            "ret.drop.item",
+                            "CopyProxy:groupDrops iterates `pairs(data.item)`",
+                        ));
+                    }
+                }
+                _ => errs.push(LuaSchemaViolation::new(
+                    method,
+                    "ret.drop",
+                    "CopyFightProxy:getAttackDataFromServer stores `ret['drop']` table",
+                )),
+            }
+            match ret
+                .get_field("battleInfo")
+                .and_then(|bi| bi.get_field("arrTeam1"))
+                .and_then(|t1| t1.get_field("1"))
+                .and_then(|w1| w1.get_field("arrHero"))
+                .and_then(Amf3Value::as_map)
+            {
+                Some(heroes) if !heroes.is_empty() => {
+                    for (slot_k, unit) in heroes {
+                        match unit.get_field("arrSkill").and_then(Amf3Value::as_array) {
+                            Some(skills)
+                                if skills.len() >= 2
+                                    && skills.iter().all(|sk| {
+                                        sk.as_array()
+                                            .and_then(|pair| pair.first())
+                                            .and_then(Amf3Value::as_i64)
+                                            .is_some_and(|sid| sid > 0)
+                                    }) => {}
+                            _ => errs.push(LuaSchemaViolation::new(
+                                method,
+                                format!("ret.battleInfo.arrTeam1['1'].arrHero['{}'].arrSkill", slot_k),
+                                "SkillFactory:creatSkill requires positive normal & rage skill IDs",
+                            )),
+                        }
+                    }
+                }
+                _ => errs.push(LuaSchemaViolation::new(
+                    method,
+                    "ret.battleInfo.arrTeam1['1'].arrHero",
+                    "FightProxy:parseBattleInfo requires non-empty `arrTeam1['1'].arrHero` map",
+                )),
+            }
+            match ret.get_field("userInfo").and_then(Amf3Value::as_array) {
+                Some(u) if u.len() >= 2 => {}
+                _ => errs.push(LuaSchemaViolation::new(
+                    method,
+                    "ret.userInfo",
+                    "FightProxy:parseBattleInfo requires 2-element `userInfo` array",
+                )),
+            }
+        }
+        net_const::CS_COPY_PASS => {
+            if ret.get_field("battle_result").and_then(Amf3Value::as_i64).is_none() {
+                errs.push(LuaSchemaViolation::new(
+                    method,
+                    "ret.battle_result",
+                    "CopyProxy:fightEnd checks `tonumber(ret.battle_result)`",
+                ));
+            }
+            if !ret.get_field("drop").map(Amf3Value::is_lua_table).unwrap_or(false) {
+                errs.push(LuaSchemaViolation::new(
+                    method,
+                    "ret.drop",
+                    "CopyProxy:fightEnd passes `ret['drop']` to `groupDrops`",
+                ));
+            }
+        }
+        net_const::CS_ACTIVITY_STAR_CODE_OPEN_GETINFO => {
+            if !ret.is_lua_table() {
+                errs.push(LuaSchemaViolation::new(
+                    method,
+                    "ret",
+                    "ActStarCodeData:parseData indexes `net_info[tostring(i)] == true`",
+                ));
+            } else if let Some(map) = ret.as_map() {
+                for (k, v) in map {
+                    if v.as_bool().is_none() {
+                        errs.push(LuaSchemaViolation::new(
+                            method,
+                            format!("ret['{}']", k),
+                            "ActStarCodeData:parseData checks `net_info[tostring(i)] == true`",
+                        ));
+                    }
+                }
+            }
+        }
+        net_const::CS_ACTIVITY_STAR_CODE_OPEN_RECEIVE => {
+            match ret.get_field("reward").and_then(Amf3Value::as_array) {
+                Some(arr) if !arr.is_empty() => {
+                    for (idx, item) in arr.iter().enumerate() {
+                        match item.as_array() {
+                            Some(tr) if tr.len() == 3 => {
+                                let ptype = tr[0].as_i64().unwrap_or(0);
+                                let tid = tr[1].as_i64().unwrap_or(0);
+                                let qty = tr[2].as_i64().unwrap_or(0);
+                                if ptype <= 0 || qty <= 0 || (ptype == 4 && tid <= 0) {
+                                    errs.push(LuaSchemaViolation::new(
+                                        method,
+                                        format!("ret.reward[{}]", idx + 1),
+                                        "GainItemListInfoPanel requires valid `[priceType, id, num]` triplet (`id > 0` when `type == 4`)",
+                                    ));
+                                }
+                            }
+                            _ => errs.push(LuaSchemaViolation::new(
+                                method,
+                                format!("ret.reward[{}]", idx + 1),
+                                "RewardManager:addRewardsByFixTb expects 3-element `[type, id, num]` array",
+                            )),
+                        }
+                    }
+                }
+                _ => errs.push(LuaSchemaViolation::new(
+                    method,
+                    "ret.reward",
+                    "ActStar gift claim must return non-empty `reward` triplet array",
+                )),
+            }
+        }
         _ => {}
     }
 
