@@ -573,7 +573,7 @@ fn split_exp_into_pills(mut exp: u64) -> BTreeMap<u32, u32> {
 
 impl PlayerProfile {
     #[inline]
-    fn bump_revision(&mut self) {
+    pub(crate) fn bump_revision(&mut self) {
         self.revision = self.revision.saturating_add(1);
     }
 
@@ -648,6 +648,17 @@ impl PlayerProfile {
         }
         let next = available - amount;
         self.currencies.insert(currency, next);
+        if currency == CurrencyType::Gold && amount > 0 {
+            let prev_spent = self
+                .event_state
+                .get("consume_gold_total")
+                .and_then(JsonValue::as_u64)
+                .unwrap_or(0);
+            self.event_state.insert(
+                "consume_gold_total".into(),
+                JsonValue::from(prev_spent.saturating_add(amount)),
+            );
+        }
         match currency {
             CurrencyType::Prestige => {
                 self.currencies.insert(CurrencyType::ArenaCoin, next);

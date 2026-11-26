@@ -264,6 +264,8 @@ pub fn profile_to_gameplay_state_with_store(
     gp.exp = profile.exp;
     gp.vip = profile.vip;
     gp.vip_exp = profile.vip_exp;
+    gp.is_recharge = profile.is_recharge;
+    gp.gold_recharge_accum_all = profile.gold_recharge_accum_all;
 
     // Core & Extended `PriceTypeConst` Currencies
     gp.gold = profile.currency(CurrencyType::Gold).min(i64::MAX as u64) as i64;
@@ -433,6 +435,13 @@ pub fn sync_gameplay_back_to_profile(
     }
     profile.level = gp.level.max(1);
     profile.exp = gp.exp;
+    if gp.gold_recharge_accum_all > profile.gold_recharge_accum_all {
+        let delta_nb = gp.gold_recharge_accum_all - profile.gold_recharge_accum_all;
+        profile.record_recharge_nb(delta_nb, now_ts);
+    }
+    if gp.is_recharge > 0 {
+        profile.is_recharge = 1;
+    }
     profile.vip = gp.vip;
     profile.vip_exp = gp.vip_exp;
 

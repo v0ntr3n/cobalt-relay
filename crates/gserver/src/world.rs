@@ -573,8 +573,9 @@ impl ServerWorld {
                 let unlocked = Value::dense_array(
                     [
                         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 18, 20, 24, 25, 30, 31,
-                        32, 35, 36, 44, 48, 49, 51, 56, 57, 58, 62, 67, 129, 163, 168, 186, 200,
-                        203, 220, 237, 239, 242, 244, 246,
+                        32, 35, 36, 44, 48, 49, 51, 56, 57, 58, 62, 67, 122, 129, 163, 168, 186,
+                        200, 203, 209, 220, 221, 237, 239, 242, 244, 246, 247, 249, 250, 251, 252,
+                        253, 254, 256, 262,
                     ]
                     .into_iter()
                     .map(Value::Int)
@@ -762,10 +763,7 @@ impl ServerWorld {
                 Self::ok_reply(req, session, ret_val, now_i64)
             }
 
-            "allActivity.getActivityInfo" => {
-                let ret_val = Value::map([("activity_groupon", Value::empty_array())]);
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
+
 
             "opencarnival.getOpenAchieve"
             | "lordwar.getTempleInfo"
@@ -862,19 +860,7 @@ impl ServerWorld {
                 Self::ok_reply(req, session, ret_val, now_i64)
             }
 
-            "dailyDiscount.getInfo" => {
-                let ret_val = Value::map([
-                    ("productBuy", Value::empty_array()),
-                    ("canRecDayPreBuy", Value::empty_array()),
-                    ("redeem", Value::empty_array()),
-                    ("canDayPreBuy", Value::Bool(false)),
-                    ("dayRecNum", Value::Int(0)),
-                    ("dayPreBuyTomorrow", Value::Bool(false)),
-                    ("rechargeSum", Value::Int(0)),
-                    ("rechargePointRec", Value::empty_array()),
-                ]);
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
+
 
             "generalBook.getInfo" => {
                 let book_entry = || {
@@ -904,17 +890,7 @@ impl ServerWorld {
                 Self::ok_reply(req, session, ret_val, now_i64)
             }
 
-            "growth.getInfo" => {
-                let ret_val = Value::map([
-                    ("userNum", Value::Int(0)),
-                    ("is_buy", Value::Int(0)),
-                    ("va_gold", Value::empty_array()),
-                    ("va_benefit", Value::empty_array()),
-                ]);
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
 
-            "growth.getNum" => Self::ok_reply(req, session, Value::Int(0), now_i64),
 
             "envelopRain.getInfo" => Self::ok_reply(req, session, Value::Bool(false), now_i64),
 
@@ -931,7 +907,7 @@ impl ServerWorld {
 
 
 
-            "firstGift.getRechargeGold" => Self::ok_reply(req, session, Value::Int(0), now_i64),
+
 
             "dressBrightBook.getInfo" => {
                 let ret_val = Value::map([
@@ -944,10 +920,7 @@ impl ServerWorld {
                 Self::ok_reply(req, session, ret_val, now_i64)
             }
 
-            "activityDailyRecharge2.getInfo" => {
-                let ret_val = Value::map([("buyInfo", Value::empty_array())]);
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
+
 
             "top.get" => {
                 let tab = req
@@ -1150,7 +1123,37 @@ fn assemble_ordered_caller_envelopes(
     for p in pushes {
         if matches!(
             p.callback_name.as_deref(),
-            Some("user.updateUser" | "tmUser.updateUser")
+            Some(
+                "user.updateUser"
+                    | "tmUser.updateUser"
+                    | "dailyDiscount.normalUpdate"
+                    | "tmDailyDiscount.normalUpdate"
+                    | "dailyDiscount.preBuyUpdate"
+                    | "tmDailyDiscount.preBuyUpdate"
+                    | "activityDailyRecharge2.update"
+                    | "tmActivityDailyRecharge2.update"
+                    | "activityQuarter.update"
+                    | "tmActivityQuarter.update"
+                    | "re.monthCard.updateCardInfo"
+                    | "tmRe.monthCard.updateCardInfo"
+                    | "activityWeekly.update"
+                    | "tmActivityWeekly.update"
+                    | "activityMonthly.update"
+                    | "tmActivityMonthly.update"
+                    | "activityBeauty.update"
+                    | "tmActivityBeauty.update"
+                    | "activityActiveTaskShop.pushNormalPay"
+                    | "tmActivityActiveTaskShop.pushNormalPay"
+                    | "activity8Years.pushNormalPay"
+                    | "tmActivity8Years.pushNormalPay"
+                    | "activityBattlePass.pushNormalPay"
+                    | "multipleFunds.buy"
+                    | "tmMultipleFunds.buy"
+                    | "voucher.recharge"
+                    | "re.crossGuildWar.buyUpdate"
+                    | "re.tmCrossGuildWar.buyUpdate"
+                    | "timeMachine.pushNormalPay"
+            )
         ) {
             post_pushes.push(p);
         } else {

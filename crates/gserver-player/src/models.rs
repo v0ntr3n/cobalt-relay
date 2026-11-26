@@ -765,6 +765,25 @@ impl HeroInstance {
     }
 }
 
+/// Exact `vip.db` (`1000..=1016`) cumulative NB (`vip_exp`) thresholds for VIP `0..=16`.
+pub const VIP_RECHARGE_REQUIRE: [u64; 17] = [
+    0, 60, 300, 1_000, 3_000, 5_000, 10_000, 20_000, 40_000, 60_000, 100_000, 150_000, 200_000,
+    300_000, 500_000, 700_000, 1_000_000,
+];
+
+/// Computes VIP level `0..=16` from cumulative `vip_exp` per `vip.db`.
+pub fn vip_level_from_exp(vip_exp: u64) -> u32 {
+    let mut lv = 0u32;
+    for (idx, &req) in VIP_RECHARGE_REQUIRE.iter().enumerate() {
+        if vip_exp >= req {
+            lv = idx as u32;
+        } else {
+            break;
+        }
+    }
+    lv
+}
+
 /// Complete persistent player state (`UserData.lua` + `HerosData.lua` + `HeroFormationData.lua` + `BagData.lua` + `ConfigData.lua`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlayerProfile {
@@ -816,6 +835,8 @@ pub struct PlayerProfile {
     pub copy_progress: BTreeMap<String, JsonValue>,
     /// Persistent `PlayerRaffleState` / OpenBox counters JSON map preserved across cold restarts.
     pub raffle_state: BTreeMap<String, JsonValue>,
+    pub va_recharge: BTreeMap<String, JsonValue>,
+    pub event_state: BTreeMap<String, JsonValue>,
     pub act_star_claimed: Vec<u32>,
     pub act_star_sign_claimed: Vec<u32>,
     pub heroes: BTreeMap<u64, HeroInstance>,
@@ -930,6 +951,8 @@ impl PlayerProfile {
             va_config: BTreeMap::new(),
             copy_progress: BTreeMap::new(),
             raffle_state: BTreeMap::new(),
+            va_recharge: BTreeMap::new(),
+            event_state: BTreeMap::new(),
             act_star_claimed: Vec::new(),
             act_star_sign_claimed: Vec::new(),
             heroes,
@@ -1134,6 +1157,118 @@ impl PlayerProfile {
         m.insert("stamina_time".into(), JsonValue::from(self.energy_time));
     }
 
+    /// Builds canonical `va_recharge` wire table (`{ first_recharge: {...}, recommend_recharge: {...} }`).
+    pub fn build_va_recharge_json(&self) -> JsonValue {
+        let mut out = self.va_recharge.clone();
+        if !matches!(out.get("first_recharge"), Some(JsonValue::Object(_))) {
+            out.insert("first_recharge".into(), JsonValue::empty_object());
+        }
+        if !matches!(out.get("recommend_recharge"), Some(JsonValue::Object(_))) {
+            out.insert("recommend_recharge".into(), JsonValue::empty_object());
+        }
+        JsonValue::Object(out)
+    }
+
+    /// Records a real-money/GM recharge of `nb_equiv` NB (`vip_exp`), advancing `gold_recharge_accum_all`,
+    /// `vip_exp`, `vip` (`0..=16`), `is_recharge = 1`, daily luxury sign-in (`va_recharge_sign` `"8"`, `"40"`, `"100"`),
+    /// and recharge event accumulators.
+    pub fn record_recharge_nb(&mut self, nb_equiv: u64, now_ts: u64) {
+        if nb_equiv == 0 {
+            return;
+        }
+        self.gold_recharge_accum_all = self.gold_recharge_accum_all.saturating_add(nb_equiv);
+        self.vip_exp = self.vip_exp.saturating_add(nb_equiv);
+        let computed_vip = vip_level_from_exp(self.vip_exp);
+        if computed_vip > self.vip {
+            self.vip = computed_vip;
+        }
+        self.is_recharge = 1;
+
+        // Unlock luxury sign-in tiers ("8", "40", "100" -> false when recharged, preserved as true if already claimed today)
+        let day_bucket = now_ts / 86_400;
+        let mut sign_map = self
+            .event_state
+            .get("sign")
+            .and_then(JsonValue::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let prev_bucket = sign_map
+            .get("recharge_day_bucket")
+            .and_then(JsonValue::as_u64)
+            .unwrap_or(u64::MAX);
+        let mut today_nb = if prev_bucket == day_bucket {
+            sign_map
+                .get("today_recharge_nb")
+                .and_then(JsonValue::as_u64)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let mut va_rs = if prev_bucket == day_bucket {
+            sign_map
+                .get("va_recharge_sign")
+                .and_then(JsonValue::as_object)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            BTreeMap::new()
+        };
+        today_nb = today_nb.saturating_add(nb_equiv);
+        for tier in [8u64, 40, 100] {
+            if today_nb >= tier {
+                let k = tier.to_string();
+                let already_claimed = va_rs.get(&k).and_then(JsonValue::as_bool) == Some(true);
+                if !already_claimed {
+                    va_rs.insert(k, JsonValue::Bool(false));
+                }
+            }
+        }
+        sign_map.insert("recharge_day_bucket".into(), JsonValue::from(day_bucket));
+        sign_map.insert("today_recharge_nb".into(), JsonValue::from(today_nb));
+        sign_map.insert("va_recharge_sign".into(), JsonValue::Object(va_rs));
+        self.event_state
+            .insert("sign".into(), JsonValue::Object(sign_map));
+
+        // Update cumulative & single recharge activity state (`RMB = nb / 10`, min 1)
+        let rmb_equiv = (nb_equiv / 10).max(1);
+        let prev_act_rech = self
+            .event_state
+            .get("act_recharge_rmb")
+            .and_then(JsonValue::as_u64)
+            .unwrap_or(0);
+        self.event_state.insert(
+            "act_recharge_rmb".into(),
+            JsonValue::from(prev_act_rech.saturating_add(rmb_equiv)),
+        );
+
+        let mut single_map = self
+            .event_state
+            .get("act_single_recharge")
+            .and_then(JsonValue::as_object)
+            .cloned()
+            .unwrap_or_default();
+        for &req_rmb in &[6u64, 30, 98, 198, 328, 648] {
+            if rmb_equiv >= req_rmb {
+                let k = req_rmb.to_string();
+                let mut entry = single_map
+                    .get(&k)
+                    .and_then(JsonValue::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                let cur_max = entry.get("max_num").and_then(JsonValue::as_u64).unwrap_or(0);
+                let cur_now = entry.get("now_num").and_then(JsonValue::as_u64).unwrap_or(0);
+                entry.insert("max_num".into(), JsonValue::from((cur_max + 1).min(5)));
+                entry.insert("now_num".into(), JsonValue::from(cur_now));
+                single_map.insert(k, JsonValue::Object(entry));
+            }
+        }
+        self.event_state.insert(
+            "act_single_recharge".into(),
+            JsonValue::Object(single_map),
+        );
+        self.bump_revision();
+    }
+
     /// Exact `user.updateUser` / `tmUser.updateUser` S2C push payload (`UserData:onUpdateUser`),
     /// encoding `copper` and `fight_force_max` as numbers within Lua double precision.
     pub fn to_vnsg2_user_update(&self) -> JsonValue {
@@ -1143,6 +1278,12 @@ impl PlayerProfile {
         m.insert("exp".into(), JsonValue::from(self.exp));
         m.insert("vip".into(), JsonValue::from(self.vip));
         m.insert("vip_exp".into(), JsonValue::from(self.vip_exp));
+        m.insert("is_recharge".into(), JsonValue::from(self.is_recharge));
+        m.insert(
+            "gold_recharge_accum_all".into(),
+            JsonValue::from(self.gold_recharge_accum_all),
+        );
+        m.insert("va_recharge".into(), self.build_va_recharge_json());
         self.insert_currency_wire_fields(&mut m);
         m.insert("execution_time".into(), JsonValue::from(self.execution_time));
         m.insert("energy_time".into(), JsonValue::from(self.energy_time));
@@ -1253,10 +1394,7 @@ impl PlayerProfile {
         );
 
         // Recharge & va_user nested tables
-        let mut va_recharge = BTreeMap::new();
-        va_recharge.insert("first_recharge".into(), JsonValue::empty_object());
-        va_recharge.insert("recommend_recharge".into(), JsonValue::empty_object());
-        m.insert("va_recharge".into(), JsonValue::Object(va_recharge));
+        m.insert("va_recharge".into(), self.build_va_recharge_json());
 
         let mut va_user = BTreeMap::new();
         va_user.insert("dress".into(), JsonValue::from(self.dress_id));
@@ -1332,6 +1470,10 @@ impl PlayerProfile {
             "unify_close",
             "first_ride_close",
             "soaring_copy_close",
+            "activity_weekly_close",
+            "activity_monthly_close",
+            "activity_beauty_close",
+            "active_task_shop_close",
         ] {
             m.insert(close_flag.into(), JsonValue::from(false));
         }
@@ -1540,6 +1682,18 @@ impl PlayerProfile {
             "raffle_state".into(),
             JsonValue::Object(self.raffle_state.clone()),
         );
+        if !self.va_recharge.is_empty() {
+            m.insert(
+                "va_recharge".into(),
+                JsonValue::Object(self.va_recharge.clone()),
+            );
+        }
+        if !self.event_state.is_empty() {
+            m.insert(
+                "event_state".into(),
+                JsonValue::Object(self.event_state.clone()),
+            );
+        }
         if !self.act_star_claimed.is_empty() {
             m.insert(
                 "act_star_claimed".into(),
@@ -1677,6 +1831,8 @@ impl PlayerProfile {
         let inventory = InventoryState::from_storage_json(r.req_val("inventory")?)?;
         let copy_progress = r.opt_obj("copy_progress")?.cloned().unwrap_or_default();
         let raffle_state = r.opt_obj("raffle_state")?.cloned().unwrap_or_default();
+        let va_recharge = r.opt_obj("va_recharge")?.cloned().unwrap_or_default();
+        let event_state = r.opt_obj("event_state")?.cloned().unwrap_or_default();
         let mut act_star_claimed = Vec::new();
         if let Some(arr) = r.opt_arr("act_star_claimed")? {
             for v in arr {
@@ -1750,6 +1906,8 @@ impl PlayerProfile {
             va_config: r.opt_obj("va_config")?.cloned().unwrap_or_default(),
             copy_progress,
             raffle_state,
+            va_recharge,
+            event_state,
             act_star_claimed,
             act_star_sign_claimed,
             heroes,

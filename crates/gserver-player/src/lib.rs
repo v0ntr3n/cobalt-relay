@@ -49,8 +49,9 @@ pub use formation::{
 };
 pub use json::{JsonObjReader, JsonValue};
 pub use models::{
-    to_vnsg2_other_position_info, Account, CurrencyType, EquippedItem, Gender, HeroInstance,
-    PlayerProfile, StarterHeroSeed, StarterItemSeed, StarterPackConfig, MAX_LUA_SAFE_INT,
+    to_vnsg2_other_position_info, vip_level_from_exp, Account, CurrencyType, EquippedItem, Gender,
+    HeroInstance, PlayerProfile, StarterHeroSeed, StarterItemSeed, StarterPackConfig,
+    MAX_LUA_SAFE_INT, VIP_RECHARGE_REQUIRE,
 };
 pub use mutations::{
     ArmReinforceOutcome, ArmReinforceStep, ArmUpgradeOutcome, AwakeUpgradeOutcome,

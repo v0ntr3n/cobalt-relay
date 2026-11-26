@@ -923,6 +923,8 @@ pub struct PlayerState {
     pub exp: u64,
     pub vip: u32,
     pub vip_exp: u64,
+    pub is_recharge: u8,
+    pub gold_recharge_accum_all: u64,
     pub gold: i64,
     pub gold_bind: i64,
     pub copper: i64,
@@ -1028,6 +1030,38 @@ pub struct PlayerState {
 impl PlayerState {
     pub const COPPER_CAP: i64 = 2_000_000_000;
 
+    /// Exact `vip.db` (`1000..=1016`) cumulative NB (`vip_exp`) thresholds for VIP `0..=16`.
+    pub const VIP_RECHARGE_REQUIRE: [u64; 17] = [
+        0, 60, 300, 1_000, 3_000, 5_000, 10_000, 20_000, 40_000, 60_000, 100_000, 150_000, 200_000,
+        300_000, 500_000, 700_000, 1_000_000,
+    ];
+
+    pub fn vip_level_from_exp(vip_exp: u64) -> u32 {
+        let mut lv = 0u32;
+        for (idx, &req) in Self::VIP_RECHARGE_REQUIRE.iter().enumerate() {
+            if vip_exp >= req {
+                lv = idx as u32;
+            } else {
+                break;
+            }
+        }
+        lv
+    }
+
+    pub fn record_recharge_nb(&mut self, nb: u64) {
+        if nb == 0 {
+            return;
+        }
+        self.gold = self.gold.saturating_add(nb as i64);
+        self.gold_recharge_accum_all = self.gold_recharge_accum_all.saturating_add(nb);
+        self.vip_exp = self.vip_exp.saturating_add(nb);
+        let computed = Self::vip_level_from_exp(self.vip_exp);
+        if computed > self.vip {
+            self.vip = computed;
+        }
+        self.is_recharge = 1;
+    }
+
     pub fn new(uid: u64, uname: impl Into<String>, utid: u32) -> Self {
         let level = 1;
         Self {
@@ -1039,6 +1073,8 @@ impl PlayerState {
             exp: 0,
             vip: 0,
             vip_exp: 0,
+            is_recharge: 0,
+            gold_recharge_accum_all: 0,
             gold: 500,
             gold_bind: 0,
             copper: 100_000,
@@ -1587,6 +1623,8 @@ impl PlayerState {
             ("exp", DtoValue::from(self.exp)),
             ("vip", DtoValue::from(self.vip)),
             ("vip_exp", DtoValue::from(self.vip_exp)),
+            ("is_recharge", DtoValue::from(u32::from(self.is_recharge))),
+            ("gold_recharge_accum_all", DtoValue::from(self.gold_recharge_accum_all)),
             ("gold", DtoValue::from(self.gold)),
             ("gold_bind", DtoValue::from(self.gold_bind)),
             ("copper", DtoValue::from(self.copper)),
