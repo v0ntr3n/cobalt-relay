@@ -599,7 +599,7 @@ fn test_19_md5_rfc1321_and_babeltime_salted_xor_vectors() {
         "c3fcd3d76192e4007dfb496cca67e13b"
     );
     assert_eq!(
-        md5_hex(&b"1234567890".repeat(8)),
+        md5_hex(b"1234567890".repeat(8)),
         "57edf4a22be3c955ac49da2e2107b67a"
     );
 
@@ -1289,7 +1289,7 @@ fn test_36_generic_framed_stream_decoder_and_define_error_macro() {
     let mut custom = FramedStreamDecoder::<RawTestFrame>::default().with_limits(64, 64);
     custom.feed(&[0, 0, 0, 3, b'x', b'y']);
     assert_eq!(custom.next_frame().unwrap(), None);
-    custom.feed(&[b'z']);
+    custom.feed(b"z");
     assert_eq!(custom.next_frame().unwrap(), Some(RawTestFrame(b"xyz".to_vec())));
     assert_eq!(custom.buffered_len(), 0);
 }

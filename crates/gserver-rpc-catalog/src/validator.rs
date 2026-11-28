@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_match)]
+
 //! Strict Lua `parseData` / callback response schema validators.
 //!
 //! Validates every bootstrap RPC response envelope and `ret` payload against the exact Lua runtime

@@ -32,8 +32,8 @@ pub use error::{
     Amf3Error, BtDecryptError, EnvelopeError, FrameError, ProtocolError, ZlibError,
 };
 pub use frame::{
-    C2sFrame, C2sFrameMode, C2sWireKind, ClientRxDecoder, FramedStreamDecoder, S2cFlags, S2cFrame,
-    ServerRxDecoder, ServerTxEncoder, WireFrame,
+    C2sFrame, C2sFrameMode, C2sParserState, C2sWireKind, ClientRxDecoder, FramedStreamDecoder,
+    S2cFlags, S2cFrame, ServerRxDecoder, ServerTxEncoder, WireFrame,
 };
 pub use rpc::{
     decode_s2c_frame_batch, encode_s2c_multi_batch_amf3, encode_s2c_multi_frame,

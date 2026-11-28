@@ -8,6 +8,9 @@ use crate::wire_helpers::{
     decode_u32_map_lossy, decode_u64_map, decode_u64_map_lossy, encode_map,
 };
 
+/// Maximum integer representable without precision loss in Lua 5.1 IEEE-754 `double` (`2^53 - 1`).
+pub const MAX_LUA_SAFE_INT: u64 = (1u64 << 53) - 1;
+
 /// Protagonist gender / template selector (`CreateUserScene.lua`: `utid = 1` Male, `utid = 2` Female).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gender {

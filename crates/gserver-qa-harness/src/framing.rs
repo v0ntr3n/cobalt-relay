@@ -149,6 +149,40 @@ pub struct DecodedClientPacket {
     pub value: Amf3Value,
 }
 
+/// Observable parser stage of [`ServerRxStreamDecoder`] for deterministic connection lifecycle diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecoderParserState {
+    Idle,
+    AwaitingLengthPrefix { buffered_bytes: usize },
+    AwaitingLcHeader { declared_body_len: u32, buffered_bytes: usize },
+    AwaitingFrameBody { declared_body_len: u32, buffered_body_bytes: usize },
+}
+
+impl fmt::Display for DecoderParserState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Idle => write!(f, "Idle"),
+            Self::AwaitingLengthPrefix { buffered_bytes } => {
+                write!(f, "AwaitingLengthPrefix({buffered_bytes}/4B)")
+            }
+            Self::AwaitingLcHeader {
+                declared_body_len,
+                buffered_bytes,
+            } => write!(
+                f,
+                "AwaitingLcHeader(declared={declared_body_len}, {buffered_bytes}/24B)"
+            ),
+            Self::AwaitingFrameBody {
+                declared_body_len,
+                buffered_body_bytes,
+            } => write!(
+                f,
+                "AwaitingFrameBody({buffered_body_bytes}/{declared_body_len}B)"
+            ),
+        }
+    }
+}
+
 /// Stateful, DoS-hardened streaming decoder backed by [`gserver_protocol::ClientRxDecoder`].
 pub struct ServerRxStreamDecoder {
     inner: ClientRxDecoder,
@@ -175,6 +209,27 @@ impl ServerRxStreamDecoder {
 
     pub fn buffered_len(&self) -> usize {
         self.inner.buffered_len()
+    }
+
+    pub fn parser_state(&self) -> DecoderParserState {
+        let avail = self.buffered_len();
+        if avail == 0 {
+            DecoderParserState::Idle
+        } else if avail < 4 {
+            DecoderParserState::AwaitingLengthPrefix {
+                buffered_bytes: avail,
+            }
+        } else if avail < CLIENT_LC_HEADER_LEN {
+            DecoderParserState::AwaitingLcHeader {
+                declared_body_len: 0,
+                buffered_bytes: avail,
+            }
+        } else {
+            DecoderParserState::AwaitingFrameBody {
+                declared_body_len: 0,
+                buffered_body_bytes: avail - CLIENT_LC_HEADER_LEN,
+            }
+        }
     }
 
     pub fn push_bytes(&mut self, chunk: &[u8]) -> Result<Vec<DecodedClientPacket>, FrameError> {

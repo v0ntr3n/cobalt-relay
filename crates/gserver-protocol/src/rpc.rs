@@ -237,8 +237,8 @@ impl S2cEnvelope {
                 Value::map([("callbackName", Value::String(cb.clone()))]),
             );
         }
-        if !matches!(self.ret, Value::Undefined)
-            && !(self.is_ping() && matches!(self.ret, Value::Null))
+        if !(matches!(self.ret, Value::Undefined)
+            || (self.is_ping() && matches!(self.ret, Value::Null)))
         {
             obj.insert("ret", self.ret.clone());
         }

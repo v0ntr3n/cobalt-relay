@@ -297,6 +297,40 @@ impl WireFrame for C2sFrame {
     }
 }
 
+/// Observable parser stage of [`ClientRxDecoder`] for connection lifecycle diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum C2sParserState {
+    Idle,
+    AwaitingLengthPrefix { buffered_bytes: usize },
+    AwaitingLcHeader { declared_body_len: u32, buffered_bytes: usize },
+    AwaitingFrameBody { declared_body_len: u32, buffered_body_bytes: usize },
+}
+
+impl core::fmt::Display for C2sParserState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::Idle => write!(f, "Idle"),
+            Self::AwaitingLengthPrefix { buffered_bytes } => {
+                write!(f, "AwaitingLengthPrefix({buffered_bytes}/4B)")
+            }
+            Self::AwaitingLcHeader {
+                declared_body_len,
+                buffered_bytes,
+            } => write!(
+                f,
+                "AwaitingLcHeader(declared={declared_body_len}, {buffered_bytes}/24B)"
+            ),
+            Self::AwaitingFrameBody {
+                declared_body_len,
+                buffered_body_bytes,
+            } => write!(
+                f,
+                "AwaitingFrameBody({buffered_body_bytes}/{declared_body_len}B)"
+            ),
+        }
+    }
+}
+
 /// Streaming C2S TCP frame decoder handling arbitrary partial reads and pipelined frames.
 pub type ClientRxDecoder = FramedStreamDecoder<C2sFrame>;
 
@@ -304,6 +338,32 @@ impl FramedStreamDecoder<C2sFrame> {
     /// Creates a new streaming C2S RX decoder with default safety bounds (`16 MiB` wire, `64 MiB` inflated).
     pub fn new(mode: C2sFrameMode) -> Self {
         Self::with_config(mode)
+    }
+
+    /// Returns the exact current framing parser stage for structured connection diagnostics.
+    pub fn parser_state(&self) -> C2sParserState {
+        let avail = self.buffered_len();
+        if avail == 0 {
+            return C2sParserState::Idle;
+        }
+        if avail < 4 {
+            return C2sParserState::AwaitingLengthPrefix {
+                buffered_bytes: avail,
+            };
+        }
+        let hdr = &self.buf[self.read_offset..];
+        let declared_body_len = u32::from_be_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
+        if avail < C2S_LCPACKET_HEADER_SIZE {
+            C2sParserState::AwaitingLcHeader {
+                declared_body_len,
+                buffered_bytes: avail,
+            }
+        } else {
+            C2sParserState::AwaitingFrameBody {
+                declared_body_len,
+                buffered_body_bytes: avail - C2S_LCPACKET_HEADER_SIZE,
+            }
+        }
     }
 }
 

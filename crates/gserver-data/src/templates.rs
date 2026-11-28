@@ -91,6 +91,8 @@ pub struct ProtagonistTemplate {
     pub exp_curve_id: u32,
     pub destiny_treasure_id: u32,
     pub quality_htids: &'static [u32],
+    pub com_atk: u32,
+    pub angry_atk: u32,
 }
 
 /// Authentic Three Kingdoms Hero template (`hero.db` / `timeMachine_hero.db`).
@@ -114,6 +116,8 @@ pub struct HeroTemplate {
     pub dark_gold_htid: u32,
     pub purple_gold_htid: u32,
     pub color_gold_htid: u32,
+    pub com_atk: u32,
+    pub angry_atk: u32,
 }
 
 impl HeroTemplate {

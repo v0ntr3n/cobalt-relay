@@ -13,6 +13,12 @@ use crate::wire_helpers::{
 /// Maps squad slot `1..=6` to 3x3 battle grid position `1..=9`.
 pub const DEFAULT_SQUAD_TO_GRID: [u8; 6] = [3, 6, 9, 2, 5, 8];
 
+/// Returns `true` iff `cell` is one of the 6 visible battle grid cells `{2, 3, 5, 6, 8, 9}`.
+#[inline]
+pub const fn is_valid_battle_grid_cell(cell: u8) -> bool {
+    matches!(cell, 2 | 3 | 5 | 6 | 8 | 9)
+}
+
 /// Equipment slot type inside `arming[pos]["1".."9"]` (`ArmInfo.lua`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EquipSlotType {

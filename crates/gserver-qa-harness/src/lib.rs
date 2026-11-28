@@ -1,7 +1,6 @@
 #![forbid(unsafe_code)]
 #![allow(
     clippy::should_implement_trait,
-    clippy::chunks_exact_to_as_chunks,
     clippy::manual_is_multiple_of
 )]
 
@@ -457,11 +456,12 @@ pub mod amf3 {
 
     fn audit_inner(val: &Amf3Value, hazards: &mut Vec<LuaClientHazard>) {
         match val {
-            Amf3Value::Double(d) => {
-                if d.is_finite() && d.fract() == 0.0 && d.abs() > (MAX_SAFE_F64_INT as f64) {
-                    hazards.push(LuaClientHazard::UnsafeLargeFloatInteger);
-                }
+            Amf3Value::Double(d)
+                if d.is_finite() && d.fract() == 0.0 && d.abs() > (MAX_SAFE_F64_INT as f64) =>
+            {
+                hazards.push(LuaClientHazard::UnsafeLargeFloatInteger);
             }
+            Amf3Value::Double(_) => {}
             Amf3Value::Array { assoc, dense } => {
                 for (_, v) in assoc {
                     audit_inner(v, hazards);

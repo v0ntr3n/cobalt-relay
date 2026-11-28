@@ -508,7 +508,7 @@ fn hex_nibble(b: u8) -> Option<u8> {
 }
 
 fn hex_decode(trimmed: &[u8]) -> Option<Vec<u8>> {
-    if trimmed.len() < 2 || !trimmed.len().is_multiple_of(2) {
+    if trimmed.len() < 2 || trimmed.len() % 2 != 0 {
         return None;
     }
     let mut out = Vec::with_capacity(trimmed.len() / 2);
@@ -527,7 +527,7 @@ fn hex_decode(trimmed: &[u8]) -> Option<Vec<u8>> {
 /// `FEFEFEFE`, runs `bt_decrypt`, and returns UTF-8 text (or returns plaintext cells as-is).
 pub fn decrypt_babeltime_cell(raw_col: &str) -> Result<String, DecryptResult> {
     let trimmed = raw_col.trim_end_matches(['\r', '\n', ' ', '\t']);
-    if trimmed.len() >= 64 && trimmed.len().is_multiple_of(2) {
+    if trimmed.len() >= 64 && trimmed.len() % 2 == 0 {
         if let Some(mut decoded) = hex_decode(trimmed.as_bytes()) {
             if is_bt_encrypted_buffer(&decoded) {
                 let mut sz = decoded.len();

@@ -1,8 +1,81 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{PlayerError, Result};
 use crate::json::{JsonObjReader, JsonValue};
 use crate::wire_helpers::{decode_u32_map, encode_map};
+
+/// Incremental bag delta for `bag.update` / `tmBag.update` push payloads.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BagDelta {
+    /// Upserted or modified bag items with `item_num >= 1`, keyed by `gid`.
+    pub upserted: BTreeMap<u32, BagItem>,
+    /// Deleted grid IDs whose slots must be cleared via `{}`.
+    pub removed_gids: BTreeSet<u32>,
+}
+
+impl BagDelta {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.upserted.is_empty() && self.removed_gids.is_empty()
+    }
+
+    pub fn record_item(&mut self, item: BagItem) {
+        if item.gid == 0 {
+            return;
+        }
+        if item.item_num == 0 {
+            self.record_remove(item.gid);
+        } else {
+            self.removed_gids.remove(&item.gid);
+            self.upserted.insert(item.gid, item);
+        }
+    }
+
+    pub fn record_items<I: IntoIterator<Item = BagItem>>(&mut self, items: I) {
+        for item in items {
+            self.record_item(item);
+        }
+    }
+
+    pub fn record_remove(&mut self, gid: u32) {
+        if gid == 0 {
+            return;
+        }
+        self.upserted.remove(&gid);
+        self.removed_gids.insert(gid);
+    }
+
+    pub fn merge(&mut self, other: BagDelta) {
+        for gid in other.removed_gids {
+            self.record_remove(gid);
+        }
+        for (_, item) in other.upserted {
+            self.record_item(item);
+        }
+    }
+
+    pub fn to_gid_map_json(&self) -> JsonValue {
+        let mut map = BTreeMap::new();
+        for &gid in &self.removed_gids {
+            map.insert(gid.to_string(), JsonValue::empty_object());
+        }
+        for (&gid, item) in &self.upserted {
+            if item.item_num == 0 {
+                map.insert(gid.to_string(), JsonValue::empty_object());
+            } else {
+                map.insert(gid.to_string(), item.to_wire_json());
+            }
+        }
+        JsonValue::Object(map)
+    }
+
+    pub fn to_bag_update_payload(&self) -> JsonValue {
+        JsonValue::Array(vec![self.to_gid_map_json()])
+    }
+}
 
 define_wire_enum! {
     /// All 42 sub-bag tables defined in GServer (`vnsg2`) `BagConsts.lua` & `BagData.lua`.
