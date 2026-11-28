@@ -212,23 +212,25 @@ impl ServerRxStreamDecoder {
     }
 
     pub fn parser_state(&self) -> DecoderParserState {
-        let avail = self.buffered_len();
-        if avail == 0 {
-            DecoderParserState::Idle
-        } else if avail < 4 {
-            DecoderParserState::AwaitingLengthPrefix {
-                buffered_bytes: avail,
+        match self.inner.parser_state() {
+            gserver_protocol::C2sParserState::Idle => DecoderParserState::Idle,
+            gserver_protocol::C2sParserState::AwaitingLengthPrefix { buffered_bytes } => {
+                DecoderParserState::AwaitingLengthPrefix { buffered_bytes }
             }
-        } else if avail < CLIENT_LC_HEADER_LEN {
-            DecoderParserState::AwaitingLcHeader {
-                declared_body_len: 0,
-                buffered_bytes: avail,
-            }
-        } else {
-            DecoderParserState::AwaitingFrameBody {
-                declared_body_len: 0,
-                buffered_body_bytes: avail - CLIENT_LC_HEADER_LEN,
-            }
+            gserver_protocol::C2sParserState::AwaitingLcHeader {
+                declared_body_len,
+                buffered_bytes,
+            } => DecoderParserState::AwaitingLcHeader {
+                declared_body_len,
+                buffered_bytes,
+            },
+            gserver_protocol::C2sParserState::AwaitingFrameBody {
+                declared_body_len,
+                buffered_body_bytes,
+            } => DecoderParserState::AwaitingFrameBody {
+                declared_body_len,
+                buffered_body_bytes,
+            },
         }
     }
 
