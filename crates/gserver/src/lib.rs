@@ -10,9 +10,7 @@
 //! - **Multiplayer Town, Chat + GM Commands, Tavern Gacha, Shop, Mail & Battle** (`gserver-gameplay`)
 
 pub mod bridge;
-pub mod bxh_snapshot;
 pub mod config;
-pub mod event_pay_rpcs;
 pub mod player_rpcs;
 pub mod tcp_server;
 pub mod world;
@@ -26,10 +24,7 @@ use gserver_http::{
 };
 
 pub use config::DaemonConfig;
-pub use tcp_server::{
-    spawn_tcp_game_server, TcpConnectionRecord, TcpGameServerHandle, TcpServerTelemetry,
-    TcpShutdownReason,
-};
+pub use tcp_server::{spawn_tcp_game_server, TcpGameServerHandle};
 pub use world::{ConnectionSession, HandledRpc, ServerWorld};
 
 /// Handle owning both the running HTTP MAPI server and TCP AMF3 game server.
@@ -70,6 +65,7 @@ impl RunningServer {
         let s162 = GameServerEntry::default_s162(config.public_host.clone(), tcp_addr.port());
         mapi.upsert_server(s161);
         mapi.upsert_server(s162);
+        mapi.set_tcp_ready_endpoint(Some(true), Some(tcp_addr.to_string()));
 
         let http_handle = spawn_http_server(
             &config.http_bind,
@@ -93,11 +89,8 @@ impl RunningServer {
         })
     }
 
-    pub fn tcp_telemetry(&self) -> &Arc<TcpServerTelemetry> {
-        self.tcp_handle.telemetry()
-    }
-
     pub fn shutdown(mut self) {
+        self.world.mapi().set_tcp_ready_endpoint(Some(false), None);
         self.tcp_handle.stop();
         self.http_handle.shutdown();
     }

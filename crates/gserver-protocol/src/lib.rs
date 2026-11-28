@@ -11,10 +11,8 @@
 //!   Huffman, and Dynamic Huffman blocks + Adler-32 verification) and compressor (Stored + Fixed
 //!   Huffman with 32 KiB LZ77 matching + Adler-32).
 //! - [`md5`]: Self-contained RFC 1321 MD5 + BabelTime `LCPacket` salted XOR-chain MD5.
-//! - [`frame`]: Streaming C2S frame decoder (`ClientRxDecoder` supporting 24-byte `LCPacket`,
-//!   raw 4-byte framing, and auto-detection) and S2C 8-byte frame encoder/decoder
-//!   (`ServerTxEncoder` & `ServerRxDecoder` supporting single, `zipped=1`, `multi=1`, and
-//!   `zipped=1 + multi=1`).
+//! - [`frame`]: Generic [`FramedStreamDecoder`] (`WireFrame`), streaming C2S frame decoder
+//!   (`ClientRxDecoder`), and S2C 8-byte frame encoder/decoder (`ServerTxEncoder` & `ServerRxDecoder`).
 //! - [`rpc`]: Exact GServer RPC request (`RpcRequest`), response/push/ping envelope (`S2cEnvelope`),
 //!   and multi-response batch codecs (`DecodedS2cBatch`, `encode_s2c_multi_frame`).
 //! - [`bt_decrypt`]: `0xFEFEFEFE` 32-byte header asset decryptor & encryptor with all 16 key slots.
@@ -23,15 +21,19 @@ pub mod amf3;
 pub mod bt_decrypt;
 pub mod error;
 pub mod frame;
+pub mod json;
 pub mod md5;
 pub mod rpc;
+pub mod url;
 pub mod zlib;
 
 pub use amf3::{Amf3Decoder, Amf3Encoder, Amf3Object, DecodeConfig, TraitInfo, Value};
-pub use error::{Amf3Error, BtDecryptError, EnvelopeError, FrameError, ProtocolError, ZlibError};
+pub use error::{
+    Amf3Error, BtDecryptError, EnvelopeError, FrameError, ProtocolError, ZlibError,
+};
 pub use frame::{
-    C2sFrame, C2sFrameMode, C2sParserState, C2sWireKind, ClientRxDecoder, S2cFlags, S2cFrame,
-    ServerRxDecoder, ServerTxEncoder,
+    C2sFrame, C2sFrameMode, C2sWireKind, ClientRxDecoder, FramedStreamDecoder, S2cFlags, S2cFrame,
+    ServerRxDecoder, ServerTxEncoder, WireFrame,
 };
 pub use rpc::{
     decode_s2c_frame_batch, encode_s2c_multi_batch_amf3, encode_s2c_multi_frame,

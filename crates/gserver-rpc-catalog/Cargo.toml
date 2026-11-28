@@ -1,8 +1,13 @@
 [package]
 name = "gserver-rpc-catalog"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "Complete NetConst RPC catalog (2,107 constants), LCPacket/AMF3 wire codec, and verified TCP-to-MainTown bootstrap schemas for GServer (vnsg2)"
-license = "MIT OR Apache-2.0"
+license.workspace = true
 
 [dependencies]
+gserver-protocol = { workspace = true }
+
+[lints]
+workspace = true

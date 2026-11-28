@@ -7,6 +7,8 @@
 
 use std::collections::BTreeMap;
 
+use gserver_protocol::bt_decrypt::{decrypt_babeltime_cell, DecryptResult};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BtColumnKind {
     Scalar,
@@ -47,27 +49,20 @@ pub fn parse_babeltime_schema_row(decrypted_row0: &str) -> Vec<BtColumnSpec> {
     let mut parts = decrypted_row0.split("\\~");
     let names_part = parts.next().unwrap_or("");
     let types_part = parts.next().unwrap_or("");
-
     if names_part.is_empty() {
         return Vec::new();
     }
-
-    let names: Vec<&str> = names_part.split(',').collect();
     let kinds: Vec<&str> = types_part.split(',').collect();
-
-    names
-        .into_iter()
+    names_part
+        .split(',')
         .enumerate()
-        .map(|(i, name)| {
-            let kind_tag = kinds.get(i).copied().unwrap_or("");
-            BtColumnSpec {
-                name: name.to_string(),
-                kind: if kind_tag == "array" {
-                    BtColumnKind::Array
-                } else {
-                    BtColumnKind::Scalar
-                },
-            }
+        .map(|(i, name)| BtColumnSpec {
+            name: name.to_string(),
+            kind: if kinds.get(i).copied() == Some("array") {
+                BtColumnKind::Array
+            } else {
+                BtColumnKind::Scalar
+            },
         })
         .collect()
 }
@@ -79,37 +74,35 @@ pub fn parse_babeltime_data_row(
 ) -> BTreeMap<String, BtFieldValue> {
     let raw_fields: Vec<&str> = decrypted_row.split(',').collect();
     let mut map = BTreeMap::new();
-
     for (idx, col) in schema.iter().enumerate() {
         if col.name.is_empty() {
             continue;
         }
         let raw = raw_fields.get(idx).copied().unwrap_or("");
-        let val = match col.kind {
-            BtColumnKind::Scalar => {
-                if raw.is_empty() {
-                    BtFieldValue::Empty
-                } else {
-                    BtFieldValue::Scalar(raw.replace("\\~", ", "))
-                }
-            }
-            BtColumnKind::Array => {
-                if raw.is_empty() {
-                    BtFieldValue::Array(Vec::new())
-                } else {
-                    let elements = raw
-                        .split("\\~")
-                        .filter(|s| !s.is_empty())
-                        .map(|item| item.split('|').map(ToString::to_string).collect())
-                        .collect();
-                    BtFieldValue::Array(elements)
-                }
-            }
+        let val = match (col.kind, raw.is_empty()) {
+            (BtColumnKind::Scalar, true) => BtFieldValue::Empty,
+            (BtColumnKind::Scalar, false) => BtFieldValue::Scalar(raw.replace("\\~", ", ")),
+            (BtColumnKind::Array, true) => BtFieldValue::Array(Vec::new()),
+            (BtColumnKind::Array, false) => BtFieldValue::Array(
+                raw.split("\\~")
+                    .filter(|s| !s.is_empty())
+                    .map(|item| item.split('|').map(ToString::to_string).collect())
+                    .collect(),
+            ),
         };
         map.insert(col.name.clone(), val);
     }
-
     map
+}
+
+/// Decrypts a raw SQLite `babeltime` cell via [`gserver_protocol::bt_decrypt::decrypt_babeltime_cell`]
+/// and parses its fields against `schema`.
+pub fn decrypt_and_parse_babeltime_row(
+    schema: &[BtColumnSpec],
+    raw_cell: &str,
+) -> Result<BTreeMap<String, BtFieldValue>, DecryptResult> {
+    let decrypted = decrypt_babeltime_cell(raw_cell)?;
+    Ok(parse_babeltime_data_row(schema, &decrypted))
 }
 
 /// Reward triple `type|id|count` used across GServer tables (`copy.db`, `online.db`, `shop.db`, `item_direct`).
@@ -127,10 +120,7 @@ impl RewardTriple {
         let reward_type = it.next()?.parse::<u32>().ok()?;
         let template_id = it.next()?.parse::<u32>().ok()?;
         let count = it.next()?.parse::<u64>().ok()?;
-        if it.next().is_some() {
-            return None;
-        }
-        Some(Self {
+        it.next().is_none().then_some(Self {
             reward_type,
             template_id,
             count,

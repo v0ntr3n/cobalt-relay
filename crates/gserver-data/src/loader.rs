@@ -5,14 +5,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::hero_skills::{
-    is_validated_skill_id, record_hero_skill_fallback, resolve_hero_battle_skills_with_awake,
-    validate_embedded_hero_skill_mappings, validate_raw_skill_id_with_extra,
-    HeroSkillFallbackReason, HeroSkillResolutionSource, HeroSkillValidationReport,
-    InvalidHeroSkillDetail, ResolvedHeroBattleSkills, SkillIdValidationError,
-    AWAKE_SKILL_CHANGE_RANK, FALLBACK_NORMAL_SKILL_ID, FALLBACK_RAGE_SKILL_ID,
-};
-use crate::json::{parse_json, JsonError, JsonValue};
+use gserver_protocol::json::{parse_json, JsonError, JsonNumber, JsonValue};
+
 use crate::templates::{is_valid_hero_htid, is_valid_item_tid, is_valid_town_id};
 
 #[derive(Debug)]
@@ -25,12 +19,8 @@ pub enum LoaderError {
 impl std::fmt::Display for LoaderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Io { path, source } => {
-                write!(f, "I/O error reading '{}': {}", path.display(), source)
-            }
-            Self::Json { path, source } => {
-                write!(f, "JSON error in '{}': {}", path.display(), source)
-            }
+            Self::Io { path, source } => write!(f, "I/O error reading '{}': {}", path.display(), source),
+            Self::Json { path, source } => write!(f, "JSON error in '{}': {}", path.display(), source),
             Self::InvalidFormat { path, detail } => {
                 write!(f, "Invalid GServer export format in '{}': {}", path.display(), detail)
             }
@@ -39,6 +29,42 @@ impl std::fmt::Display for LoaderError {
 }
 
 impl std::error::Error for LoaderError {}
+
+macro_rules! json_req {
+    ($node:expr, str $key:literal, $path:expr, $detail:literal) => {
+        $node
+            .get($key)
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| LoaderError::InvalidFormat {
+                path: $path.to_path_buf(),
+                detail: $detail.to_string(),
+            })?
+            .to_string()
+    };
+    ($node:expr, array $key:literal, $path:expr, $detail:literal) => {
+        $node
+            .get($key)
+            .and_then(JsonValue::as_array)
+            .ok_or_else(|| LoaderError::InvalidFormat {
+                path: $path.to_path_buf(),
+                detail: $detail.to_string(),
+            })?
+    };
+    ($node:expr, usize_or_zero $key:literal) => {
+        $node.get($key).and_then(JsonValue::as_u64).unwrap_or(0) as usize
+    };
+}
+
+fn read_json_file(path: &Path) -> Result<JsonValue, LoaderError> {
+    let text = fs::read_to_string(path).map_err(|source| LoaderError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    parse_json(&text).map_err(|source| LoaderError::Json {
+        path: path.to_path_buf(),
+        source,
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableManifestEntry {
@@ -104,64 +130,27 @@ impl ExportedDatabaseDir {
     pub fn open_manifest_only(root_dir: impl AsRef<Path>) -> Result<Self, LoaderError> {
         let root = root_dir.as_ref().to_path_buf();
         let manifest_path = root.join("manifest.json");
-        let text = fs::read_to_string(&manifest_path).map_err(|source| LoaderError::Io {
-            path: manifest_path.clone(),
-            source,
-        })?;
-        let doc = parse_json(&text).map_err(|source| LoaderError::Json {
-            path: manifest_path.clone(),
-            source,
-        })?;
-
-        let tables_arr = doc
-            .get("tables")
-            .and_then(JsonValue::as_array)
-            .ok_or_else(|| LoaderError::InvalidFormat {
-                path: manifest_path.clone(),
-                detail: "missing 'tables' array in manifest.json".to_string(),
-            })?;
+        let doc = read_json_file(&manifest_path)?;
+        let tables_arr = json_req!(
+            doc,
+            array "tables",
+            manifest_path,
+            "missing 'tables' array in manifest.json"
+        );
 
         let mut entries = Vec::with_capacity(tables_arr.len());
         for entry in tables_arr {
-            let database = entry
-                .get("database")
-                .and_then(JsonValue::as_str)
-                .ok_or_else(|| LoaderError::InvalidFormat {
-                    path: manifest_path.clone(),
-                    detail: "table entry missing 'database'".to_string(),
-                })?
-                .to_string();
-            let table = entry
-                .get("table")
-                .and_then(JsonValue::as_str)
-                .ok_or_else(|| LoaderError::InvalidFormat {
-                    path: manifest_path.clone(),
-                    detail: "table entry missing 'table'".to_string(),
-                })?
-                .to_string();
-            let relative_path = entry
-                .get("relative_path")
-                .and_then(JsonValue::as_str)
-                .ok_or_else(|| LoaderError::InvalidFormat {
-                    path: manifest_path.clone(),
-                    detail: "table entry missing 'relative_path'".to_string(),
-                })?
-                .to_string();
-            let row_count = entry
-                .get("row_count")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(0) as usize;
-            let column_count = entry
-                .get("column_count")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(0) as usize;
-
             entries.push(TableManifestEntry {
-                database,
-                table,
-                relative_path,
-                row_count,
-                column_count,
+                database: json_req!(entry, str "database", manifest_path, "table entry missing 'database'"),
+                table: json_req!(entry, str "table", manifest_path, "table entry missing 'table'"),
+                relative_path: json_req!(
+                    entry,
+                    str "relative_path",
+                    manifest_path,
+                    "table entry missing 'relative_path'"
+                ),
+                row_count: json_req!(entry, usize_or_zero "row_count"),
+                column_count: json_req!(entry, usize_or_zero "column_count"),
             });
         }
 
@@ -198,8 +187,7 @@ impl ExportedDatabaseDir {
                 .find(|e| e.database == database && e.table == table)
                 .map(|e| e.relative_path.clone())
                 .unwrap_or_else(|| format!("{database}/{table}.json"));
-            let table_path = self.root_dir.join(rel);
-            let parsed = Self::read_table_file(&table_path)?;
+            let parsed = Self::read_table_file(&self.root_dir.join(rel))?;
             self.loaded_tables.insert(key.clone(), parsed);
         }
         Ok(self.loaded_tables.get(&key).expect("just inserted"))
@@ -215,32 +203,9 @@ impl ExportedDatabaseDir {
     }
 
     fn read_table_file(path: &Path) -> Result<ExportedTable, LoaderError> {
-        let text = fs::read_to_string(path).map_err(|source| LoaderError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        let doc = parse_json(&text).map_err(|source| LoaderError::Json {
-            path: path.to_path_buf(),
-            source,
-        })?;
-
-        let database = doc
-            .get("database")
-            .and_then(JsonValue::as_str)
-            .ok_or_else(|| LoaderError::InvalidFormat {
-                path: path.to_path_buf(),
-                detail: "missing 'database' string".to_string(),
-            })?
-            .to_string();
-        let table = doc
-            .get("table")
-            .and_then(JsonValue::as_str)
-            .ok_or_else(|| LoaderError::InvalidFormat {
-                path: path.to_path_buf(),
-                detail: "missing 'table' string".to_string(),
-            })?
-            .to_string();
-
+        let doc = read_json_file(path)?;
+        let database = json_req!(doc, str "database", path, "missing 'database' string");
+        let table = json_req!(doc, str "table", path, "missing 'table' string");
         let columns = doc
             .get("columns")
             .and_then(JsonValue::as_array)
@@ -258,20 +223,14 @@ impl ExportedDatabaseDir {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-
-        let rows_arr = doc
-            .get("rows")
-            .and_then(JsonValue::as_array)
-            .ok_or_else(|| LoaderError::InvalidFormat {
-                path: path.to_path_buf(),
-                detail: "missing 'rows' array".to_string(),
-            })?;
+        let rows_arr = json_req!(doc, array "rows", path, "missing 'rows' array");
 
         let mut rows_by_id = BTreeMap::new();
         for row in rows_arr {
             let key = match row.get("id") {
-                Some(JsonValue::Int(n)) => n.to_string(),
-                Some(JsonValue::Str(s)) => s.clone(),
+                Some(JsonValue::Number(JsonNumber::Int(n))) => n.to_string(),
+                Some(JsonValue::Number(JsonNumber::Uint(n))) => n.to_string(),
+                Some(JsonValue::String(s)) => s.clone(),
                 _ => continue,
             };
             rows_by_id.insert(key, row.clone());
@@ -286,26 +245,18 @@ impl ExportedDatabaseDir {
     }
 }
 
-fn parse_skill_json_field(
-    row: &JsonValue,
-    field: &str,
-    extra_valid: &dyn Fn(u32) -> bool,
-) -> Result<u32, SkillIdValidationError> {
-    match row.get(field) {
-        None | Some(JsonValue::Null) => Err(SkillIdValidationError::Missing),
-        Some(JsonValue::Int(v)) => validate_raw_skill_id_with_extra(Some(*v), Some(extra_valid)),
-        Some(JsonValue::Str(s)) => {
-            let trimmed = s.trim();
-            if trimmed.is_empty() {
-                Err(SkillIdValidationError::Missing)
-            } else if let Ok(v) = trimmed.parse::<i64>() {
-                validate_raw_skill_id_with_extra(Some(v), Some(extra_valid))
-            } else {
-                Err(SkillIdValidationError::NonNumericType)
+macro_rules! define_store_contains {
+    ($(
+        $(#[$meta:meta])*
+        $fn_name:ident($id:ident: u32) => embedded: $embedded_fn:ident, tables: [$($pair:expr),* $(,)?];
+    )*) => {
+        $(
+            $(#[$meta])*
+            pub fn $fn_name(&self, $id: u32) -> bool {
+                $embedded_fn($id) || self.contains_in_tables($id, &[$($pair),*])
             }
-        }
-        _ => Err(SkillIdValidationError::NonNumericType),
-    }
+        )*
+    };
 }
 
 /// High-level server template facade: serves zero-dependency embedded templates out of the box,
@@ -321,9 +272,8 @@ impl GameDataStore {
     }
 
     pub fn from_export_dir(root_dir: impl AsRef<Path>) -> Result<Self, LoaderError> {
-        let export_dir = ExportedDatabaseDir::load_eager(root_dir)?;
         Ok(Self {
-            export_dir: Some(export_dir),
+            export_dir: Some(ExportedDatabaseDir::load_eager(root_dir)?),
         })
     }
 
@@ -331,277 +281,40 @@ impl GameDataStore {
         self.export_dir.as_ref()
     }
 
-    /// Checks whether a hero `htid` exists in either the exported `hero`/`timeMachine_hero` tables or embedded consts.
-    pub fn contains_hero_htid(&self, htid: u32) -> bool {
-        if is_valid_hero_htid(htid) {
-            return true;
-        }
-        if let Some(dir) = &self.export_dir {
-            let id64 = u64::from(htid);
-            if dir
-                .get_row_by_id("timeMachine_hero", "timeMachine_hero", id64)
-                .is_some()
-                || dir.get_row_by_id("hero", "hero", id64).is_some()
-                || dir.get_row_by_id("hero", "heroes", id64).is_some()
-            {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Checks whether a `skill_id` exists in the embedded validated skill set or any loaded runtime skill table.
-    pub fn contains_skill_id(&self, skill_id: u32) -> bool {
-        if is_validated_skill_id(skill_id) {
-            return true;
-        }
-        if skill_id == 0 {
-            return false;
-        }
-        if let Some(dir) = &self.export_dir {
-            let id64 = u64::from(skill_id);
-            for (db, tbl) in [
-                ("skill", "skill"),
-                ("timeMachine_skill", "timeMachine_skill"),
-                ("skill_display", "skill_display"),
-                ("skill_pet", "skill_pet"),
-                ("jointSkill", "jointSkill"),
-            ] {
-                if dir.get_row_by_id(db, tbl, id64).is_some() {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    /// Resolves authentic `(normal_skill_id, rage_skill_id)` for a hero `htid` and `awake_rank`,
-    /// preferring any loaded `timeMachine_hero` / `hero` JSON table in [`Self::export_dir`] before
-    /// falling back to the embedded 801-row `HERO_SKILL_ENTRIES` table.
-    pub fn resolve_hero_battle_skills(
-        &self,
-        htid: u32,
-        awake_rank: u32,
-    ) -> ResolvedHeroBattleSkills {
-        self.resolve_hero_battle_skills_internal(htid, awake_rank, true)
-    }
-
-    fn resolve_hero_battle_skills_internal(
-        &self,
-        htid: u32,
-        awake_rank: u32,
-        record_diagnostics: bool,
-    ) -> ResolvedHeroBattleSkills {
-        if htid > 0 {
-            if let Some(dir) = &self.export_dir {
-                let id64 = u64::from(htid);
-                let row_opt = dir
-                    .get_row_by_id("timeMachine_hero", "timeMachine_hero", id64)
-                    .or_else(|| dir.get_row_by_id("hero", "hero", id64))
-                    .or_else(|| dir.get_row_by_id("hero", "heroes", id64));
-                if let Some(row) = row_opt {
-                    let extra_check = |sid: u32| self.contains_skill_id(sid);
-                    let use_awake_com = awake_rank >= AWAKE_SKILL_CHANGE_RANK
-                        && matches!(row.get("awake_com_atk"), Some(JsonValue::Int(n)) if *n > 0);
-                    let use_awake_angry = awake_rank >= AWAKE_SKILL_CHANGE_RANK
-                        && matches!(row.get("awake_angry_atk"), Some(JsonValue::Int(n)) if *n > 0);
-
-                    let com_col = if use_awake_com {
-                        "awake_com_atk"
-                    } else {
-                        "com_atk"
-                    };
-                    let angry_col = if use_awake_angry {
-                        "awake_angry_atk"
-                    } else {
-                        "angry_atk"
-                    };
-
-                    let com_res = parse_skill_json_field(row, com_col, &extra_check);
-                    let angry_res = parse_skill_json_field(row, angry_col, &extra_check);
-
-                    return match (com_res, angry_res) {
-                        (Ok(normal_skill_id), Ok(rage_skill_id)) => ResolvedHeroBattleSkills {
-                            htid,
-                            normal_skill_id,
-                            rage_skill_id,
-                            source: HeroSkillResolutionSource::ExportedDbRow {
-                                htid,
-                                awakened_override: use_awake_com || use_awake_angry,
-                            },
-                            used_normal_fallback: false,
-                            used_rage_fallback: false,
-                        },
-                        (com_outcome, angry_outcome) => {
-                            let (normal_skill_id, used_normal_fallback, normal_error) =
-                                match com_outcome {
-                                    Ok(id) => (id, false, None),
-                                    Err(e) => (FALLBACK_NORMAL_SKILL_ID, true, Some(e)),
-                                };
-                            let (rage_skill_id, used_rage_fallback, rage_error) =
-                                match angry_outcome {
-                                    Ok(id) => (id, false, None),
-                                    Err(e) => (FALLBACK_RAGE_SKILL_ID, true, Some(e)),
-                                };
-                            let reason = HeroSkillFallbackReason::InvalidSkillReference {
-                                htid,
-                                normal_error,
-                                rage_error,
-                            };
-                            let slots = (used_normal_fallback as u64) + (used_rage_fallback as u64);
-                            if record_diagnostics && slots > 0 {
-                                record_hero_skill_fallback(
-                                    htid,
-                                    reason,
-                                    normal_skill_id,
-                                    rage_skill_id,
-                                    slots,
-                                );
-                            }
-                            ResolvedHeroBattleSkills {
-                                htid,
-                                normal_skill_id,
-                                rage_skill_id,
-                                source: HeroSkillResolutionSource::Fallback(reason),
-                                used_normal_fallback,
-                                used_rage_fallback,
-                            }
-                        }
-                    };
-                }
-            }
-        }
-
-        resolve_hero_battle_skills_with_awake(htid, awake_rank)
-    }
-
-    /// Validates hero skill mappings across the loaded exported `timeMachine_hero`/`hero` table
-    /// when present, or across the embedded 801-row table when operating standalone.
-    pub fn validate_hero_skill_mappings(&self) -> HeroSkillValidationReport {
+    fn contains_in_tables(&self, id: u32, tables: &[(&str, &str)]) -> bool {
         let Some(dir) = &self.export_dir else {
-            return validate_embedded_hero_skill_mappings();
+            return false;
         };
-        let Some(tbl) = dir
-            .get_loaded_table("timeMachine_hero", "timeMachine_hero")
-            .or_else(|| dir.get_loaded_table("hero", "hero"))
-            .or_else(|| dir.get_loaded_table("hero", "heroes"))
-        else {
-            return validate_embedded_hero_skill_mappings();
-        };
-
-        let mut base = validate_embedded_hero_skill_mappings();
-        let extra_check = |sid: u32| self.contains_skill_id(sid);
-
-        let mut valid_normal_skill_count = 0usize;
-        let mut valid_rage_skill_count = 0usize;
-        let mut fully_valid_hero_count = 0usize;
-        let mut missing_or_invalid_template_count = 0usize;
-        let mut missing_or_invalid_skill_ref_count = 0usize;
-        let mut fallback_template_count = 0usize;
-        let mut fallback_skill_slot_count = 0usize;
-        let mut details = Vec::new();
-
-        let mut sorted_rows: Vec<(u32, &JsonValue)> = tbl
-            .rows_by_id
+        let id64 = u64::from(id);
+        tables
             .iter()
-            .filter_map(|(k, v)| k.parse::<u32>().ok().map(|id| (id, v)))
-            .collect();
-        sorted_rows.sort_by_key(|(id, _)| *id);
-
-        for (htid, row) in &sorted_rows {
-            let com_check = parse_skill_json_field(row, "com_atk", &extra_check);
-            let angry_check = parse_skill_json_field(row, "angry_atk", &extra_check);
-            let resolved = self.resolve_hero_battle_skills_internal(*htid, 0, false);
-
-            if com_check.is_ok() {
-                valid_normal_skill_count += 1;
-            } else {
-                missing_or_invalid_skill_ref_count += 1;
-            }
-            if angry_check.is_ok() {
-                valid_rage_skill_count += 1;
-            } else {
-                missing_or_invalid_skill_ref_count += 1;
-            }
-
-            if com_check.is_ok() && angry_check.is_ok() {
-                fully_valid_hero_count += 1;
-            } else {
-                missing_or_invalid_template_count += 1;
-                let name_vi = row
-                    .get("name")
-                    .and_then(JsonValue::as_str)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                let is_show = row.get("is_show").and_then(JsonValue::as_i64) == Some(1);
-                details.push(InvalidHeroSkillDetail {
-                    htid: *htid,
-                    name_vi,
-                    is_show,
-                    normal_error: com_check.err(),
-                    rage_error: angry_check.err(),
-                    resolved_normal_skill_id: resolved.normal_skill_id,
-                    resolved_rage_skill_id: resolved.rage_skill_id,
-                });
-            }
-
-            if resolved.used_any_fallback() {
-                fallback_template_count += 1;
-                fallback_skill_slot_count += resolved.fallback_slot_count() as usize;
-            }
-        }
-
-        base.total_templates_inspected = sorted_rows.len();
-        base.valid_normal_skill_count = valid_normal_skill_count;
-        base.valid_rage_skill_count = valid_rage_skill_count;
-        base.fully_valid_hero_count = fully_valid_hero_count;
-        base.missing_or_invalid_template_count = missing_or_invalid_template_count;
-        base.missing_or_invalid_skill_ref_count = missing_or_invalid_skill_ref_count;
-        base.fallback_template_count = fallback_template_count;
-        base.fallback_skill_slot_count = fallback_skill_slot_count;
-        base.missing_or_invalid_details = details;
-        base
+            .any(|&(db, tbl)| dir.get_row_by_id(db, tbl, id64).is_some())
     }
 
-    /// Checks whether an `item_tid` exists in either the exported item tables or embedded consts.
-    pub fn contains_item_tid(&self, item_tid: u32) -> bool {
-        if is_valid_item_tid(item_tid) {
-            return true;
-        }
-        if let Some(dir) = &self.export_dir {
-            let id64 = u64::from(item_tid);
-            for (db, tbl) in [
-                ("item_normal", "item_normal"),
-                ("item", "item_normal"),
-                ("item", "item_direct"),
-                ("item", "item_randgift"),
-                ("item", "item_arm"),
-                ("item", "item_treasure"),
-                ("item", "item_jewel"),
-                ("timeMachine_item", "timeMachine_item_normal"),
-                ("timeMachine_item", "timeMachine_item_direct"),
-                ("timeMachine_item", "timeMachine_item_randgift"),
-                ("timeMachine_hero", "timeMachine_item_soul"),
-            ] {
-                if dir.get_row_by_id(db, tbl, id64).is_some() {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    /// Checks whether a `town_id` exists in either the exported `town.db` or embedded consts.
-    pub fn contains_town_id(&self, town_id: u32) -> bool {
-        if is_valid_town_id(town_id) {
-            return true;
-        }
-        if let Some(dir) = &self.export_dir {
-            if dir.get_row_by_id("town", "town", u64::from(town_id)).is_some() {
-                return true;
-            }
-        }
-        false
+    define_store_contains! {
+        /// Checks whether a hero `htid` exists in either the exported `hero`/`timeMachine_hero` tables or embedded consts.
+        contains_hero_htid(htid: u32) => embedded: is_valid_hero_htid, tables: [
+            ("hero", "heroes"),
+            ("hero", "hero"),
+            ("timeMachine_hero", "timeMachine_hero"),
+        ];
+        /// Checks whether an `item_tid` exists in either the exported item tables or embedded consts.
+        contains_item_tid(item_tid: u32) => embedded: is_valid_item_tid, tables: [
+            ("item_normal", "item_normal"),
+            ("item", "item_normal"),
+            ("item", "item_direct"),
+            ("item", "item_randgift"),
+            ("item", "item_arm"),
+            ("item", "item_treasure"),
+            ("item", "item_jewel"),
+            ("timeMachine_item", "timeMachine_item_normal"),
+            ("timeMachine_item", "timeMachine_item_direct"),
+            ("timeMachine_item", "timeMachine_item_randgift"),
+            ("timeMachine_hero", "timeMachine_item_soul"),
+        ];
+        /// Checks whether a `town_id` exists in either the exported `town.db` or embedded consts.
+        contains_town_id(town_id: u32) => embedded: is_valid_town_id, tables: [
+            ("town", "town"),
+        ];
     }
 }

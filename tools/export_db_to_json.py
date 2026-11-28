@@ -124,7 +124,7 @@ def bt_decrypt(data: bytes) -> bytes:
     if not is_bt_encrypted(data):
         return data
 
-    magic, header_payload_len = struct.unpack_from("<II", data, 0)
+    _magic, header_payload_len = struct.unpack_from("<II", data, 0)
     algo_index = data[8]
     key_index = data[9]
     actual_payload_len = len(data) - BT_DECRYPT_HEADER_SIZE
@@ -146,16 +146,6 @@ def bt_decrypt(data: bytes) -> bytes:
         for i in range(0, actual_payload_len, 2):
             out[i] ^= key[(i + offset) % key_len]
     return bytes(out)
-
-
-def is_even_hex(s: str) -> bool:
-    if len(s) < 64 or (len(s) % 2) != 0:
-        return False
-    try:
-        bytes.fromhex(s[:16])
-    except ValueError:
-        return False
-    return True
 
 
 def decrypt_cell_value(raw_val: Any, is_last_col: bool) -> str:
@@ -215,6 +205,14 @@ def parse_array_value(val: str) -> List[Any]:
     return out
 
 
+def _write_json(path: Path, payload: Any, pretty: bool = True) -> None:
+    with path.open("w", encoding="utf-8") as f:
+        if pretty:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        else:
+            json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+
+
 def export_sqlite_db(db_path: Path, out_dir: Path, pretty: bool = False) -> Dict[str, Any]:
     raw_bytes = db_path.read_bytes()
     was_file_encrypted = is_bt_encrypted(raw_bytes)
@@ -252,6 +250,8 @@ def export_sqlite_db(db_path: Path, out_dir: Path, pretty: bool = False) -> Dict
                 continue
 
             has_babeltime_col = sql_cols[-1] == "babeltime"
+            last_col_idx = len(sql_cols) - 1
+            plain_sql_end = last_col_idx if has_babeltime_col else len(sql_cols)
             schema_cols: List[str] = []
             schema_types: List[str] = []
             records: List[Dict[str, Any]] = []
@@ -269,9 +269,11 @@ def export_sqlite_db(db_path: Path, out_dir: Path, pretty: bool = False) -> Dict
                     continue
 
                 rec: Dict[str, Any] = {"id": coerce_scalar(row_id_str)}
+                for idx in range(1, plain_sql_end):
+                    rec[sql_cols[idx]] = coerce_scalar(
+                        decrypt_cell_value(r[idx], is_last_col=(idx == last_col_idx))
+                    )
                 if has_babeltime_col:
-                    for idx, scol in enumerate(sql_cols[1:-1], start=1):
-                        rec[scol] = coerce_scalar(decrypt_cell_value(r[idx], is_last_col=False))
                     vals = last_decrypted.split(",")
                     for idx, cname in enumerate(schema_cols):
                         if not cname:
@@ -282,9 +284,6 @@ def export_sqlite_db(db_path: Path, out_dir: Path, pretty: bool = False) -> Dict
                             rec[cname] = parse_array_value(raw_field)
                         else:
                             rec[cname] = coerce_scalar(raw_field.replace("\\~", ", "))
-                else:
-                    for idx, scol in enumerate(sql_cols[1:], start=1):
-                        rec[scol] = coerce_scalar(decrypt_cell_value(r[idx], is_last_col=(idx == len(sql_cols) - 1)))
 
                 records.append(rec)
 
@@ -302,12 +301,7 @@ def export_sqlite_db(db_path: Path, out_dir: Path, pretty: bool = False) -> Dict
                 "rows": records,
             }
 
-            table_json_path = db_out_dir / f"{table_name}.json"
-            with table_json_path.open("w", encoding="utf-8") as f:
-                if pretty:
-                    json.dump(table_payload, f, ensure_ascii=False, indent=2)
-                else:
-                    json.dump(table_payload, f, ensure_ascii=False, separators=(",", ":"))
+            _write_json(db_out_dir / f"{table_name}.json", table_payload, pretty=pretty)
 
             tables_summary.append({
                 "database": db_stem,
@@ -354,9 +348,7 @@ def export_directory(db_dir: Path, out_dir: Path, pretty: bool = False) -> Dict[
         "databases": databases,
         "tables": all_tables,
     }
-    manifest_path = out_dir / "manifest.json"
-    with manifest_path.open("w", encoding="utf-8") as f:
-        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    _write_json(out_dir / "manifest.json", manifest, pretty=True)
     return manifest
 
 

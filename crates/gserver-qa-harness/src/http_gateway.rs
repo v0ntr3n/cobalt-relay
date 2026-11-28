@@ -1,31 +1,27 @@
 #![forbid(unsafe_code)]
 
-//! Multi-threaded HTTP/1.1 SDK Gateway (`HttpSdkGateway`) compatible with `BtPlatformWin32.cpp`
-//! and `AccountAuthProvider.cpp` so `GCLIENT.exe` can complete its full HTTP bootstrap against `127.0.0.1`
-//! without recompiling the C++ client.
-//!
-//! Endpoints implemented (matching `live_capture_filtered.log` verbatim):
-//! - `/phone/applereview` & `/phone/applereview/`
-//! - `/phone/serverlist`  & `/phone/serverlist/`
-//! - `/phone/supernotice` & `/phone/supernotice/`
-//! - `/phone/login`       & `/phone/login/`  (issues `Set-Cookie: PHPSESSID=...`)
-//! - `/phone/loginrole`   & `/phone/loginrole/`
-//! - `/phone/gethash`     & `/phone/gethash/` (handles `?&pid=...`, `&&`, `pid=`, cookie session fallback,
-//!   and returns `"host": "<game_host>", "port": <game_port>`)
+//! Multi-threaded HTTP/1.1 SDK Gateway (`HttpSdkGateway`) backed by [`gserver_http`] and
+//! [`gserver_protocol`] (`url` + `json`), compatible with `BtPlatformWin32.cpp` and
+//! `AccountAuthProvider.cpp` for local `GCLIENT.exe` bootstrap and deterministic QA fuzzing.
 
-use std::collections::HashMap;
-use std::io::{self, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::collections::{BTreeMap, HashMap};
+use std::io;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
 use std::time::Duration;
+
+use gserver_http::http::{
+    spawn_http_server, status_reason, HttpHandler, HttpRequest, HttpResponse, HttpServerConfig,
+    HttpServerHandle,
+};
+use gserver_http::protocol::{build_version_response, VersionPolicy, COOKIE_PHPSESSID};
+use gserver_protocol::json::{JsonObject, JsonValue};
+use gserver_protocol::url::{parse_cookie_header, split_request_target};
 
 use crate::crypto::{
     md5_hex, parse_tolerant_query_params, verify_platform_url_signature, LOCAL_DEV_SIGN_KEY,
 };
-
-const MAX_HTTP_HEADER_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct HttpGatewayConfig {
@@ -57,53 +53,55 @@ pub struct HttpGatewayMetrics {
     pub cookie_hits: AtomicU64,
 }
 
+struct QaHttpHandler {
+    config: HttpGatewayConfig,
+    metrics: Arc<HttpGatewayMetrics>,
+    sessions: Mutex<HashMap<String, String>>,
+}
+
+impl HttpHandler for QaHttpHandler {
+    fn handle(&self, req: &HttpRequest) -> HttpResponse {
+        let (status, set_cookie, body) = route_sdk_http_request(
+            &req.raw_target,
+            req.header("cookie"),
+            &self.config,
+            &self.metrics,
+            &self.sessions,
+        );
+        let mut resp = HttpResponse::new(status, status_reason(status));
+        resp.set_header("Content-Type", "application/json; charset=utf-8");
+        if let Some(sc) = set_cookie {
+            resp.set_cookies.push(sc);
+        }
+        resp.body = body.into_bytes();
+        resp
+    }
+}
+
 pub struct HttpSdkGateway {
     addr: SocketAddr,
-    shutdown: Arc<AtomicBool>,
     metrics: Arc<HttpGatewayMetrics>,
-    accept_thread: Option<JoinHandle<()>>,
+    handle: HttpServerHandle,
 }
 
 impl HttpSdkGateway {
     pub fn start(bind_addr: &str, config: HttpGatewayConfig) -> io::Result<Self> {
-        let listener = TcpListener::bind(bind_addr)?;
-        listener.set_nonblocking(true)?;
-        let addr = listener.local_addr()?;
-        let shutdown = Arc::new(AtomicBool::new(false));
         let metrics = Arc::new(HttpGatewayMetrics::default());
-        let sessions: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
-
-        let shutdown_cl = Arc::clone(&shutdown);
-        let metrics_cl = Arc::clone(&metrics);
-        let handle = thread::spawn(move || {
-            while !shutdown_cl.load(Ordering::Acquire) {
-                match listener.accept() {
-                    Ok((stream, _peer)) => {
-                        let cfg = config.clone();
-                        let m = Arc::clone(&metrics_cl);
-                        let sess = Arc::clone(&sessions);
-                        thread::spawn(move || {
-                            let _ = handle_http_client(stream, &cfg, &m, &sess);
-                        });
-                    }
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(_) => {
-                        if shutdown_cl.load(Ordering::Acquire) {
-                            break;
-                        }
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                }
-            }
+        let handler = Arc::new(QaHttpHandler {
+            config,
+            metrics: Arc::clone(&metrics),
+            sessions: Mutex::new(HashMap::new()),
         });
-
+        let srv_cfg = HttpServerConfig {
+            keep_alive_timeout: Duration::from_secs(3),
+            max_requests_per_connection: 16,
+        };
+        let handle = spawn_http_server(bind_addr, handler, srv_cfg)?;
+        let addr = handle.local_addr();
         Ok(Self {
             addr,
-            shutdown,
             metrics,
-            accept_thread: Some(handle),
+            handle,
         })
     }
 
@@ -116,22 +114,11 @@ impl HttpSdkGateway {
     }
 
     pub fn stop(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
-        let _ = TcpStream::connect(self.addr);
-        if let Some(h) = self.accept_thread.take() {
-            let _ = h.join();
-        }
-    }
-}
-
-impl Drop for HttpSdkGateway {
-    fn drop(&mut self) {
-        self.stop();
+        self.handle.shutdown();
     }
 }
 
 /// Pure function routing an HTTP request target + `Cookie` header to `(status, set_cookie, json_body)`.
-/// Exposed directly for fast deterministic PRNG fuzzing as well as live socket serving.
 pub fn route_sdk_http_request(
     target: &str,
     cookie_header: Option<&str>,
@@ -141,50 +128,97 @@ pub fn route_sdk_http_request(
 ) -> (u16, Option<String>, String) {
     metrics.total_requests.fetch_add(1, Ordering::Relaxed);
 
-    if cfg.enforce_signature && target.contains('?') {
+    let (norm_path, _) = split_request_target(target);
+    let is_health_probe = matches!(
+        norm_path.as_str(),
+        "/" | "/healthz" | "/readyz" | "/livez" | "/health" | "/admin/status"
+    );
+
+    if cfg.enforce_signature && !is_health_probe && target.contains('?') {
         if let Err(err) = verify_platform_url_signature(target, &cfg.sign_key) {
             metrics.signature_failures.fetch_add(1, Ordering::Relaxed);
-            let body = format!(
-                "{{\"errornu\":\"1\",\"errordesc\":\"{}\"}}",
-                json_escape(&err.to_string())
-            );
-            return (403, None, body);
+            let mut obj = JsonObject::new();
+            obj.insert("errornu", "1");
+            obj.insert("errordesc", err.to_string());
+            return (403, None, JsonValue::Object(obj).to_json_string());
         }
     }
 
-    let path = target.split('?').next().unwrap_or(target);
-    let norm_path = path.trim_end_matches('/');
     let params = parse_tolerant_query_params(target);
-
-    let incoming_phpsessid = cookie_header.and_then(extract_phpsessid);
+    let incoming_phpsessid = cookie_header
+        .and_then(|hdr| parse_cookie_header(hdr).remove(COOKIE_PHPSESSID))
+        .filter(|v| !v.is_empty());
     if incoming_phpsessid.is_some() {
         metrics.cookie_hits.fetch_add(1, Ordering::Relaxed);
     }
 
-    match norm_path {
-        "/phone/applereview" | "/applereview" => (
-            200,
-            None,
-            "{\"ret\":404,\"msg\":\"no data\",\"applereview\":0,\"ip\":\"127.0.0.1\",\"errornu\":\"0\",\"errordesc\":\"OK\"}".to_string(),
-        ),
-        "/phone/serverlist" | "/serverlist" => {
-            let body = format!(
-                "{{\"errornu\":\"0\",\"errordesc\":\"OK\",\"root\":{{\"item\":[{{\"groupid\":\"2900161\",\"server_id\":\"game2900161\",\"name\":\"S1.LocalRustQA\",\"host\":\"{}\",\"port\":{},\"status\":1,\"hot\":1,\"new\":1,\"openDateTime\":\"2018-11-06-09-00-00\"}}]}}}}",
-                json_escape(&cfg.game_tcp_host),
-                cfg.game_tcp_port
-            );
-            (200, None, body)
+    match norm_path.as_str() {
+        "/" | "/healthz" | "/readyz" | "/livez" | "/health" | "/admin/status" => {
+            let mut obj = JsonObject::new();
+            obj.insert("status", "ok");
+            obj.insert("ready", true);
+            obj.insert("http_ready", true);
+            obj.insert("tcp_ready", true);
+            obj.insert("advertised_host", cfg.game_tcp_host.as_str());
+            obj.insert("advertised_tcp_port", cfg.game_tcp_port);
+            obj.insert("version_policy", "Code_Update_None");
+            obj.insert("service", "gserver-qa-harness");
+            obj.insert("game", "vnsg2");
+            (200, None, JsonValue::Object(obj).to_json_string())
         }
-        "/phone/supernotice" | "/supernotice" | "/phone/notice" | "/notice" => (
-            200,
-            None,
-            "{\"errornu\":\"0\",\"errordesc\":\"OK\",\"data\":\"GServer Local Rust Server Ready\"}".to_string(),
-        ),
-        "/phone/getversion" | "/getversion" | "/phone/getforcefix" | "/getforcefix" => (
-            200,
-            None,
-            "{\"errornu\":\"0\",\"errordesc\":\"OK\",\"needUpdate\":0}".to_string(),
-        ),
+        "/phone/applereview" | "/applereview" => {
+            let mut obj = JsonObject::new();
+            obj.insert("ret", 404);
+            obj.insert("msg", "no data");
+            obj.insert("applereview", 0);
+            obj.insert("ip", "127.0.0.1");
+            obj.insert("errornu", "0");
+            obj.insert("errordesc", "OK");
+            (200, None, JsonValue::Object(obj).to_json_string())
+        }
+        "/phone/serverlist" | "/serverlist" => {
+            let mut srv = JsonObject::new();
+            srv.insert("groupid", "2900161");
+            srv.insert("server_id", "game2900161");
+            srv.insert("name", "S1.LocalRustQA");
+            srv.insert("host", cfg.game_tcp_host.as_str());
+            srv.insert("port", cfg.game_tcp_port);
+            srv.insert("status", 1);
+            srv.insert("hot", 1);
+            srv.insert("new", 1);
+            srv.insert("openDateTime", "2018-11-06-09-00-00");
+
+            let mut root = JsonObject::new();
+            root.insert("item", vec![JsonValue::Object(srv)]);
+
+            let mut obj = JsonObject::new();
+            obj.insert("errornu", "0");
+            obj.insert("errordesc", "OK");
+            obj.insert("root", JsonValue::Object(root));
+            (200, None, JsonValue::Object(obj).to_json_string())
+        }
+        "/phone/supernotice" | "/supernotice" | "/phone/notice" | "/notice" => {
+            let mut obj = JsonObject::new();
+            obj.insert("errornu", "0");
+            obj.insert("errordesc", "OK");
+            obj.insert("data", "GServer Local Rust Server Ready");
+            (200, None, JsonValue::Object(obj).to_json_string())
+        }
+        "/phone/getversion" | "/getversion" => {
+            let pkg_ver = params
+                .get("packageVersion")
+                .map(String::as_str)
+                .filter(|s| !s.is_empty());
+            let scr_ver = params
+                .get("scriptVersion")
+                .map(String::as_str)
+                .filter(|s| !s.is_empty());
+            let mut ver_val = build_version_response(&VersionPolicy::default(), pkg_ver, scr_ver);
+            if let gserver_http::JsonValue::Object(ref mut obj) = ver_val {
+                obj.insert("needUpdate", 0);
+            }
+            (200, None, ver_val.to_json_string())
+        }
         "/phone/login" | "/login" => {
             metrics.login_requests.fetch_add(1, Ordering::Relaxed);
             let userid = params
@@ -192,27 +226,45 @@ pub fn route_sdk_http_request(
                 .filter(|s| !s.is_empty())
                 .cloned()
                 .unwrap_or_else(|| "win32_local_0001".to_string());
-            let pid = md5_hex(format!("gserver_pid_{}", userid).as_bytes())[..16].to_string();
-            let sess_id = md5_hex(format!("phpsess_{}_{}", userid, cfg.fixed_timestamp).as_bytes());
+            let pid = md5_hex(format!("gserver_pid_{userid}"))[..16].to_string();
+            let sess_id = md5_hex(format!("phpsess_{userid}_{}", cfg.fixed_timestamp));
             if let Ok(mut map) = cookie_sessions.lock() {
                 map.insert(sess_id.clone(), pid.clone());
             }
-            let set_cookie = format!("PHPSESSID={}; Path=/; HttpOnly", sess_id);
-            let body = format!(
-                "{{\"errornu\":\"0\",\"uid\":\"{}\",\"pid\":\"{}\",\"errordesc\":\"OK(1-0)\",\"newuser\":0,\"lastLoginTime\":{},\"regPlosgn\":2,\"env\":\"local\"}}",
-                json_escape(&pid),
-                json_escape(&pid),
-                cfg.fixed_timestamp
-            );
-            (200, Some(set_cookie), body)
+            let set_cookie = format!("{COOKIE_PHPSESSID}={sess_id}; Path=/; HttpOnly");
+            let mut obj = JsonObject::new();
+            obj.insert("errornu", "0");
+            obj.insert("uid", pid.as_str());
+            obj.insert("pid", pid.as_str());
+            obj.insert("errordesc", "OK(1-0)");
+            obj.insert("newuser", 0);
+            obj.insert("lastLoginTime", cfg.fixed_timestamp);
+            obj.insert("regPlosgn", 2);
+            obj.insert("env", "local");
+            (200, Some(set_cookie), JsonValue::Object(obj).to_json_string())
         }
         "/phone/loginrole" | "/loginrole" => {
             let pid = resolve_pid(&params, incoming_phpsessid.as_deref(), cookie_sessions);
-            let body = format!(
-                "{{\"root\":{{\"role\":[{{\"uid\":52592,\"pid\":\"{}\",\"uname\":\"LocalGeneral\",\"level\":120,\"quality\":6,\"groupid\":\"2900161\",\"groupname\":\"S1.LocalRustQA\",\"maintainflag\":0,\"vip\":10}}],\"recallOk\":0}},\"errornu\":\"0\",\"errordesc\":\"OK(1-0)\"}}",
-                json_escape(&pid)
-            );
-            (200, None, body)
+            let mut role = JsonObject::new();
+            role.insert("uid", 52592);
+            role.insert("pid", pid.as_str());
+            role.insert("uname", "LocalGeneral");
+            role.insert("level", 120);
+            role.insert("quality", 6);
+            role.insert("groupid", "2900161");
+            role.insert("groupname", "S1.LocalRustQA");
+            role.insert("maintainflag", 0);
+            role.insert("vip", 10);
+
+            let mut root = JsonObject::new();
+            root.insert("role", vec![JsonValue::Object(role)]);
+            root.insert("recallOk", 0);
+
+            let mut obj = JsonObject::new();
+            obj.insert("root", JsonValue::Object(root));
+            obj.insert("errornu", "0");
+            obj.insert("errordesc", "OK(1-0)");
+            (200, None, JsonValue::Object(obj).to_json_string())
         }
         "/phone/gethash" | "/gethash" => {
             metrics.gethash_requests.fetch_add(1, Ordering::Relaxed);
@@ -227,38 +279,49 @@ pub fn route_sdk_http_request(
                 .filter(|s| !s.is_empty())
                 .cloned()
                 .unwrap_or_else(|| "2900161".to_string());
-            let hash = md5_hex(format!("{}:{}:{}", pid, group_id, cfg.fixed_timestamp).as_bytes());
+            let hash = md5_hex(format!("{pid}:{group_id}:{}", cfg.fixed_timestamp));
 
-            // Exact field schema from `live_capture_filtered.log:76`!
-            let body = format!(
-                "{{\"AMF\":3,\"b_fightLog\":1,\"canCreateUser\":1,\"canPay\":0,\"errordesc\":\"OK\",\"errornu\":\"0\",\"feignRoleId\":\"487932b\",\"host\":\"{}\",\"mergeServerTime\":1667530800,\"offset\":\"-420\",\"openDateTime\":\"2018-11-06-09-00-00\",\"pid\":\"{}\",\"plname\":\"android\",\"plosgn\":2,\"port\":{},\"ptype\":0,\"qid\":\"1243831974477471744\",\"serverID\":\"game{}\",\"timestamp\":{},\"uuid\":\"{}\",\"hash\":\"{}\"}}",
-                json_escape(&cfg.game_tcp_host),
-                json_escape(&pid),
-                cfg.game_tcp_port,
-                json_escape(&group_id),
-                cfg.fixed_timestamp,
-                json_escape(&uuid),
-                hash
-            );
-            (200, None, body)
+            let mut obj = JsonObject::with_capacity(21);
+            obj.insert("AMF", 3);
+            obj.insert("b_fightLog", 1);
+            obj.insert("canCreateUser", 1);
+            obj.insert("canPay", 0);
+            obj.insert("errordesc", "OK");
+            obj.insert("errornu", "0");
+            obj.insert("feignRoleId", "487932b");
+            obj.insert("host", cfg.game_tcp_host.as_str());
+            obj.insert("mergeServerTime", 1_667_530_800_i64);
+            obj.insert("offset", "-420");
+            obj.insert("openDateTime", "2018-11-06-09-00-00");
+            obj.insert("pid", pid);
+            obj.insert("plname", "android");
+            obj.insert("plosgn", 2);
+            obj.insert("port", cfg.game_tcp_port);
+            obj.insert("ptype", 0);
+            obj.insert("qid", "1243831974477471744");
+            obj.insert("serverID", format!("game{group_id}"));
+            obj.insert("timestamp", cfg.fixed_timestamp);
+            obj.insert("uuid", uuid);
+            obj.insert("hash", hash);
+            (200, None, JsonValue::Object(obj).to_json_string())
         }
-        _ => (
-            200,
-            None,
-            "{\"errornu\":\"0\",\"errordesc\":\"OK\",\"data\":{}}".to_string(),
-        ),
+        _ => {
+            let mut obj = JsonObject::new();
+            obj.insert("errornu", "0");
+            obj.insert("errordesc", "OK");
+            obj.insert("data", JsonValue::object());
+            (200, None, JsonValue::Object(obj).to_json_string())
+        }
     }
 }
 
 fn resolve_pid(
-    params: &std::collections::BTreeMap<String, String>,
+    params: &BTreeMap<String, String>,
     phpsessid: Option<&str>,
     cookie_sessions: &Mutex<HashMap<String, String>>,
 ) -> String {
-    if let Some(p) = params.get("pid") {
-        if !p.is_empty() {
-            return p.clone();
-        }
+    if let Some(p) = params.get("pid").filter(|s| !s.is_empty()) {
+        return p.clone();
     }
     if let Some(sid) = phpsessid {
         if let Ok(map) = cookie_sessions.lock() {
@@ -268,106 +331,4 @@ fn resolve_pid(
         }
     }
     "636df6782106606d".to_string()
-}
-
-fn extract_phpsessid(cookie_hdr: &str) -> Option<String> {
-    for part in cookie_hdr.split(';') {
-        let trimmed = part.trim();
-        if let Some(val) = trimmed.strip_prefix("PHPSESSID=") {
-            if !val.is_empty() {
-                return Some(val.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn handle_http_client(
-    mut stream: TcpStream,
-    cfg: &HttpGatewayConfig,
-    metrics: &HttpGatewayMetrics,
-    cookie_sessions: &Mutex<HashMap<String, String>>,
-) -> io::Result<()> {
-    // Clear Winsock2 `FIONBIO` non-blocking mode inherited from `listener.set_nonblocking(true)`
-    // before installing blocking read/write timeouts.
-    stream.set_nonblocking(false)?;
-    let _ = stream.set_nodelay(true);
-    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
-
-    let mut req_buf = Vec::with_capacity(1024);
-    let mut chunk = [0u8; 2048];
-    loop {
-        match stream.read(&mut chunk) {
-            Ok(0) => return Ok(()),
-            Ok(n) => {
-                req_buf.extend_from_slice(&chunk[..n]);
-                if req_buf.windows(4).any(|w| w == b"\r\n\r\n")
-                    || req_buf.len() >= MAX_HTTP_HEADER_BYTES
-                {
-                    break;
-                }
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        }
-    }
-
-    let req_str = String::from_utf8_lossy(&req_buf);
-    let mut lines = req_str.lines();
-    let req_line = match lines.next() {
-        Some(l) => l,
-        None => return Ok(()),
-    };
-    let mut parts = req_line.split_whitespace();
-    let _method = parts.next().unwrap_or("GET");
-    let target = parts.next().unwrap_or("/");
-
-    let mut cookie_hdr: Option<String> = None;
-    for line in lines {
-        if line.is_empty() {
-            break;
-        }
-        if let Some((name, val)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("cookie") {
-                cookie_hdr = Some(val.trim().to_string());
-            }
-        }
-    }
-
-    let (status, set_cookie, body) =
-        route_sdk_http_request(target, cookie_hdr.as_deref(), cfg, metrics, cookie_sessions);
-    let status_text = if status == 200 { "OK" } else { "Forbidden" };
-
-    let mut resp = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n",
-        status,
-        status_text,
-        body.len()
-    );
-    if let Some(sc) = set_cookie {
-        resp.push_str(&format!("Set-Cookie: {}\r\n", sc));
-    }
-    resp.push_str("\r\n");
-    resp.push_str(&body);
-
-    stream.write_all(resp.as_bytes())?;
-    stream.flush()?;
-    let _ = stream.shutdown(Shutdown::Write);
-    Ok(())
-}
-
-fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            other => out.push(other),
-        }
-    }
-    out
 }

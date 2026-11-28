@@ -10,232 +10,20 @@
 //!    `arena.enterArena` + `arena.challenge` with live defender `re.arena.dataRefresh` push).
 //! 5. Full server shutdown & restart recovery from CRC32 WAL + atomic JSON (`PlayerStore`).
 
+mod common;
+
 use std::collections::BTreeMap;
-use std::fs;
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::net::SocketAddr;
 
-use gserver_http::{parse_json, sign_mapi_url, JsonValue, VNSG2_MAPI_APP_KEY};
-use gserver_protocol::{
-    amf3, decode_s2c_frame_batch, zlib_decompress, RpcRequest, S2cEnvelope, ServerRxDecoder, Value,
+use common::{
+    assert_catalog_valid, complete_mapi_login_and_gethash, decode_zlib_amf3, raw_http_get,
+    raw_http_get_text, run_bootstrap_from_step7, tcp_relogin_existing_role, E2eWireClient,
+    TempDirGuard,
 };
-use gserver_rpc_catalog::{
-    validate_response_for_method, Amf3Value as CatalogAmf3, RpcResponseEnvelope, BOOTSTRAP_SEQUENCE,
-};
-use gserver::bridge::protocol_to_catalog_amf3;
 use gserver::{DaemonConfig, RunningServer};
-
-static TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
-
-struct TempDirGuard {
-    path: PathBuf,
-}
-
-impl TempDirGuard {
-    fn new(label: &str) -> Self {
-        let id = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "gserver_full_stack_{label}_{}_{}",
-            std::process::id(),
-            id
-        ));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).expect("create temp test dir");
-        Self { path }
-    }
-}
-
-impl Drop for TempDirGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
-/// Minimal raw HTTP/1.1 client for testing `gserver-http` over loopback TCP.
-fn raw_http_get(
-    addr: SocketAddr,
-    target_path_and_query: &str,
-    cookies: &[String],
-) -> (u16, Vec<String>, JsonValue) {
-    let mut stream = TcpStream::connect(addr).expect("connect HTTP MAPI");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    let mut req = format!(
-        "GET {target_path_and_query} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n"
-    );
-    if !cookies.is_empty() {
-        req.push_str(&format!("Cookie: {}\r\n", cookies.join("; ")));
-    }
-    req.push_str("\r\n");
-    stream.write_all(req.as_bytes()).expect("write HTTP GET");
-
-    let mut resp_bytes = Vec::new();
-    stream.read_to_end(&mut resp_bytes).expect("read HTTP resp");
-    let resp_str = String::from_utf8_lossy(&resp_bytes);
-    let (head, body) = resp_str
-        .split_once("\r\n\r\n")
-        .expect("valid HTTP CRLFCRLF");
-    let mut lines = head.lines();
-    let status_line = lines.next().expect("HTTP status line");
-    let status_code: u16 = status_line
-        .split_whitespace()
-        .nth(1)
-        .unwrap()
-        .parse()
-        .unwrap();
-
-    let mut set_cookies = Vec::new();
-    for line in lines {
-        if let Some((k, v)) = line.split_once(':') {
-            if k.trim().eq_ignore_ascii_case("Set-Cookie") {
-                if let Some(pair) = v.trim().split(';').next() {
-                    set_cookies.push(pair.trim().to_string());
-                }
-            }
-        }
-    }
-
-    let json = parse_json(body.trim()).unwrap_or_else(|e| {
-        panic!("expected JSON body from {target_path_and_query}, got error {e}: {body}")
-    });
-    (status_code, set_cookies, json)
-}
-
-/// Simulated GServer (`vnsg2`) C++ / Lua TCP client speaking 24-byte `LCPacket` C2S and 8-byte S2C.
-struct SimulatedGameClient {
-    stream: TcpStream,
-    rx: ServerRxDecoder,
-    seq: u64,
-    token: String,
-    queued_pushes: Vec<S2cEnvelope>,
-}
-
-impl SimulatedGameClient {
-    fn connect(addr: SocketAddr) -> Self {
-        let stream = TcpStream::connect(addr).expect("connect TCP game server");
-        stream.set_nodelay(true).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        Self {
-            stream,
-            rx: ServerRxDecoder::new(),
-            seq: 1,
-            token: "0".to_string(),
-            queued_pushes: Vec::new(),
-        }
-    }
-
-    fn call_rpc(&mut self, method: &str, args: Vec<Value>, compress_c2s: bool) -> S2cEnvelope {
-        self.seq += 1;
-        let telemetry = method == "user.stat" || method == "user.guideEvent";
-        let cb_name = if telemetry {
-            method.to_string()
-        } else {
-            format!("{method}_{}", self.seq)
-        };
-        let req = RpcRequest::new(method, args, &self.token, cb_name.clone());
-        let wire = req
-            .to_lcpacket_frame(compress_c2s)
-            .expect("encode 24B LCPacket");
-        self.stream.write_all(&wire).expect("send C2S frame");
-        self.stream.flush().unwrap();
-
-        let mut buf = [0u8; 8192];
-        loop {
-            while let Some(frame) = self.rx.next_frame().expect("decode S2C 8B frame") {
-                let batch = decode_s2c_frame_batch(&frame).expect("decode S2C envelope batch");
-                for env in batch.items {
-                    if let Some(ref tok) = env.token {
-                        if !tok.is_empty() && tok != "0" {
-                            self.token = tok.clone();
-                        }
-                    }
-                    if env.callback_name.as_deref() == Some(cb_name.as_str()) {
-                        return env;
-                    }
-                    self.queued_pushes.push(env);
-                }
-            }
-            let n = self
-                .stream
-                .read(&mut buf)
-                .expect("read S2C response bytes before timeout");
-            assert!(n > 0, "unexpected EOF waiting for {cb_name}");
-            self.rx.feed(&buf[..n]);
-        }
-    }
-
-    fn drain_pushes(&mut self) -> Vec<S2cEnvelope> {
-        let _ = self
-            .stream
-            .set_read_timeout(Some(Duration::from_millis(50)));
-        let mut buf = [0u8; 8192];
-        loop {
-            match self.stream.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    self.rx.feed(&buf[..n]);
-                    while let Some(frame) = self.rx.next_frame().expect("decode S2C push frame") {
-                        let batch = decode_s2c_frame_batch(&frame).expect("decode push batch");
-                        self.queued_pushes.extend(batch.items);
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-        let _ = self
-            .stream
-            .set_read_timeout(Some(Duration::from_secs(5)));
-        std::mem::take(&mut self.queued_pushes)
-    }
-
-    fn wait_for_push(&mut self, expected_cb: &str) -> Vec<S2cEnvelope> {
-        if self
-            .queued_pushes
-            .iter()
-            .any(|p| p.callback_name.as_deref() == Some(expected_cb))
-        {
-            return std::mem::take(&mut self.queued_pushes);
-        }
-        let _ = self
-            .stream
-            .set_read_timeout(Some(Duration::from_millis(50)));
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut buf = [0u8; 8192];
-        while Instant::now() < deadline {
-            match self.stream.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    self.rx.feed(&buf[..n]);
-                    while let Some(frame) = self.rx.next_frame().expect("decode S2C push frame") {
-                        let batch = decode_s2c_frame_batch(&frame).expect("decode push batch");
-                        self.queued_pushes.extend(batch.items);
-                    }
-                    if self
-                        .queued_pushes
-                        .iter()
-                        .any(|p| p.callback_name.as_deref() == Some(expected_cb))
-                    {
-                        break;
-                    }
-                }
-                Err(_) => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        }
-        let _ = self
-            .stream
-            .set_read_timeout(Some(Duration::from_secs(5)));
-        std::mem::take(&mut self.queued_pushes)
-    }
-}
+use gserver_http::JsonValue;
+use gserver_protocol::Value;
+use gserver_rpc_catalog::BOOTSTRAP_SEQUENCE;
 
 /// Performs the full HTTP SDK guest auth + `/phone/login` + `/phone/gethash` handshake.
 fn http_authenticate_guest(
@@ -248,83 +36,23 @@ fn http_authenticate_guest(
         &format!("/api/login/createUser/guest?deviceID={device_id}&gameID=GCLIENT"),
         &[],
     );
-    let user_id = guest_json.get("userID").and_then(JsonValue::as_str).expect("guest userID");
+    let user_id = guest_json
+        .get("userID")
+        .and_then(JsonValue::as_str)
+        .expect("guest userID");
     let session_id = guest_json
         .get("sessionID")
         .and_then(JsonValue::as_str)
         .expect("guest sessionID");
 
-    let login_url = sign_mapi_url(
-        &format!(
-            "http://{http_addr}/phone/login/?pl=android_vnsg2&gn=vnsg2&os=win32&userid={user_id}&sessionid={session_id}"
-        ),
+    complete_mapi_login_and_gethash(
+        http_addr,
+        user_id,
+        session_id,
+        device_id,
         1_795_500_500,
-        VNSG2_MAPI_APP_KEY,
-    );
-    let login_target = login_url
-        .strip_prefix(&format!("http://{http_addr}"))
-        .unwrap();
-    let (status, cookies, login_json) = raw_http_get(http_addr, login_target, &[]);
-    assert_eq!(status, 200);
-    assert!(!cookies.is_empty(), "/phone/login must issue session cookies");
-    let pid = login_json
-        .get("pid")
-        .and_then(JsonValue::as_scalar_string)
-        .expect("pid in /phone/login");
-
-    let gethash_url = sign_mapi_url(
-        &format!(
-            "http://{http_addr}/phone/gethash/?pl=android_vnsg2&gn=vnsg2&pid={pid}&group_id=2900161&uuid=uuid_{device_id}"
-        ),
-        1_795_500_501,
-        VNSG2_MAPI_APP_KEY,
-    );
-    let gethash_target = gethash_url
-        .strip_prefix(&format!("http://{http_addr}"))
-        .unwrap();
-
-    if verify_cookie_102 {
-        // Without cookies, strict_session MUST return `errornu = "102"`!
-        let (_, _, err_json) = raw_http_get(http_addr, gethash_target, &[]);
-        assert_eq!(
-            err_json.get("errornu").and_then(JsonValue::as_str),
-            Some("102"),
-            "missing cookie on /phone/gethash must return errornu='102'"
-        );
-    }
-
-    let (_, _, hash_json) = raw_http_get(http_addr, gethash_target, &cookies);
-    assert_eq!(hash_json.get("errornu").and_then(JsonValue::as_str), Some("0"));
-    let hash = hash_json
-        .get("hash")
-        .and_then(JsonValue::as_str)
-        .unwrap()
-        .to_string();
-    let host = hash_json
-        .get("host")
-        .and_then(JsonValue::as_str)
-        .unwrap()
-        .to_string();
-    let port = hash_json
-        .get("port")
-        .and_then(JsonValue::as_u64)
-        .unwrap() as u16;
-
-    (pid, hash, host, port)
-}
-
-fn assert_catalog_valid(method: &str, args: &[Value], env: &S2cEnvelope) {
-    let cat_args: Vec<CatalogAmf3> = args.iter().map(protocol_to_catalog_amf3).collect();
-    let cat_resp = RpcResponseEnvelope {
-        err: env.err.clone(),
-        callback_name: env.callback_name.clone().unwrap_or_default(),
-        ret: protocol_to_catalog_amf3(&env.ret),
-        time: env.time.unwrap_or(1_795_500_500),
-        token: env.token.clone().unwrap_or_default(),
-    };
-    if let Err(violations) = validate_response_for_method(method, &cat_args, &cat_resp, true) {
-        panic!("Lua schema violation(s) on {method}: {violations:#?}");
-    }
+        verify_cookie_102,
+    )
 }
 
 #[test]
@@ -372,7 +100,7 @@ fn full_stack_bootstrap_multiplayer_gm_gameplay_and_restart_recovery() {
         http_authenticate_guest(http_addr, "win32_dev_alpha", true);
     assert_eq!(port_a, tcp_addr.port());
 
-    let mut client_a = SimulatedGameClient::connect(tcp_addr);
+    let mut client_a = E2eWireClient::connect(tcp_addr);
 
     // Negative check: forged TCP login hash is rejected
     let bad_login = client_a.call_rpc(
@@ -434,25 +162,11 @@ fn full_stack_bootstrap_multiplayer_gm_gameplay_and_restart_recovery() {
     assert_catalog_valid("user.userLogin", &ul_args, &env_ul);
 
     // Run every remaining Stage B/C/D/E bootstrap RPC and validate every single one!
-    for spec in BOOTSTRAP_SEQUENCE.iter().filter(|s| s.step_order >= 7) {
-        let args: Vec<Value> = match spec.method {
-            "bag.bagInfo" => vec![Value::empty_array()],
-            "copy.getList" => vec![Value::Int(1)],
-            "copy.getCopy" => vec![Value::Int(1001)],
-            "reward.getRewardList" => vec![Value::Int(0), Value::Int(0)],
-            "user.guideEvent" => vec![Value::Int(240)],
-            "barrage.enterRoom" => vec![Value::Int(1)],
-            "barrage.getBarrageRecord" => vec![Value::Int(1)],
-            _ => vec![],
-        };
-        let compress_c2s = spec.step_order % 2 == 0;
-        let resp = client_a.call_rpc(spec.method, args.clone(), compress_c2s);
-        assert_catalog_valid(spec.method, &args, &resp);
-    }
+    run_bootstrap_from_step7(&mut client_a);
 
     // 4. Connect Client B, create character, and verify real-time multiplayer town + chat + GM pushes!
     let (pid_b, hash_b, _, _) = http_authenticate_guest(http_addr, "win32_dev_bravo", false);
-    let mut client_b = SimulatedGameClient::connect(tcp_addr);
+    let mut client_b = E2eWireClient::connect(tcp_addr);
     client_b.call_rpc(
         "user.login",
         vec![Value::map([
@@ -480,7 +194,9 @@ fn full_stack_bootstrap_multiplayer_gm_gameplay_and_restart_recovery() {
 
     let pushes_a = client_a.wait_for_push("town.addPlayer");
     assert!(
-        pushes_a.iter().any(|p| p.callback_name.as_deref() == Some("town.addPlayer")),
+        pushes_a
+            .iter()
+            .any(|p| p.callback_name.as_deref() == Some("town.addPlayer")),
         "Client A must receive live `town.addPlayer` push when Client B enters town"
     );
 
@@ -489,7 +205,9 @@ fn full_stack_bootstrap_multiplayer_gm_gameplay_and_restart_recovery() {
     assert_eq!(mv_b.err, "ok");
     let pushes_a_mv = client_a.wait_for_push("town.move");
     assert!(
-        pushes_a_mv.iter().any(|p| p.callback_name.as_deref() == Some("town.move")),
+        pushes_a_mv
+            .iter()
+            .any(|p| p.callback_name.as_deref() == Some("town.move")),
         "Client A must receive live `town.move` push"
     );
 
@@ -510,7 +228,9 @@ fn full_stack_bootstrap_multiplayer_gm_gameplay_and_restart_recovery() {
     }
     let pushes_b_town = client_b.wait_for_push("town.update");
     assert!(
-        pushes_b_town.iter().any(|p| p.callback_name.as_deref() == Some("town.update")),
+        pushes_b_town
+            .iter()
+            .any(|p| p.callback_name.as_deref() == Some("town.update")),
         "Client B must receive `town.update` when Client A upgrades level/VIP"
     );
 
@@ -524,7 +244,9 @@ fn full_stack_bootstrap_multiplayer_gm_gameplay_and_restart_recovery() {
     assert_eq!(chat_send.err, "ok");
     let pushes_b_chat = client_b.wait_for_push("re.chat.getMsg");
     assert!(
-        pushes_b_chat.iter().any(|p| p.callback_name.as_deref() == Some("re.chat.getMsg")),
+        pushes_b_chat
+            .iter()
+            .any(|p| p.callback_name.as_deref() == Some("re.chat.getMsg")),
         "Client B must receive live `re.chat.getMsg` broadcast"
     );
 
@@ -533,9 +255,7 @@ fn full_stack_bootstrap_multiplayer_gm_gameplay_and_restart_recovery() {
         panic!("expected array of Zlib-compressed chat blobs");
     };
     assert!(!blobs.is_empty());
-    let compressed_blob = blobs[0].as_bytes().expect("ByteString blob");
-    let decompressed_blob = zlib_decompress(compressed_blob).expect("RFC 1950 Zlib chat blob");
-    let (decoded_msg, _) = amf3::decode(&decompressed_blob).expect("AMF3 chat record");
+    let decoded_msg = decode_zlib_amf3(&blobs[0]);
     assert_eq!(
         decoded_msg
             .get_field("message")
@@ -606,9 +326,7 @@ fn full_stack_bootstrap_multiplayer_gm_gameplay_and_restart_recovery() {
     assert_eq!(pass.err, "ok");
 
     let rec = client_a.call_rpc("battle.getRecord", vec![Value::Int(brid as i32)], false);
-    let rec_zipped = rec.ret.as_bytes().expect("Zlib-compressed battle record");
-    let rec_raw = zlib_decompress(rec_zipped).expect("unzip battle record");
-    let (rec_amf, _) = amf3::decode(&rec_raw).expect("decode battle record AMF3");
+    let rec_amf = decode_zlib_amf3(&rec.ret);
     assert_eq!(rec_amf.get_field("appraisal").and_then(Value::as_i64), Some(50));
 
     // Arena: Client B registers first (pos 16), Client A registers second (pos 17), Client A challenges Client B!
@@ -678,19 +396,8 @@ fn full_stack_bootstrap_multiplayer_gm_gameplay_and_restart_recovery() {
         "restarted MAPI serverlist must expose persisted Lv.55 VIP 12 character"
     );
 
-    let mut client_a2 = SimulatedGameClient::connect(server2.tcp_addr);
-    client_a2.call_rpc(
-        "user.login",
-        vec![Value::map([
-            ("pid", Value::String(pid_a)),
-            ("qid", Value::String("alpha".into())),
-            ("hash", Value::String(hash_a2)),
-            ("serverID", Value::String("game2900161".into())),
-        ])],
-        false,
-    );
-    let ul2 = client_a2.call_rpc("user.userLogin", vec![Value::Int(uid_a as i32)], false);
-    assert_eq!(ul2.ret.as_str(), Some("ok"));
+    let mut client_a2 =
+        tcp_relogin_existing_role(server2.tcp_addr, &pid_a, "alpha", &hash_a2, uid_a);
 
     let post_restart_user = client_a2.call_rpc("user.getUser", vec![], false);
     assert_eq!(
@@ -724,9 +431,37 @@ fn full_stack_bootstrap_multiplayer_gm_gameplay_and_restart_recovery() {
         "GM-summoned Red hero 20008 + raffle heroes must survive full server restart"
     );
 
-    // Keep unused BTreeMap check clean
-    let _: BTreeMap<u8, u8> = BTreeMap::new();
-
     drop(client_a2);
     server2.shutdown();
+}
+
+#[test]
+fn test_cobalt_env_map_precedence_and_coordinated_healthz() {
+    let mut cfg = DaemonConfig::default();
+    let mut env_map = BTreeMap::new();
+    env_map.insert("COBALT_HTTP_ADDR".to_string(), "127.0.0.1:0".to_string());
+    env_map.insert("COBALT_TCP_ADDR".to_string(), "127.0.0.1:0".to_string());
+    env_map.insert("COBALT_PUBLIC_HOST".to_string(), "127.0.0.1".to_string());
+    env_map.insert("COBALT_STRICT_ALL".to_string(), "true".to_string());
+    env_map.insert("COBALT_STRICT_SIGN".to_string(), "false".to_string());
+    cfg.apply_env_map(&env_map);
+
+    assert_eq!(cfg.http_bind, "127.0.0.1:0");
+    assert_eq!(cfg.tcp_bind, "127.0.0.1:0");
+    assert!(cfg.strict_rpc);
+    assert!(!cfg.strict_sign);
+
+    let tmp = TempDirGuard::new("cobalt_hz");
+    cfg.data_dir = tmp.path.clone();
+
+    let srv = RunningServer::start(cfg).expect("start unified RunningServer");
+    let expected_tcp = srv.tcp_addr.to_string();
+
+    let (status, _, body) = raw_http_get_text(srv.http_addr, "/healthz", &[]);
+    assert_eq!(status, 200, "status={status}");
+    assert!(body.contains(r#""ready":true"#), "body={body}");
+    assert!(body.contains(r#""mode":"unified_http_tcp""#), "body={body}");
+    assert!(body.contains(&expected_tcp), "body={body}");
+
+    srv.shutdown();
 }

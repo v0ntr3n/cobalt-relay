@@ -1,52 +1,41 @@
 #![forbid(unsafe_code)]
 
-//! Asymmetric wire framing codecs & stateful `GCLIENT.exe` (`CConnection.cpp` + `Network.lua`)
-//! behavioral simulator.
-//!
-//! ## Critical Asymmetric Wire Framing Verified from Source
-//!
-//! ### 1. Client -> Server TX (`LCPacket.cpp:271-308`, 24-Byte Header)
-//! - `bytes[0..4]`: Big-Endian `u32` `body_len` (`> 0`, server rejects `> 16 MiB` BEFORE allocating!)
-//! - `bytes[4..8]`: Protocol flags `{ compress ? 1 : 0, 1, 1, 1 }`
-//! - `bytes[8..24]`: 16-byte raw `BabelTime` adjacent-XOR MD5 digest (`compute_babeltime_md5`)
-//! - `bytes[24 .. 24 + body_len]`: Zlib-compressed (when `flags[0] != 0`) or raw AMF3 payload
-//!
-//! ### 2. Server -> Client RX (`CConnection.h:216`, `CConnection.cpp:489-599`, `Network.lua:102-186`, 8-Byte Header)
-//! - `head[0..4]` (Lua `1..4`): Big-Endian `u32` `body_len` (**MUST be `> 0`**; `0` triggers `HEAD_SCRIPT_ERROR` -> `close()`!)
-//! - `head[4]`    (Lua `5`):    `flag0` (`0x00`)
-//! - `head[5]`    (Lua `6`):    `zipped` (`string.byte(head, 6, 7)` 1st return! `!= 0` -> `GameUtil:unzipData`)
-//! - `head[6]`    (Lua `7`):    `multi`  (`string.byte(head, 6, 7)` 2nd return! `!= 0` -> `for i = 1, #data.ret`)
-//! - `head[7]`    (Lua `8`):    `flag3` (`0x00`)
+//! Asymmetric wire framing adapters backed by [`gserver_protocol`] (`ClientRxDecoder`,
+//! `ServerTxEncoder`, `ServerRxDecoder`, `S2cEnvelope`) plus the stateful `GCLIENT.exe`
+//! (`CConnection.cpp` + `Network.lua`) behavioral simulator (`Win32ClientSimulator`).
 
 use std::collections::HashMap;
 use std::fmt;
 
+use gserver_protocol::error::FrameError as ProtoFrameError;
+use gserver_protocol::frame::{
+    encode_c2s_lcpacket, C2sFrameMode, C2sWireKind, ClientRxDecoder, S2cFlags, S2cFrame,
+    ServerRxDecoder, ServerTxEncoder, C2S_LCPACKET_HEADER_SIZE, DEFAULT_MAX_FRAME_BODY_LEN,
+    S2C_HEADER_SIZE,
+};
+use gserver_protocol::rpc::{encode_s2c_multi_frame, MultiItemEncoding, S2cEnvelope};
+use gserver_protocol::zlib::DEFAULT_MAX_DECOMPRESSED_SIZE;
+use gserver_protocol::ProtocolError;
+
 use crate::amf3::{Amf3Decoder, Amf3Encoder, Amf3Error, Amf3Value};
 use crate::crypto::compute_babeltime_md5;
-use crate::zlib::{zlib_compress, zlib_decompress_bounded, ZlibError};
+use crate::zlib::{map_zlib_error, ZlibError};
 
-pub const CLIENT_LC_HEADER_LEN: usize = 24;
-pub const SERVER_RX_HEADER_LEN: usize = 8;
+pub const CLIENT_LC_HEADER_LEN: usize = C2S_LCPACKET_HEADER_SIZE;
+pub const SERVER_RX_HEADER_LEN: usize = S2C_HEADER_SIZE;
 
-/// Strict private-server DoS ceiling (`16 MiB` = `16,777,216` bytes) for both raw incoming
-/// frame bodies and decompressed zlib streams.
-pub const MAX_SERVER_FRAME_BODY_LEN: usize = 16 * 1024 * 1024;
+/// Strict private-server DoS ceiling (`16 MiB`) for incoming frame bodies and decompressed streams.
+pub const MAX_SERVER_FRAME_BODY_LEN: usize = DEFAULT_MAX_FRAME_BODY_LEN as usize;
 
 /// Client-side `CConnection.cpp:30` `kMaxFrameBodyLength` (`64 MiB`).
-pub const CLIENT_MAX_FRAME_BODY_LEN: usize = 64 * 1024 * 1024;
+pub const CLIENT_MAX_FRAME_BODY_LEN: usize = DEFAULT_MAX_DECOMPRESSED_SIZE;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameError {
     ZeroLengthBody,
-    OversizedBody {
-        declared: u32,
-        max: usize,
-    },
+    OversizedBody { declared: u32, max: usize },
     InvalidClientFlags([u8; 4]),
-    Md5Mismatch {
-        expected: [u8; 16],
-        actual: [u8; 16],
-    },
+    Md5Mismatch { expected: [u8; 16], actual: [u8; 16] },
     Zlib(ZlibError),
     Amf3(Amf3Error),
     ClientSocketClosed(&'static str),
@@ -58,19 +47,15 @@ impl fmt::Display for FrameError {
         match self {
             Self::ZeroLengthBody => write!(f, "zero-length frame body (body_len == 0)"),
             Self::OversizedBody { declared, max } => {
-                write!(
-                    f,
-                    "oversized frame body {} bytes exceeds max {} bytes",
-                    declared, max
-                )
+                write!(f, "oversized frame body {declared} bytes exceeds max {max} bytes")
             }
-            Self::InvalidClientFlags(fl) => write!(f, "invalid LCPacket flags {:?}", fl),
+            Self::InvalidClientFlags(fl) => write!(f, "invalid LCPacket flags {fl:?}"),
             Self::Md5Mismatch { .. } => write!(f, "BabelTime 16-byte MD5 integrity check failed"),
-            Self::Zlib(e) => write!(f, "zlib decompression error: {}", e),
-            Self::Amf3(e) => write!(f, "AMF3 codec error: {}", e),
-            Self::ClientSocketClosed(reason) => write!(f, "Win32 CConnection closed: {}", reason),
+            Self::Zlib(e) => write!(f, "zlib decompression error: {e}"),
+            Self::Amf3(e) => write!(f, "AMF3 codec error: {e}"),
+            Self::ClientSocketClosed(reason) => write!(f, "Win32 CConnection closed: {reason}"),
             Self::LuaRuntimeCrash(msg) => {
-                write!(f, "Win32 Lua runtime panic in Network.lua: {}", msg)
+                write!(f, "Win32 Lua runtime panic in Network.lua: {msg}")
             }
         }
     }
@@ -88,32 +73,59 @@ impl From<Amf3Error> for FrameError {
     }
 }
 
+fn map_proto_error(err: ProtocolError, max_body_len: usize, wire_body_len: usize) -> FrameError {
+    match err {
+        ProtocolError::Frame(ProtoFrameError::ZeroBodyLength) => FrameError::ZeroLengthBody,
+        ProtocolError::Frame(ProtoFrameError::BodyTooLarge {
+            body_len,
+            max_body_len,
+        }) => FrameError::OversizedBody {
+            declared: body_len,
+            max: max_body_len as usize,
+        },
+        ProtocolError::Frame(ProtoFrameError::PayloadOverflow { len }) => {
+            FrameError::OversizedBody {
+                declared: u32::try_from(len).unwrap_or(u32::MAX),
+                max: max_body_len,
+            }
+        }
+        ProtocolError::Frame(ProtoFrameError::InvalidLcFlags(fl)) => {
+            FrameError::InvalidClientFlags(fl)
+        }
+        ProtocolError::Frame(ProtoFrameError::Md5Mismatch { expected, actual }) => {
+            FrameError::Md5Mismatch { expected, actual }
+        }
+        ProtocolError::Frame(ProtoFrameError::UnrecognizedC2sHeader(hdr)) => {
+            FrameError::InvalidClientFlags([hdr[4], hdr[5], hdr[6], hdr[7]])
+        }
+        ProtocolError::Frame(ProtoFrameError::InvalidMultiSubPacket { .. }) => {
+            FrameError::LuaRuntimeCrash("invalid multi sub-packet".to_string())
+        }
+        ProtocolError::Zlib(ze) => FrameError::Zlib(map_zlib_error(ze, wire_body_len)),
+        ProtocolError::Amf3(ae) => FrameError::Amf3(Amf3Error::from(ae)),
+        ProtocolError::Envelope(ee) => FrameError::LuaRuntimeCrash(ee.to_string()),
+        ProtocolError::BtDecrypt(be) => FrameError::LuaRuntimeCrash(be.to_string()),
+    }
+}
+
 // ============================================================================
 // Client -> Server 24-Byte `LCPacket` Encoder & Streaming Server Decoder
 // ============================================================================
 
-/// Encodes a client->server 24-byte `LCPacket` matching `LCPacket::makeLCPacket` (`LCPacket.cpp:271-308`).
+/// Encodes a client->server 24-byte `LCPacket` via [`gserver_protocol::frame::encode_c2s_lcpacket`].
 pub fn encode_client_lc_packet(raw_payload: &[u8], compress: bool) -> Vec<u8> {
-    let body = if compress {
-        zlib_compress(raw_payload)
-    } else {
-        raw_payload.to_vec()
-    };
-    let body_len = body.len() as u32;
-    let md5 = compute_babeltime_md5(&body);
-
-    let mut pkt = Vec::with_capacity(CLIENT_LC_HEADER_LEN + body.len());
-    pkt.extend_from_slice(&body_len.to_be_bytes());
-    pkt.push(if compress { 1 } else { 0 });
-    pkt.push(1);
-    pkt.push(1);
-    pkt.push(1);
+    if let Ok(pkt) = encode_c2s_lcpacket(raw_payload, compress) {
+        return pkt;
+    }
+    let md5 = compute_babeltime_md5(&[]);
+    let mut pkt = Vec::with_capacity(CLIENT_LC_HEADER_LEN);
+    pkt.extend_from_slice(&0u32.to_be_bytes());
+    pkt.extend_from_slice(&[u8::from(compress), 1, 1, 1]);
     pkt.extend_from_slice(&md5);
-    pkt.extend_from_slice(&body);
     pkt
 }
 
-/// Checks if `data` is already a valid framed 24-byte `LCPacket` (`CConnection.cpp:347` idempotency guard).
+/// Checks if `data` is already a valid framed 24-byte `LCPacket` (`CConnection.cpp:347`).
 pub fn is_framed_lc_packet(data: &[u8]) -> bool {
     if data.len() < CLIENT_LC_HEADER_LEN {
         return false;
@@ -125,8 +137,7 @@ pub fn is_framed_lc_packet(data: &[u8]) -> bool {
     if (data[4] != 0 && data[4] != 1) || data[5] != 1 || data[6] != 1 || data[7] != 1 {
         return false;
     }
-    let expected = compute_babeltime_md5(&data[CLIENT_LC_HEADER_LEN..]);
-    data[8..24] == expected
+    data[8..24] == compute_babeltime_md5(&data[CLIENT_LC_HEADER_LEN..])
 }
 
 #[derive(Debug, Clone)]
@@ -138,61 +149,11 @@ pub struct DecodedClientPacket {
     pub value: Amf3Value,
 }
 
-/// Observable parser stage of [`ServerRxStreamDecoder`] for deterministic connection lifecycle diagnostics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DecoderParserState {
-    /// Buffer is empty (`0` unconsumed bytes); awaiting next 24-byte `LCPacket` frame.
-    Idle,
-    /// Partial 4-byte big-endian `body_len` prefix buffered (`1..=3` bytes).
-    AwaitingLengthPrefix { buffered_bytes: usize },
-    /// Validated `body_len` prefix present, awaiting remainder of 24-byte `LCPacket` header (`4..=23` bytes).
-    AwaitingLcHeader {
-        declared_body_len: u32,
-        buffered_bytes: usize,
-    },
-    /// Complete 24-byte `LCPacket` header buffered, awaiting remaining payload body bytes.
-    AwaitingFrameBody {
-        declared_body_len: u32,
-        buffered_body_bytes: usize,
-    },
-}
-
-impl fmt::Display for DecoderParserState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Idle => write!(f, "Idle"),
-            Self::AwaitingLengthPrefix { buffered_bytes } => {
-                write!(f, "AwaitingLengthPrefix({}/4B)", buffered_bytes)
-            }
-            Self::AwaitingLcHeader {
-                declared_body_len,
-                buffered_bytes,
-            } => write!(
-                f,
-                "AwaitingLcHeader(hdr={}/24B, declared_body={}B)",
-                buffered_bytes, declared_body_len
-            ),
-            Self::AwaitingFrameBody {
-                declared_body_len,
-                buffered_body_bytes,
-            } => write!(
-                f,
-                "AwaitingFrameBody(body={}/{}B)",
-                buffered_body_bytes, declared_body_len
-            ),
-        }
-    }
-}
-
-/// Stateful, DoS-hardened streaming decoder for client->server 24-byte `LCPacket` streams.
-/// Handles 1-byte TCP segmentation, pipelined multi-packet bursts, immediate `> 16 MiB`
-/// rejection BEFORE body allocation, MD5 integrity verification, and bounded zlib inflation.
+/// Stateful, DoS-hardened streaming decoder backed by [`gserver_protocol::ClientRxDecoder`].
 pub struct ServerRxStreamDecoder {
-    buf: Vec<u8>,
-    read_offset: usize,
+    inner: ClientRxDecoder,
     max_body_len: usize,
     max_decompressed_len: usize,
-    require_strict_flags: bool,
 }
 
 impl Default for ServerRxStreamDecoder {
@@ -203,182 +164,85 @@ impl Default for ServerRxStreamDecoder {
 
 impl ServerRxStreamDecoder {
     pub fn new(max_body_len: usize, max_decompressed_len: usize) -> Self {
+        let max_u32 = u32::try_from(max_body_len).unwrap_or(u32::MAX);
         Self {
-            buf: Vec::new(),
-            read_offset: 0,
+            inner: ClientRxDecoder::new(C2sFrameMode::LcPacket24)
+                .with_limits(max_u32, max_decompressed_len),
             max_body_len,
             max_decompressed_len,
-            require_strict_flags: true,
         }
     }
 
     pub fn buffered_len(&self) -> usize {
-        self.buf.len().saturating_sub(self.read_offset)
+        self.inner.buffered_len()
     }
 
-    /// Returns the exact current framing parser stage for structured connection diagnostics.
-    pub fn parser_state(&self) -> DecoderParserState {
-        let avail = self.buffered_len();
-        if avail == 0 {
-            return DecoderParserState::Idle;
-        }
-        if avail < 4 {
-            return DecoderParserState::AwaitingLengthPrefix {
-                buffered_bytes: avail,
-            };
-        }
-        let hdr_slice = &self.buf[self.read_offset..];
-        let declared_body_len =
-            u32::from_be_bytes([hdr_slice[0], hdr_slice[1], hdr_slice[2], hdr_slice[3]]);
-        if avail < CLIENT_LC_HEADER_LEN {
-            DecoderParserState::AwaitingLcHeader {
-                declared_body_len,
-                buffered_bytes: avail,
-            }
-        } else {
-            DecoderParserState::AwaitingFrameBody {
-                declared_body_len,
-                buffered_body_bytes: avail - CLIENT_LC_HEADER_LEN,
-            }
-        }
-    }
-
-    /// Feeds incoming TCP bytes and extracts all complete, validated client packets.
-    /// Immediately returns `Err(FrameError::OversizedBody)` as soon as a 4-byte or 24-byte header
-    /// declares `body_len > max_body_len`, WITHOUT waiting for or allocating the oversized body!
     pub fn push_bytes(&mut self, chunk: &[u8]) -> Result<Vec<DecodedClientPacket>, FrameError> {
-        if !chunk.is_empty() {
-            self.buf.extend_from_slice(chunk);
-        }
-
+        self.inner.feed(chunk);
         let mut packets = Vec::new();
         loop {
-            let avail = self.buf.len() - self.read_offset;
-            if avail < 4 {
-                break;
-            }
-            let hdr_slice = &self.buf[self.read_offset..];
-            let body_len =
-                u32::from_be_bytes([hdr_slice[0], hdr_slice[1], hdr_slice[2], hdr_slice[3]]);
-            if body_len == 0 {
-                self.clear();
-                return Err(FrameError::ZeroLengthBody);
-            }
-            if (body_len as usize) > self.max_body_len {
-                self.clear();
-                return Err(FrameError::OversizedBody {
-                    declared: body_len,
-                    max: self.max_body_len,
-                });
-            }
-
-            if avail < CLIENT_LC_HEADER_LEN {
-                break;
-            }
-
-            let flags = [hdr_slice[4], hdr_slice[5], hdr_slice[6], hdr_slice[7]];
-            if self.require_strict_flags
-                && ((flags[0] != 0 && flags[0] != 1)
-                    || flags[1] != 1
-                    || flags[2] != 1
-                    || flags[3] != 1)
-            {
-                self.clear();
-                return Err(FrameError::InvalidClientFlags(flags));
-            }
-
-            let total_frame_len = CLIENT_LC_HEADER_LEN + (body_len as usize);
-            if avail < total_frame_len {
-                break;
-            }
-
-            let mut md5 = [0u8; 16];
-            md5.copy_from_slice(&hdr_slice[8..24]);
-            let body = &hdr_slice[CLIENT_LC_HEADER_LEN..total_frame_len];
-
-            let expected_md5 = compute_babeltime_md5(body);
-            if md5 != expected_md5 {
-                self.clear();
-                return Err(FrameError::Md5Mismatch {
-                    expected: expected_md5,
-                    actual: md5,
-                });
-            }
-
-            let raw_amf3 = if flags[0] != 0 {
-                match zlib_decompress_bounded(body, self.max_decompressed_len) {
-                    Ok(decompressed) => decompressed,
-                    Err(e) => {
-                        self.clear();
-                        return Err(FrameError::Zlib(e));
-                    }
+            match self.inner.next_frame() {
+                Ok(None) => break,
+                Ok(Some(frame)) => {
+                    let (compressed, md5) = match frame.kind {
+                        C2sWireKind::LcPacket24 { compressed, md5 } => (compressed, md5),
+                        C2sWireKind::Raw4Byte => (false, [0u8; 16]),
+                    };
+                    let value = match Amf3Decoder::decode(&frame.amf3_payload) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            self.clear();
+                            return Err(FrameError::Amf3(e));
+                        }
+                    };
+                    packets.push(DecodedClientPacket {
+                        body_len: frame.wire_body_len,
+                        flags: [u8::from(compressed), 1, 1, 1],
+                        md5,
+                        raw_amf3: frame.amf3_payload,
+                        value,
+                    });
                 }
-            } else {
-                body.to_vec()
-            };
-
-            let value = match Amf3Decoder::decode(&raw_amf3) {
-                Ok(v) => v,
-                Err(e) => {
+                Err(err) => {
                     self.clear();
-                    return Err(FrameError::Amf3(e));
+                    return Err(map_proto_error(err, self.max_body_len, 6));
                 }
-            };
-
-            self.read_offset += total_frame_len;
-            packets.push(DecodedClientPacket {
-                body_len,
-                flags,
-                md5,
-                raw_amf3,
-                value,
-            });
+            }
         }
-
-        self.compact();
         Ok(packets)
     }
 
     pub fn clear(&mut self) {
-        self.buf.clear();
-        self.read_offset = 0;
-    }
-
-    fn compact(&mut self) {
-        if self.read_offset == 0 {
-            return;
-        }
-        if self.read_offset >= self.buf.len() {
-            self.buf.clear();
-            self.read_offset = 0;
-        } else if self.read_offset >= 4096 || self.read_offset * 2 >= self.buf.len() {
-            self.buf.drain(..self.read_offset);
-            self.read_offset = 0;
-        }
+        let max_u32 = u32::try_from(self.max_body_len).unwrap_or(u32::MAX);
+        self.inner = ClientRxDecoder::new(C2sFrameMode::LcPacket24)
+            .with_limits(max_u32, self.max_decompressed_len);
     }
 }
 
 // ============================================================================
-// Server -> Client 8-Byte Frame Builder (`CConnection.cpp` + `Network.lua`)
+// Server -> Client 8-Byte Frame & Envelope Builders (`ServerTxEncoder` + `S2cEnvelope`)
 // ============================================================================
 
-/// Encodes a single server->client 8-byte framed packet (`multi = 0`):
-/// `head = [body_len BE (4B), flag0=0, zipped=head[5], multi=0 (head[6]), flag3=0]`.
+fn server_tx_encoder() -> ServerTxEncoder {
+    ServerTxEncoder::new().with_max_body_len(CLIENT_MAX_FRAME_BODY_LEN as u32)
+}
+
+/// Encodes a single server->client 8-byte framed packet (`multi = 0`) via [`ServerTxEncoder`].
 pub fn encode_server_single_frame(
     payload: &Amf3Value,
     compress: bool,
 ) -> Result<Vec<u8>, FrameError> {
     let raw_amf3 = Amf3Encoder::encode(payload)?;
-    encode_server_raw_frame(&raw_amf3, compress, false)
+    if raw_amf3.is_empty() {
+        return Err(FrameError::ZeroLengthBody);
+    }
+    server_tx_encoder()
+        .encode_single(&raw_amf3, compress)
+        .map_err(|e| map_proto_error(e, CLIENT_MAX_FRAME_BODY_LEN, raw_amf3.len()))
 }
 
-/// Encodes a multi-RPC batch server->client 8-byte framed packet (`multi = 1` at `head[6]`,
-/// Lua `string.byte(head, 7)`!).
-///
-/// Supports both `Network.lua:112-118` inner representations:
-/// - `encode_inner_as_bytes = false`: `data.ret[i]` is a decoded AMF3 table (`type == "table"`).
-/// - `encode_inner_as_bytes = true`: `data.ret[i]` is a nested AMF3 binary `0x06 String`
-///   decoded via `amf3.decode(data.ret[i])` on line 116!
+/// Encodes a multi-RPC batch server->client 8-byte framed packet (`multi = 1` at `head[6]`)
+/// backed by [`S2cEnvelope`], [`encode_s2c_multi_frame`], and [`ServerTxEncoder`].
 pub fn encode_server_multi_frame(
     rets: &[Amf3Value],
     token: Option<&str>,
@@ -386,32 +250,68 @@ pub fn encode_server_multi_frame(
     compress: bool,
     encode_inner_as_bytes: bool,
 ) -> Result<Vec<u8>, FrameError> {
+    let tx = server_tx_encoder();
+    if !rets.is_empty() {
+        let maybe_envelopes: Result<Vec<S2cEnvelope>, _> = rets
+            .iter()
+            .map(|v| {
+                v.to_protocol_value()
+                    .map_err(ProtocolError::from_qa_amf3)
+                    .and_then(|pv| S2cEnvelope::from_amf3_value(&pv))
+            })
+            .collect();
+        if let Ok(envelopes) = maybe_envelopes {
+            let encoding = if encode_inner_as_bytes {
+                MultiItemEncoding::NestedAmf3ByteString
+            } else {
+                MultiItemEncoding::InlineObject
+            };
+            return encode_s2c_multi_frame(
+                &tx,
+                &envelopes,
+                token,
+                server_time_sec,
+                compress,
+                encoding,
+            )
+            .map_err(|e| map_proto_error(e, CLIENT_MAX_FRAME_BODY_LEN, 6));
+        }
+    }
+
     let mut dense_items = Vec::with_capacity(rets.len());
     for item in rets {
         if encode_inner_as_bytes {
-            let nested = Amf3Encoder::encode(item)?;
-            dense_items.push(Amf3Value::String(nested));
+            dense_items.push(Amf3Value::String(Amf3Encoder::encode(item)?));
         } else {
             dense_items.push(item.clone());
         }
     }
-
     let mut fields = vec![("ret", Amf3Value::dense_array(dense_items))];
     if let Some(tok) = token {
         fields.push(("token", Amf3Value::from_str(tok)));
     }
     if let Some(ts) = server_time_sec {
-        // CRITICAL: Must use `from_i64_auto` -> `0x05 Double` for timestamps > 268,435,455!
         fields.push(("time", Amf3Value::from_i64_auto(ts)));
     }
-
-    let outer = Amf3Value::anonymous_object(fields);
-    let raw_amf3 = Amf3Encoder::encode(&outer)?;
-    encode_server_raw_frame(&raw_amf3, compress, true)
+    let raw_amf3 = Amf3Encoder::encode(&Amf3Value::anonymous_object(fields))?;
+    tx.encode_multi_amf3_payload(&raw_amf3, compress)
+        .map_err(|e| map_proto_error(e, CLIENT_MAX_FRAME_BODY_LEN, raw_amf3.len()))
 }
 
-/// Low-level 8-byte server->client header builder verifying 0-based `head[5] = zipped`
-/// and `head[6] = multi` (matching 1-based Lua `string.byte(head, 6, 7)`).
+trait FromQaAmf3 {
+    fn from_qa_amf3(err: Amf3Error) -> Self;
+}
+
+impl FromQaAmf3 for ProtocolError {
+    fn from_qa_amf3(_: Amf3Error) -> Self {
+        ProtocolError::Amf3(gserver_protocol::Amf3Error::LengthOverflow {
+            kind: "QA value",
+            len: 0,
+        })
+    }
+}
+
+/// Low-level 8-byte server->client header builder backed by [`ServerTxEncoder`].
 pub fn encode_server_raw_frame(
     raw_amf3: &[u8],
     compress: bool,
@@ -420,26 +320,12 @@ pub fn encode_server_raw_frame(
     if raw_amf3.is_empty() {
         return Err(FrameError::ZeroLengthBody);
     }
-    let body = if compress {
-        zlib_compress(raw_amf3)
-    } else {
-        raw_amf3.to_vec()
-    };
-    if body.is_empty() {
-        return Err(FrameError::ZeroLengthBody);
-    }
-    let body_len = body.len() as u32;
-    let mut out = Vec::with_capacity(SERVER_RX_HEADER_LEN + body.len());
-    out.extend_from_slice(&body_len.to_be_bytes()); // head[0..4] -> Lua 1..4
-    out.push(0x00); // head[4]    -> Lua 5 (flag0)
-    out.push(if compress { 1 } else { 0 }); // head[5]    -> Lua 6 (zipped!)
-    out.push(if multi { 1 } else { 0 }); // head[6]    -> Lua 7 (multi!)
-    out.push(0x00); // head[7]    -> Lua 8 (flag3)
-    out.extend_from_slice(&body);
-    Ok(out)
+    server_tx_encoder()
+        .encode_frame(raw_amf3, S2cFlags::new(compress, multi))
+        .map_err(|e| map_proto_error(e, CLIENT_MAX_FRAME_BODY_LEN, raw_amf3.len()))
 }
 
-/// Builds standard GServer RPC response envelope `{ err = "ok", callback = { callbackName = ... }, ret = ... }`.
+/// Builds a standard GServer RPC response envelope via [`S2cEnvelope`].
 pub fn build_rpc_response(
     err: &str,
     callback_name: &str,
@@ -447,6 +333,18 @@ pub fn build_rpc_response(
     token: Option<&str>,
     server_time_sec: Option<i64>,
 ) -> Amf3Value {
+    if !matches!(ret, Amf3Value::Undefined) && err != "ping" {
+        if let Ok(proto_ret) = ret.to_protocol_value() {
+            let env = S2cEnvelope {
+                err: err.to_string(),
+                callback_name: Some(callback_name.to_string()),
+                ret: proto_ret,
+                token: token.map(str::to_owned),
+                time: server_time_sec,
+            };
+            return Amf3Value::from_protocol_value(env.to_amf3_value());
+        }
+    }
     let mut entries = vec![
         ("err", Amf3Value::from_str(err)),
         (
@@ -464,12 +362,9 @@ pub fn build_rpc_response(
     Amf3Value::anonymous_object(entries)
 }
 
-/// Builds a server heartbeat `{ err = "ping", time = ... }` (`Network.lua:144` skips `ret.callback`).
+/// Builds a server heartbeat `{ err = "ping", time = ... }` via [`S2cEnvelope::ping`].
 pub fn build_ping_response(server_time_sec: i64) -> Amf3Value {
-    Amf3Value::anonymous_object(vec![
-        ("err", Amf3Value::from_str("ping")),
-        ("time", Amf3Value::from_i64_auto(server_time_sec)),
-    ])
+    Amf3Value::from_protocol_value(S2cEnvelope::ping().with_time(server_time_sec).to_amf3_value())
 }
 
 // ============================================================================
@@ -491,15 +386,8 @@ struct PendingRpcContext {
 }
 
 /// Cycle-accurate simulation of `CConnection.cpp` (`headerSize_ = 8`, `doRead`) coupled to
-/// `Network.lua` (`ctor`, `sendMsg`, `sendStatMsg`, `sendUnusedMsg`, `onBodyData`).
-///
-/// Reproduces EVERY real Win32 client failure mode when fed malformed private-server frames:
-/// - `body_len == 0` or `> 64 MiB` -> `HEAD_SCRIPT_ERROR` socket close (`CConnection.cpp:528-533`)
-/// - Off-by-one `zipped`/`multi` flags (`head[4]` vs `head[5]`/`head[6]`)
-/// - 24-byte `LCPacket` accidentally sent to 8-byte RX client
-/// - `null`/`undefined` nil-holes inside `multi=1` `data.ret` array (`#data.ret` Lua 5.1 semantics!)
-/// - Missing `ret.callback.callbackName` when `ret.err != "ping"`
-/// - Timestamp truncation corrupting `self.mOffset = data.time - client_now_sec`
+/// `Network.lua` (`ctor`, `sendMsg`, `sendStatMsg`, `sendUnusedMsg`, `onBodyData`),
+/// using [`ServerRxDecoder`] for streaming 8-byte S2C frame reassembly and bounded Zlib inflation.
 pub struct Win32ClientSimulator {
     pub token: String,
     pub time_offset_sec: i64,
@@ -508,10 +396,7 @@ pub struct Win32ClientSimulator {
     pub close_reason: Option<&'static str>,
     pub message_boxes: Vec<String>,
 
-    recv_buf: Vec<u8>,
-    recv_cursor: usize,
-    expected_body_len: u32,
-    current_header: [u8; SERVER_RX_HEADER_LEN],
+    rx_decoder: ServerRxDecoder,
     contexts: HashMap<String, PendingRpcContext>,
 }
 
@@ -522,7 +407,6 @@ impl Default for Win32ClientSimulator {
 }
 
 impl Win32ClientSimulator {
-    /// Matches `Network:ctor()` (`Network.lua:36-45`): `mToken = "0"`, `mOffset = 0`, `mId = 1`.
     pub fn new() -> Self {
         Self {
             token: "0".to_string(),
@@ -531,15 +415,12 @@ impl Win32ClientSimulator {
             socket_closed: false,
             close_reason: None,
             message_boxes: Vec::new(),
-            recv_buf: Vec::new(),
-            recv_cursor: 0,
-            expected_body_len: 0,
-            current_header: [0u8; SERVER_RX_HEADER_LEN],
+            rx_decoder: ServerRxDecoder::new()
+                .with_limits(CLIENT_MAX_FRAME_BODY_LEN as u32, CLIENT_MAX_FRAME_BODY_LEN),
             contexts: HashMap::new(),
         }
     }
 
-    /// Registers a persistent server-push handler (`Network:regPushCallback`, `context[3] = true`).
     pub fn reg_push_callback(&mut self, method: &str) {
         self.contexts.insert(
             method.to_string(),
@@ -550,10 +431,6 @@ impl Win32ClientSimulator {
         );
     }
 
-    /// Encodes a standard client->server RPC via `Network:sendMsg` (`Network.lua:265-288`):
-    /// increments `self.mId` first (`_2`, `_3`, ...), registers `mContext[callbackName]`,
-    /// AMF3-encodes `{ method, args, token, callback = { callbackName } }`, and wraps in a
-    /// 24-byte `LCPacket` (`compress = true`).
     pub fn build_send_msg(
         &mut self,
         method: &str,
@@ -561,7 +438,7 @@ impl Win32ClientSimulator {
         compress: bool,
     ) -> (String, Vec<u8>) {
         self.m_id += 1;
-        let callback_name = format!("{}_{}", method, self.m_id);
+        let callback_name = format!("{method}_{}", self.m_id);
         let request = Amf3Value::anonymous_object(vec![
             ("method", Amf3Value::from_str(method)),
             ("args", args),
@@ -585,8 +462,6 @@ impl Win32ClientSimulator {
         (callback_name, encode_client_lc_packet(&raw_amf3, compress))
     }
 
-    /// Encodes a fire-and-forget `user.stat` telemetry packet (`Network:sendStatMsg`, `Network.lua:304-319`),
-    /// which intentionally does NOT insert into `mContext`.
     pub fn build_stat_msg(&self, args: Amf3Value) -> Vec<u8> {
         let request = Amf3Value::anonymous_object(vec![
             ("method", Amf3Value::from_str("user.stat")),
@@ -604,8 +479,6 @@ impl Win32ClientSimulator {
         encode_client_lc_packet(&raw_amf3, true)
     }
 
-    /// Replays all unacknowledged one-shot RPCs with updated `self.mToken` (`Network:sendUnusedMsg`,
-    /// `Network.lua:205-216`).
     pub fn build_reconnect_replay_packets(&self) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
         for ctx in self.contexts.values() {
@@ -642,7 +515,6 @@ impl Win32ClientSimulator {
         self.contexts.values().filter(|c| !c.is_push).count()
     }
 
-    /// Feeds incoming server->client TCP bytes into `CConnection::doRead()` -> `Network:onBodyData`.
     pub fn receive_server_bytes(
         &mut self,
         chunk: &[u8],
@@ -653,84 +525,44 @@ impl Win32ClientSimulator {
                 self.close_reason.unwrap_or("ALREADY_CLOSED"),
             ));
         }
-        if !chunk.is_empty() {
-            self.recv_buf.extend_from_slice(chunk);
-        }
+        self.rx_decoder.feed(chunk);
 
         let mut events = Vec::new();
         loop {
-            let avail = self.recv_buf.len() - self.recv_cursor;
-            if self.expected_body_len == 0 {
-                if avail < SERVER_RX_HEADER_LEN {
-                    break;
+            match self.rx_decoder.next_frame() {
+                Ok(None) => break,
+                Ok(Some(frame)) => {
+                    self.on_s2c_frame(&frame, client_now_sec, &mut events)?;
                 }
-                let hdr_slice =
-                    &self.recv_buf[self.recv_cursor..self.recv_cursor + SERVER_RX_HEADER_LEN];
-                let body_len =
-                    u32::from_be_bytes([hdr_slice[0], hdr_slice[1], hdr_slice[2], hdr_slice[3]]);
-                // Exact `CConnection.cpp:493, 528-533` check!
-                if body_len == 0 || (body_len as usize) > CLIENT_MAX_FRAME_BODY_LEN {
+                Err(ProtocolError::Frame(
+                    ProtoFrameError::ZeroBodyLength | ProtoFrameError::BodyTooLarge { .. },
+                )) => {
                     self.socket_closed = true;
                     self.close_reason = Some("HEAD_SCRIPT_ERROR");
-                    self.recv_buf.clear();
-                    self.recv_cursor = 0;
+                    self.rx_decoder = ServerRxDecoder::new()
+                        .with_limits(CLIENT_MAX_FRAME_BODY_LEN as u32, CLIENT_MAX_FRAME_BODY_LEN);
                     return Err(FrameError::ClientSocketClosed("HEAD_SCRIPT_ERROR"));
                 }
-                self.current_header.copy_from_slice(hdr_slice);
-                self.recv_cursor += SERVER_RX_HEADER_LEN;
-                self.expected_body_len = body_len;
-            }
-
-            let body_avail = self.recv_buf.len() - self.recv_cursor;
-            let needed = self.expected_body_len as usize;
-            if body_avail < needed {
-                break;
-            }
-
-            let body = self.recv_buf[self.recv_cursor..self.recv_cursor + needed].to_vec();
-            let head = self.current_header;
-            self.recv_cursor += needed;
-            self.expected_body_len = 0;
-
-            self.on_body_data(&body, &head, client_now_sec, &mut events)?;
-        }
-
-        if self.recv_cursor > 0 {
-            if self.recv_cursor >= self.recv_buf.len() {
-                self.recv_buf.clear();
-                self.recv_cursor = 0;
-            } else if self.recv_cursor >= 4096 || self.recv_cursor * 2 >= self.recv_buf.len() {
-                self.recv_buf.drain(..self.recv_cursor);
-                self.recv_cursor = 0;
+                Err(other) => {
+                    self.rx_decoder = ServerRxDecoder::new()
+                        .with_limits(CLIENT_MAX_FRAME_BODY_LEN as u32, CLIENT_MAX_FRAME_BODY_LEN);
+                    return Err(map_proto_error(other, CLIENT_MAX_FRAME_BODY_LEN, 6));
+                }
             }
         }
-
         Ok(events)
     }
 
-    fn on_body_data(
+    fn on_s2c_frame(
         &mut self,
-        body: &[u8],
-        head: &[u8; SERVER_RX_HEADER_LEN],
+        frame: &S2cFrame,
         client_now_sec: i64,
         events: &mut Vec<DispatchedRpcEvent>,
     ) -> Result<(), FrameError> {
-        // Exact `Network.lua:104`: `local zipped, multi = string.byte(head, 6, 7);`
-        // Lua 1-based index 6 == Rust 0-based `head[5]`!
-        // Lua 1-based index 7 == Rust 0-based `head[6]`!
-        let zipped = head[5];
-        let multi = head[6];
-
-        let raw_amf3 = if zipped != 0 {
-            zlib_decompress_bounded(body, CLIENT_MAX_FRAME_BODY_LEN)?
-        } else {
-            body.to_vec()
-        };
-
-        let data = Amf3Decoder::decode(&raw_amf3)?;
+        let data = Amf3Decoder::decode(&frame.payload)?;
         let mut rets = Vec::new();
 
-        if multi != 0 {
+        if frame.flags.is_multi() {
             let ret_field = data.get_field("ret").ok_or_else(|| {
                 FrameError::LuaRuntimeCrash(
                     "Network.lua:112: attempt to get length of field 'ret' (a nil value)"
@@ -739,7 +571,6 @@ impl Win32ClientSimulator {
             })?;
             match ret_field {
                 Amf3Value::Array { dense, .. } => {
-                    // Simulate Lua 5.1 `#data.ret`: stops at nil holes (or panics if nil element is passed to `amf3.decode`)!
                     let lua_len = lua51_seq_len(dense);
                     for item in dense.iter().take(lua_len) {
                         match item {
@@ -764,9 +595,7 @@ impl Win32ClientSimulator {
                         }
                     }
                 }
-                Amf3Value::Object { .. } => {
-                    // In Lua 5.1, `#` on a pure string-keyed table is `0`!
-                }
+                Amf3Value::Object { .. } => {}
                 _ => {
                     return Err(FrameError::LuaRuntimeCrash(
                         "Network.lua:112: attempt to get length of field 'ret' (not a table)"
@@ -778,7 +607,6 @@ impl Win32ClientSimulator {
             rets.push(data.clone());
         }
 
-        // `Network.lua:123-130`: outer `data.token` and `data.time`
         if let Some(tok_val) = data.get_field("token") {
             if !matches!(tok_val, Amf3Value::Null | Amf3Value::Undefined) {
                 if let Some(s) = tok_val.as_str() {
@@ -792,7 +620,6 @@ impl Win32ClientSimulator {
             }
         }
 
-        // `Network.lua:132-134`: `if(#rets == 0) then Logger.showFatal("onBodyData rets 不合法") end`
         if rets.is_empty() {
             return Err(FrameError::LuaRuntimeCrash(
                 "Network.lua:133: Logger.showFatal('onBodyData rets 不合法') (#rets == 0)"
@@ -801,12 +628,7 @@ impl Win32ClientSimulator {
         }
 
         for ret in rets {
-            let err_val = ret.get_field("err");
-            let err_str = match err_val {
-                Some(v) => v.as_str(),
-                None => None,
-            };
-
+            let err_str = ret.get_field("err").and_then(|v| v.as_str());
             if err_str == Some("ping") {
                 events.push(DispatchedRpcEvent {
                     callback_name: "ping".to_string(),
@@ -817,7 +639,6 @@ impl Win32ClientSimulator {
                 continue;
             }
 
-            // `Network.lua:146`: `local callbackName = ret.callback.callbackName`
             let cb_obj = ret.get_field("callback").ok_or_else(|| {
                 FrameError::LuaRuntimeCrash(
                     "Network.lua:146: attempt to index field 'callback' (a nil value)".to_string(),
@@ -835,7 +656,6 @@ impl Win32ClientSimulator {
 
             let err_owned = err_str
                 .ok_or_else(|| {
-                    // `Network.lua:173`: `string.format(..., ret.err)` throws in Lua 5.1 when `ret.err == nil`!
                     FrameError::LuaRuntimeCrash(
                         "Network.lua:173: bad argument #5 to 'format' (string expected, got nil for ret.err)"
                             .to_string(),
@@ -864,14 +684,13 @@ impl Win32ClientSimulator {
                     });
                 }
             } else {
-                // `Network.lua:170-180`: CCMessageBox + clear one-shot context
                 if let Some(ctx) = self.contexts.get(&cb_name) {
                     if !ctx.is_push {
                         self.contexts.remove(&cb_name);
                     }
                 }
                 self.message_boxes
-                    .push(format!("callbackName: {} err: {}", cb_name, err_owned));
+                    .push(format!("callbackName: {cb_name} err: {err_owned}"));
                 events.push(DispatchedRpcEvent {
                     callback_name: cb_name,
                     err: err_owned,
@@ -885,15 +704,10 @@ impl Win32ClientSimulator {
     }
 }
 
-/// Models Lua 5.1 `luaH_getn` (`#t`): if `t[1] == nil`, length is `0`; if `t[N] == nil`,
-/// scans backward/binary-searches boundary. For dense prefix before first nil hole when trailing
-/// element is non-nil, Lua 5.1 binary search can either stop before the hole OR land past the hole
-/// (exposing `t[i] == nil` inside `for i = 1, #t`)!
 fn lua51_seq_len(dense: &[Amf3Value]) -> usize {
     if dense.is_empty() || matches!(dense[0], Amf3Value::Null | Amf3Value::Undefined) {
         return 0;
     }
-    // Exact port of Lua 5.1 `unbound_search` when array part covers `1..=dense.len()`:
     let is_nil = |idx1: usize| -> bool {
         if idx1 == 0 || idx1 > dense.len() {
             true

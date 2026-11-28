@@ -1,12 +1,11 @@
 //! `MainTown` bootstrap validator and multiplayer walking town room manager
-//! (`city.enter`, `city.enterShadowInfo`, `city.leave`, `city.getEnterList`, `town.move`,
-//! `castle.getInfo`, `imperialcity.*`, and server pushes `town.addPlayer`, `town.delPlayer`,
-//! `town.move`, `town.update`).
+//! (`city.enter`, `city.leave`, `city.getEnterList`, `town.move`, `imperialcity.*`,
+//! and server pushes `town.addPlayer`, `town.delPlayer`, `town.move`, `town.update`).
 
 use std::collections::BTreeMap;
 
 use crate::player::PlayerState;
-use crate::protocol::{push, DtoValue, PushPacket};
+use crate::protocol::{dto_arr, dto_map, dto_ok, push, DtoValue, PushPacket};
 
 /// Town map bounds and sharding limits extracted directly from decrypted `town.db` and `RoyalCityHero.lua`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,84 +24,46 @@ pub struct TownMapConfig {
 }
 
 impl TownMapConfig {
+    #[allow(clippy::too_many_arguments)]
+    const fn spec(
+        town_id: u32,
+        name: &'static str,
+        min_level: u32,
+        max_visible_players: usize,
+        spawn: (i32, i32),
+        x_bounds: (i32, i32),
+        y_bounds: (i32, i32),
+    ) -> Self {
+        Self {
+            town_id,
+            name,
+            min_level,
+            max_visible_players,
+            spawn_x: spawn.0,
+            spawn_y: spawn.1,
+            min_x: x_bounds.0,
+            max_x: x_bounds.1,
+            min_y: y_bounds.0,
+            max_y: y_bounds.1,
+            walk_speed: 200,
+        }
+    }
+
     /// Preset town definitions from `town.db` (`id = 1, 2, 3, 101`) + `RoyalCityHero.lua` (`id = 999`).
     pub fn preset(town_id: u32) -> Self {
         match town_id {
-            1 => Self {
-                town_id: 1,
-                name: "Dao Nguyen Thon",
-                min_level: 0,
-                max_visible_players: 10,
-                spawn_x: 40,
-                spawn_y: 40,
-                min_x: 0,
-                max_x: 2500,
-                min_y: 0,
-                max_y: 350,
-                walk_speed: 200,
-            },
-            2 => Self {
-                town_id: 2,
-                name: "Lac Duong",
-                min_level: 5,
-                max_visible_players: 20,
-                spawn_x: 40,
-                spawn_y: 40,
-                min_x: 0,
-                max_x: 2500,
-                min_y: 0,
-                max_y: 400,
-                walk_speed: 200,
-            },
-            3 => Self {
-                town_id: 3,
-                name: "Truong An",
-                min_level: 0,
-                max_visible_players: 40,
-                spawn_x: 120,
-                spawn_y: 120,
-                min_x: 0,
-                max_x: 2772,
-                min_y: 0,
-                max_y: 768,
-                walk_speed: 200,
-            },
-            101 => Self {
-                town_id: 101,
-                name: "Boss TG Truong Giac",
-                min_level: 0,
-                max_visible_players: 20,
-                spawn_x: 40,
-                spawn_y: 40,
-                min_x: 0,
-                max_x: 1250,
-                min_y: 0,
-                max_y: 300,
-                walk_speed: 200,
-            },
+            1 => Self::spec(1, "Dao Nguyen Thon", 0, 10, (40, 40), (0, 2500), (0, 350)),
+            2 => Self::spec(2, "Lac Duong", 5, 20, (40, 40), (0, 2500), (0, 400)),
+            3 => Self::spec(3, "Truong An", 0, 40, (120, 120), (0, 2772), (0, 768)),
+            101 => Self::spec(101, "Boss TG Truong Giac", 0, 20, (40, 40), (0, 1250), (0, 300)),
             // RoyalCity (`imperialcity.*`) bounds verified from `RoyalCityHero.lua`:
             // `self.m_checkRect = CCRect(50, 0, 2720, 342)` -> x in [50..2770], y in [0..342], speed = 200.
-            _ => Self {
-                town_id: 999,
-                name: "Hoang Thanh (RoyalCity)",
-                min_level: 1,
-                max_visible_players: 30,
-                spawn_x: 260,
-                spawn_y: 160,
-                min_x: 50,
-                max_x: 50 + 2720,
-                min_y: 0,
-                max_y: 342,
-                walk_speed: 200,
-            },
+            _ => Self::spec(999, "Hoang Thanh (RoyalCity)", 1, 30, (260, 160), (50, 2770), (0, 342)),
         }
     }
 
     pub fn clamp_point(&self, x: i32, y: i32) -> (i32, i32) {
-        (
-            x.clamp(self.min_x, self.max_x),
-            y.clamp(self.min_y, self.max_y),
-        )
+        (x.clamp(self.min_x, self.max_x), y.clamp(self.min_y, self.max_y))
     }
 }
 
@@ -122,11 +83,7 @@ pub enum MainTownCrashRisk {
 
 pub fn validate_maintown_bootstrap(player: &PlayerState) -> Result<(), MainTownCrashRisk> {
     if player.server_open_time.len() < 14
-        || !player
-            .server_open_time
-            .bytes()
-            .take(14)
-            .all(|b| b.is_ascii_digit())
+        || !player.server_open_time.bytes().take(14).all(|b| b.is_ascii_digit())
     {
         return Err(MainTownCrashRisk::InvalidServerOpenTime(
             player.server_open_time.clone(),
@@ -165,13 +122,7 @@ pub struct TownPlayerPresence {
 }
 
 impl TownPlayerPresence {
-    pub fn from_player(
-        player: &PlayerState,
-        town_id: u32,
-        instance_id: u32,
-        x: i32,
-        y: i32,
-    ) -> Self {
+    pub fn from_player(player: &PlayerState, town_id: u32, instance_id: u32, x: i32, y: i32) -> Self {
         Self {
             uid: player.uid,
             icuid: format!("{}_{}", player.server_id, player.uid),
@@ -191,37 +142,34 @@ impl TownPlayerPresence {
         }
     }
 
-    /// Serializes to the `npcData` / player entry schema read by `RoyalCityHero:setData`
-    /// (`npcData.extra.{icuid, uid, uname, utid, dress_id, title_id, server_id, fight_force, vip, level}`).
+    /// Serializes to the `npcData` / player entry schema read by `RoyalCityHero:setData`.
     pub fn to_dto(&self) -> DtoValue {
-        let extra = DtoValue::map([
-            ("icuid", DtoValue::from(self.icuid.as_str())),
-            ("uid", DtoValue::from(self.uid)),
-            ("uname", DtoValue::from(self.uname.as_str())),
-            ("utid", DtoValue::from(self.utid)),
-            ("dress_id", DtoValue::from(self.dress_id)),
-            ("title_id", DtoValue::from(self.title_id)),
-            ("server_id", DtoValue::from(self.server_id.as_str())),
-            ("fight_force", DtoValue::from(self.fight_force)),
-            ("vip", DtoValue::from(self.vip)),
-            ("level", DtoValue::from(self.level)),
-        ]);
-        DtoValue::map([
-            ("uid", DtoValue::from(self.uid)),
-            ("icuid", DtoValue::from(self.icuid.as_str())),
-            ("uname", DtoValue::from(self.uname.as_str())),
-            ("utid", DtoValue::from(self.utid)),
-            ("dress_id", DtoValue::from(self.dress_id)),
-            ("title_id", DtoValue::from(self.title_id)),
-            ("level", DtoValue::from(self.level)),
-            ("vip", DtoValue::from(self.vip)),
-            ("fight_force", DtoValue::from(self.fight_force)),
-            ("x", DtoValue::from(self.x)),
-            ("y", DtoValue::from(self.y)),
-            ("dir", DtoValue::from(self.dir)),
-            ("pos", DtoValue::map([("x", DtoValue::from(self.x)), ("y", DtoValue::from(self.y))])),
-            ("extra", extra),
-        ])
+        dto_map! {
+            "uid" => self.uid,
+            "icuid" => &self.icuid,
+            "uname" => &self.uname,
+            "utid" => self.utid,
+            "dress_id" => self.dress_id,
+            "title_id" => self.title_id,
+            "level" => self.level,
+            "vip" => self.vip,
+            "fight_force" => self.fight_force,
+            "x" => self.x,
+            "y" => self.y,
+            "dir" => self.dir,
+            "extra" => dto_map! {
+                "icuid" => &self.icuid,
+                "uid" => self.uid,
+                "uname" => &self.uname,
+                "utid" => self.utid,
+                "dress_id" => self.dress_id,
+                "title_id" => self.title_id,
+                "server_id" => &self.server_id,
+                "fight_force" => self.fight_force,
+                "vip" => self.vip,
+                "level" => self.level,
+            },
+        }
     }
 }
 
@@ -233,12 +181,22 @@ struct TownInstance {
     occupants: BTreeMap<u64, TownPlayerPresence>,
 }
 
+impl TownInstance {
+    fn broadcast_except(&self, exclude_uid: u64, pkt: &PushPacket, out: &mut PeerPushList) {
+        out.extend(
+            self.occupants
+                .keys()
+                .copied()
+                .filter(|&peer| peer != exclude_uid)
+                .map(|peer| (peer, pkt.clone())),
+        );
+    }
+}
+
 /// Manages sharded multiplayer town rooms (`city.*` and `imperialcity.*`) and peer broadcasts.
 #[derive(Debug, Clone, Default)]
 pub struct TownRoomManager {
-    /// `(town_id, instance_id) -> TownInstance`
     instances: BTreeMap<(u32, u32), TownInstance>,
-    /// `uid -> (town_id, instance_id)`
     player_loc: BTreeMap<u64, (u32, u32)>,
 }
 
@@ -275,21 +233,15 @@ impl TownRoomManager {
             broadcasts.extend(leave_bcasts);
         }
 
-        // Find first instance with free capacity or create a new shard
-        let mut target_inst_id = 1u32;
-        loop {
-            match self.instances.get(&(cfg.town_id, target_inst_id)) {
-                Some(inst) if inst.occupants.len() >= cfg.max_visible_players => {
-                    target_inst_id += 1;
-                }
-                _ => break,
-            }
-        }
+        let target_inst_id = (1u32..)
+            .find(|&inst_id| {
+                self.instances
+                    .get(&(cfg.town_id, inst_id))
+                    .map_or(true, |inst| inst.occupants.len() < cfg.max_visible_players)
+            })
+            .unwrap_or(1);
 
-        let (x, y) = cfg.clamp_point(
-            req_x.unwrap_or(cfg.spawn_x),
-            req_y.unwrap_or(cfg.spawn_y),
-        );
+        let (x, y) = cfg.clamp_point(req_x.unwrap_or(cfg.spawn_x), req_y.unwrap_or(cfg.spawn_y));
         let presence = TownPlayerPresence::from_player(player, cfg.town_id, target_inst_id, x, y);
 
         let inst = self
@@ -301,15 +253,10 @@ impl TownRoomManager {
             });
 
         let add_pkt = PushPacket::new(push::TOWN_ADD_PLAYER, presence.to_dto(), now_ts);
-        for &peer_uid in inst.occupants.keys() {
-            if peer_uid != player.uid {
-                broadcasts.push((peer_uid, add_pkt.clone()));
-            }
-        }
+        inst.broadcast_except(player.uid, &add_pkt, &mut broadcasts);
 
         inst.occupants.insert(player.uid, presence.clone());
-        self.player_loc
-            .insert(player.uid, (cfg.town_id, target_inst_id));
+        self.player_loc.insert(player.uid, (cfg.town_id, target_inst_id));
 
         let peers: Vec<DtoValue> = inst
             .occupants
@@ -317,76 +264,45 @@ impl TownRoomManager {
             .map(TownPlayerPresence::to_dto)
             .collect();
 
-        let ret = DtoValue::map([
-            ("ret", DtoValue::from("ok")),
-            ("town_id", DtoValue::from(cfg.town_id)),
-            ("instance_id", DtoValue::from(target_inst_id)),
-            ("self_icuid", DtoValue::from(presence.icuid.as_str())),
-            ("x", DtoValue::from(x)),
-            ("y", DtoValue::from(y)),
-            ("speed", DtoValue::from(cfg.walk_speed)),
-            ("enter_list", DtoValue::Array(peers.clone())),
-            ("arrUser", DtoValue::Array(peers)),
-        ]);
-
+        let ret = dto_ok! {
+            "town_id" => cfg.town_id,
+            "instance_id" => target_inst_id,
+            "self_icuid" => &presence.icuid,
+            "x" => x,
+            "y" => y,
+            "speed" => cfg.walk_speed,
+            "enter_list" => DtoValue::Array(peers),
+        };
         Ok((ret, broadcasts))
     }
 
-    /// Returns lightweight shadow/NPC presence snapshot (`city.enterShadowInfo` / `tmCity.enterShadowInfo`).
-    pub fn enter_shadow_info(&self, player: &PlayerState, town_id: u32) -> DtoValue {
-        let cfg = TownMapConfig::preset(town_id);
-        let self_presence =
-            TownPlayerPresence::from_player(player, cfg.town_id, 1, cfg.spawn_x, cfg.spawn_y);
-        let mut shadows = vec![self_presence.to_dto()];
-        if let Some(inst) = self.instances.get(&(cfg.town_id, 1)) {
-            for (&peer_uid, occ) in &inst.occupants {
-                if peer_uid != player.uid && shadows.len() < cfg.max_visible_players {
-                    shadows.push(occ.to_dto());
-                }
-            }
-        }
-        DtoValue::map([
-            ("ret", DtoValue::from("ok")),
-            ("town_id", DtoValue::from(cfg.town_id)),
-            ("shadow_list", DtoValue::Array(shadows.clone())),
-            ("enter_list", DtoValue::Array(shadows)),
-        ])
-    }
-
     /// Removes `uid` from their current room (`city.leave` / `imperialcity.leave`) and broadcasts `town.delPlayer`.
-    pub fn leave_town(&mut self, uid: u64, now_ts: u64) -> (DtoValue, Vec<(u64, PushPacket)>) {
+    pub fn leave_town(&mut self, uid: u64, now_ts: u64) -> (DtoValue, PeerPushList) {
         let mut broadcasts = Vec::new();
         if let Some((town_id, inst_id)) = self.player_loc.remove(&uid) {
             if let Some(inst) = self.instances.get_mut(&(town_id, inst_id)) {
                 if let Some(removed) = inst.occupants.remove(&uid) {
-                    let del_dto = DtoValue::map([
-                        ("uid", DtoValue::from(uid)),
-                        ("icuid", DtoValue::from(removed.icuid.as_str())),
-                    ]);
-                    let pkt = PushPacket::new(push::TOWN_DEL_PLAYER, del_dto, now_ts);
-                    for &peer_uid in inst.occupants.keys() {
-                        broadcasts.push((peer_uid, pkt.clone()));
-                    }
+                    let pkt = PushPacket::new(
+                        push::TOWN_DEL_PLAYER,
+                        dto_map! { "uid" => uid, "icuid" => &removed.icuid },
+                        now_ts,
+                    );
+                    inst.broadcast_except(uid, &pkt, &mut broadcasts);
                 }
             }
         }
-        (DtoValue::map([("ret", DtoValue::from("ok"))]), broadcasts)
+        (dto_ok!(), broadcasts)
     }
 
     /// Returns visible peers in the caller's current town shard (`city.getEnterList`).
     pub fn get_enter_list(&self, uid: u64) -> DtoValue {
         let Some(&(town_id, inst_id)) = self.player_loc.get(&uid) else {
-            return DtoValue::Array(Vec::new());
+            return dto_arr![];
         };
         let Some(inst) = self.instances.get(&(town_id, inst_id)) else {
-            return DtoValue::Array(Vec::new());
+            return dto_arr![];
         };
-        DtoValue::Array(
-            inst.occupants
-                .values()
-                .map(TownPlayerPresence::to_dto)
-                .collect(),
-        )
+        DtoValue::Array(inst.occupants.values().map(TownPlayerPresence::to_dto).collect())
     }
 
     /// Moves `uid` inside their town shard (`town.move` / `imperialcity.move`), clamping to the
@@ -400,10 +316,7 @@ impl TownRoomManager {
         now_ts: u64,
     ) -> Result<(DtoValue, PeerPushList), &'static str> {
         let &(town_id, inst_id) = self.player_loc.get(&uid).ok_or("not_in_town")?;
-        let inst = self
-            .instances
-            .get_mut(&(town_id, inst_id))
-            .ok_or("not_in_town")?;
+        let inst = self.instances.get_mut(&(town_id, inst_id)).ok_or("not_in_town")?;
         let (clamped_x, clamped_y) = inst.config.clamp_point(dest_x, dest_y);
 
         let occupant = inst.occupants.get_mut(&uid).ok_or("not_in_town")?;
@@ -418,38 +331,33 @@ impl TownRoomManager {
         let dir = occupant.dir;
         let icuid = occupant.icuid.clone();
 
-        let move_dto = DtoValue::map([
-            ("uid", DtoValue::from(uid)),
-            ("icuid", DtoValue::from(icuid.as_str())),
-            ("x", DtoValue::from(clamped_x)),
-            ("y", DtoValue::from(clamped_y)),
-            ("dir", DtoValue::from(dir)),
-        ]);
-        let pkt = PushPacket::new(push::TOWN_MOVE, move_dto, now_ts);
-
+        let pkt = PushPacket::new(
+            push::TOWN_MOVE,
+            dto_map! {
+                "uid" => uid,
+                "icuid" => &icuid,
+                "x" => clamped_x,
+                "y" => clamped_y,
+                "dir" => dir,
+            },
+            now_ts,
+        );
         let mut broadcasts = Vec::new();
-        for &peer_uid in inst.occupants.keys() {
-            if peer_uid != uid {
-                broadcasts.push((peer_uid, pkt.clone()));
-            }
-        }
+        inst.broadcast_except(uid, &pkt, &mut broadcasts);
 
-        let ret = DtoValue::map([
-            ("ret", DtoValue::from("ok")),
-            ("x", DtoValue::from(clamped_x)),
-            ("y", DtoValue::from(clamped_y)),
-            ("dir", DtoValue::from(dir)),
-        ]);
-        Ok((ret, broadcasts))
+        Ok((
+            dto_ok! {
+                "x" => clamped_x,
+                "y" => clamped_y,
+                "dir" => dir,
+            },
+            broadcasts,
+        ))
     }
 
     /// Syncs updated player appearance/stats (`vip`, `level`, `dress_id`, `title_id`, `fight_force`)
     /// to peers in the same town room via `town.update` (`SC_TOWN_PLAYER_UPDATE`).
-    pub fn sync_player_appearance(
-        &mut self,
-        player: &PlayerState,
-        now_ts: u64,
-    ) -> Vec<(u64, PushPacket)> {
+    pub fn sync_player_appearance(&mut self, player: &PlayerState, now_ts: u64) -> PeerPushList {
         let Some(&(town_id, inst_id)) = self.player_loc.get(&player.uid) else {
             return Vec::new();
         };
@@ -465,133 +373,19 @@ impl TownRoomManager {
         occ.vip = player.vip;
         occ.level = player.level;
         occ.fight_force = player.fight_force();
-        let dto = occ.to_dto();
-        let pkt = PushPacket::new(push::TOWN_UPDATE, dto, now_ts);
-
-        inst.occupants
-            .keys()
-            .copied()
-            .filter(|&peer| peer != player.uid)
-            .map(|peer| (peer, pkt.clone()))
-            .collect()
+        let pkt = PushPacket::new(push::TOWN_UPDATE, occ.to_dto(), now_ts);
+        let mut broadcasts = Vec::new();
+        inst.broadcast_except(player.uid, &pkt, &mut broadcasts);
+        broadcasts
     }
 
-    /// Crash-proof castle/fief building info DTO (`castle.getInfo`, `hall.getInfo`, `market.getInfo`,
-    /// `workshop.getInfo`, `smithy.getInfo`, and `tmCastle.getInfo`).
-    ///
-    /// Verified against `TownData.lua:449-525`:
-    /// - `data.queue.num` and `data.queue.max_num` MUST be present (`self._boughtQueueNum = data.queue.num - ...`)
-    /// - `data.building` entries MUST include `building_id`, `type`, `level`, `lvup_cd`, `build_time`,
-    ///   and `va_castle = { pos = [1, 1] }` (`pos[1]`, `pos[2]`).
+    /// Safe response for castle/fief building info RPCs (`castle.getInfo`, `hall.getInfo`, etc.).
     pub fn castle_building_info_dto(building_kind: &str) -> DtoValue {
-        let btype = match building_kind {
-            "hall.getInfo" | "tmHall.getInfo" => 1u32,
-            "workshop.getInfo" | "tmWorkshop.getInfo" => 2u32,
-            "market.getInfo" | "tmMarket.getInfo" => 3u32,
-            "smithy.getInfo" | "tmSmithy.getInfo" => 4u32,
-            _ => 1u32,
-        };
-        let b1 = DtoValue::map([
-            ("building_id", DtoValue::from(1u32)),
-            ("type", DtoValue::from(btype)),
-            ("level", DtoValue::from(1u32)),
-            ("lvup_cd", DtoValue::from(0u64)),
-            ("build_time", DtoValue::from(0u64)),
-            (
-                "va_castle",
-                DtoValue::map([(
-                    "pos",
-                    DtoValue::array([DtoValue::from(1u32), DtoValue::from(1u32)]),
-                )]),
-            ),
-        ]);
-        DtoValue::map([
-            ("ret", DtoValue::from("ok")),
-            ("kind", DtoValue::from(building_kind)),
-            ("level", DtoValue::from(1u32)),
-            ("cd_time", DtoValue::from(0u32)),
-            (
-                "queue",
-                DtoValue::map([
-                    ("num", DtoValue::from(1u32)),
-                    ("max_num", DtoValue::from(1u32)),
-                ]),
-            ),
-            ("building", DtoValue::map([("1", b1)])),
-            ("va_extra", DtoValue::Map(BTreeMap::new())),
-        ])
-    }
-
-    /// Dual-socket Hoàng Thành gateway host info (`imperialcity.getImperialCityHost` / `tmImperialcity.getImperialCityHost`).
-    pub fn imperial_city_host_dto(ip: &str, port: u16, token: &str) -> DtoValue {
-        DtoValue::map([
-            ("ret", DtoValue::from("ok")),
-            ("ip", DtoValue::from(ip)),
-            ("port", DtoValue::from(u32::from(port))),
-            ("token", DtoValue::from(token)),
-        ])
-    }
-
-    /// Dual-socket Hoàng Thành login handshake (`imperialcity.login` / `tmImperialcity.login`).
-    pub fn imperial_city_login_dto(uid: u64, server_id: &str) -> DtoValue {
-        let icuid = format!("{server_id}_{uid}");
-        DtoValue::map([
-            ("ret", DtoValue::from("ok")),
-            ("uid", DtoValue::from(uid)),
-            ("icuid", DtoValue::from(icuid)),
-        ])
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn castle_building_info_matches_town_data_lua_queue_and_pos_schema() {
-        let dto = TownRoomManager::castle_building_info_dto("castle.getInfo");
-        let q = dto.get("queue").expect("queue required by TownData.lua:449");
-        assert_eq!(q.get("num").and_then(DtoValue::as_u32), Some(1));
-        assert_eq!(q.get("max_num").and_then(DtoValue::as_u32), Some(1));
-
-        let b1 = dto
-            .get("building")
-            .and_then(|b| b.get("1"))
-            .expect("building['1']");
-        assert_eq!(b1.get("building_id").and_then(DtoValue::as_u32), Some(1));
-        assert_eq!(b1.get("level").and_then(DtoValue::as_u32), Some(1));
-        let pos = b1
-            .get("va_castle")
-            .and_then(|vc| vc.get("pos"))
-            .and_then(DtoValue::as_array)
-            .expect("va_castle.pos array [x, y]");
-        assert_eq!(pos.len(), 2);
-        assert_eq!(pos[0].as_u32(), Some(1));
-        assert_eq!(pos[1].as_u32(), Some(1));
-    }
-
-    #[test]
-    fn shadow_info_and_imperial_city_gateway_helpers_work() {
-        let mut mgr = TownRoomManager::new();
-        let p1 = PlayerState::new(1001, "ChuaCong", 1);
-        let p2 = PlayerState::new(1002, "Peer", 2);
-        mgr.enter_town(&p2, 1, Some(100), Some(120), 1_700_000_000)
-            .unwrap();
-
-        let shadow = mgr.enter_shadow_info(&p1, 1);
-        assert_eq!(shadow.get("ret").and_then(DtoValue::as_str), Some("ok"));
-        assert_eq!(
-            shadow
-                .get("shadow_list")
-                .and_then(DtoValue::as_array)
-                .unwrap()
-                .len(),
-            2
-        );
-
-        let host = TownRoomManager::imperial_city_host_dto("127.0.0.1", 8002, "tok_ic");
-        assert_eq!(host.get("port").and_then(DtoValue::as_u32), Some(8002));
-        let login = TownRoomManager::imperial_city_login_dto(1001, "s1");
-        assert_eq!(login.get("icuid").and_then(DtoValue::as_str), Some("s1_1001"));
+        dto_ok! {
+            "kind" => building_kind,
+            "level" => 1u32,
+            "cd_time" => 0u32,
+            "va_extra" => dto_map!(),
+        }
     }
 }

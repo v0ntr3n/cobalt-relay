@@ -1,8 +1,13 @@
 [package]
 name = "gserver-http"
-version = "0.1.0"
-edition = "2021"
-description = "Zero-dependency pure-Rust HTTP Platform / MAPI & Platform Auth SDK server for GServer (vnsg2)"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Pure-Rust HTTP Platform / MAPI & Platform Auth SDK server for GServer (vnsg2)"
+license.workspace = true
 
 [dependencies]
+gserver-protocol = { workspace = true }
+
+[lints]
+workspace = true

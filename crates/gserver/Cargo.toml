@@ -1,18 +1,22 @@
 [package]
 name = "gserver"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "Unified dual-protocol (HTTP MAPI + TCP AMF3/LCPacket) private server daemon for GServer (vnsg2)"
-license = "MIT OR Apache-2.0"
+license.workspace = true
 
 [[bin]]
 name = "gserver"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
-gserver-protocol = { path = "../gserver-protocol" }
-gserver-http = { path = "../gserver-http" }
-gserver-rpc-catalog = { path = "../gserver-rpc-catalog" }
-gserver-data = { path = "../gserver-data" }
-gserver-player = { path = "../gserver-player" }
-gserver-gameplay = { path = "../gserver-gameplay" }
+gserver-protocol = { workspace = true }
+gserver-http = { workspace = true }
+gserver-rpc-catalog = { workspace = true }
+gserver-data = { workspace = true }
+gserver-player = { workspace = true }
+gserver-gameplay = { workspace = true }

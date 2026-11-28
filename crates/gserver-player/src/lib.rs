@@ -1,33 +1,214 @@
 #![forbid(unsafe_code)]
 //! # `gserver-player`
 //!
-//! Zero-dependency, pure-Rust player state, Lua wire-schema projection, progression
-//! mutation, and crash-safe persistence engine for **GServer (`vnsg2`)**.
-//!
-//! ## Core Guarantees
-//! - **`#![forbid(unsafe_code)]` & Zero External Dependencies**: Built strictly on Rust `std`,
-//!   including a deterministic RFC 8259 JSON parser/serializer and IEEE 802.3 CRC32 WAL verifier.
-//! - **Exact `vnsg2` Lua Model Compatibility**:
-//!   - `UserData.lua`: `copper` & `fight_force_max` serialized as numeric values within Lua double
-//!     precision (`<= 2^53 - 1`); all arithmetic currencies (`gold`, `gold_bind`, `hero_soul`/`soul_num`,
-//!     `prestige`/`arena_coin`, `tower_num`, `jewel`/`awake_coin`, `clan_contri`, `godarm_coin`,
-//!     `pet_coin`, `god_animal_coin`, `world_coin`, `execution`, `energy`/`stamina`) and recovery
-//!     timestamps emitted as numbers; 14-char `"YYYYMMDDHHMMSS"` `server_open_time`; valid `dress_id` /
-//!     `attr_dress_id` present inside `dress_info`; persistent `raffle_state`.
-//!   - `HeroInfo.lua`: numeric `hid`, `htid`, `level`, `exp`, `evolve_level`, `upgrade_level`,
-//!     `destiny`, `awake_level`, `lock` (`0`/`1`), `pill`, `skin_id`, plus `va_hero = { star, wash, dress }`
-//!     (without `arming` inside `va_hero`).
-//!   - `HeroFormationData.lua` & `FormationData.lua`: `position` containing only occupied `hid > 0`
-//!     entries, 6-cell battle `formation` (`{2, 3, 5, 6, 8, 9}`), `partner`, `buddy`, `buddyLevelInfo`,
-//!     6-slot `arming` (`"1"`..`"9"`), `spirit`, `yanWu`, `brochure`, `soulSkill`, `soulStone`,
-//!     `soulJade`, full `BagItem` wire dicts for `godanimal`/`topanimal`/`protection`, and
-//!     `to_vnsg2_other_position_info`.
-//!   - `BagData.lua` & `ItemFactory.lua`: `daily_use`, `gridStart`, `gridMaxNum`, `gridOpenTimes`,
-//!     all 42 sub-bag tables (`10001..740000`), complete `va_item_text` defaults, and `{}` empty-map
-//!     `BagDelta` deletion payloads.
-//! - **Crash-Safe Persistence**: Append-only CRC32-checksummed JSONL Write-Ahead Log
-//!   (`data/wal/operations.wal`) paired with atomic temp-file + `File::sync_all` + `fs::rename`
-//!   snapshots (`data/accounts.json`, `data/players/<uid>.json`).
+//! Pure-Rust player state, Lua wire-schema projection, progression mutation, and crash-safe
+//! persistence engine for **GServer (`vnsg2`)**, backed by `gserver-protocol::json`.
+
+macro_rules! define_wire_enum {
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident { $($variant:ident => $key:literal),+ $(,)? }
+        $(aliases { $($alias:literal => $target:ident),* $(,)? })?
+    ) => {
+        $(#[$meta])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        $vis enum $name { $($variant,)+ }
+
+        impl $name {
+            pub const ALL: [$name; <[()]>::len(&[$({ let _ = stringify!($variant); }),+])] = [
+                $(Self::$variant,)+
+            ];
+
+            pub const fn vnsg2_key(self) -> &'static str {
+                match self { $(Self::$variant => $key,)+ }
+            }
+
+            pub fn from_key(key: &str) -> Option<Self> {
+                match key {
+                    $($($alias => Some(Self::$target),)*)?
+                    $($key => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+macro_rules! wire_record {
+    (@enc $s:ident, $m:ident, $f:ident, opt_str_nullable ()) => {
+        $m.insert(
+            stringify!($f).into(),
+            $s.$f.as_ref().map_or(crate::json::JsonValue::Null, |v| v.clone().into()),
+        );
+    };
+    (@enc $s:ident, $m:ident, $f:ident, json_obj ()) => {
+        $m.insert(stringify!($f).into(), crate::json::JsonValue::Object($s.$f.clone()));
+    };
+    (@enc $s:ident, $m:ident, $f:ident, vec_u32 ()) => {
+        $m.insert(stringify!($f).into(), crate::wire_helpers::encode_u32_slice(&$s.$f));
+    };
+    (@enc $s:ident, $m:ident, $f:ident, custom ($enc:expr, $dec:expr)) => {
+        $m.insert(stringify!($f).into(), $enc);
+    };
+    (@enc $s:ident, $m:ident, $f:ident, req_str ()) => {
+        $m.insert(stringify!($f).into(), crate::json::JsonValue::from($s.$f.clone()));
+    };
+    (@enc $s:ident, $m:ident, $f:ident, opt_str ($d:expr)) => {
+        $m.insert(stringify!($f).into(), crate::json::JsonValue::from($s.$f.clone()));
+    };
+    (@enc $s:ident, $m:ident, $f:ident, $scalar_kind:ident ($($args:tt)*)) => {
+        $m.insert(stringify!($f).into(), crate::json::JsonValue::from($s.$f));
+    };
+
+    (@dec $r:ident, $f:ident, req_u64 ()) => { $r.req_u64(stringify!($f))? };
+    (@dec $r:ident, $f:ident, req_u32 ()) => { $r.req_u32(stringify!($f))? };
+    (@dec $r:ident, $f:ident, req_str ()) => { $r.req_str(stringify!($f))? };
+    (@dec $r:ident, $f:ident, opt_u64 ($d:expr)) => { $r.opt_u64(stringify!($f), $d)? };
+    (@dec $r:ident, $f:ident, opt_u32 ($d:expr)) => { $r.opt_u32(stringify!($f), $d)? };
+    (@dec $r:ident, $f:ident, opt_u8 ($d:expr)) => { $r.opt_u8(stringify!($f), $d)? };
+    (@dec $r:ident, $f:ident, opt_i32 ($d:expr)) => { $r.opt_i32(stringify!($f), $d)? };
+    (@dec $r:ident, $f:ident, opt_str ($d:expr)) => {
+        $r.opt_str(stringify!($f))?.unwrap_or_else(|| ($d).into())
+    };
+    (@dec $r:ident, $f:ident, opt_str_nullable ()) => { $r.opt_str(stringify!($f))? };
+    (@dec $r:ident, $f:ident, json_obj ()) => {
+        $r.opt_obj(stringify!($f))?.cloned().unwrap_or_default()
+    };
+    (@dec $r:ident, $f:ident, vec_u32 ()) => {
+        crate::wire_helpers::decode_u32_vec($r.opt_arr(stringify!($f))?)
+    };
+    (@dec $r:ident, $f:ident, custom ($enc:expr, $dec:expr)) => { $dec };
+
+    (
+        @project $map:ident, $self_id:expr
+        $(, copy: [$($cf:ident),* $(,)?])?
+        $(, clone: [$($clf:ident),* $(,)?])?
+        $(, vec_u32: [$($vf:ident),* $(,)?])?
+    ) => {
+        $($( $map.insert(stringify!($cf).into(), crate::json::JsonValue::from($self_id.$cf)); )*)?
+        $($( $map.insert(stringify!($clf).into(), crate::json::JsonValue::from($self_id.$clf.clone())); )*)?
+        $($( $map.insert(stringify!($vf).into(), crate::wire_helpers::encode_u32_slice(&$self_id.$vf)); )*)?
+    };
+
+    (
+        $(#[$smeta:meta])*
+        $vis:vis struct $sname:ident {
+            $($(#[$fmeta:meta])* $fname:ident : $fty:ty = $kind:ident ( $($args:tt)* ),)+
+        }
+        encode($self_id:ident, $map_id:ident) => $enc_vis:vis fn $enc_fn:ident $( $enc_extra:block )?;
+        decode($r_id:ident, $ctx:literal) => $dec_vis:vis fn $dec_fn:ident $( ($out_id:ident) $dec_extra:block )?;
+    ) => {
+        $(#[$smeta])*
+        $vis struct $sname { $($(#[$fmeta])* pub $fname: $fty,)+ }
+
+        impl $sname {
+            $enc_vis fn $enc_fn(&self) -> crate::json::JsonValue {
+                let $self_id = self;
+                let mut $map_id = std::collections::BTreeMap::new();
+                $( wire_record!(@enc $self_id, $map_id, $fname, $kind ( $($args)* )); )+
+                $( $enc_extra )?
+                crate::json::JsonValue::Object($map_id)
+            }
+
+            $dec_vis fn $dec_fn(val: &crate::json::JsonValue) -> crate::error::Result<Self> {
+                let $r_id = crate::json::JsonObjReader::new(val, $ctx)?;
+                #[allow(unused_mut)]
+                let mut out = Self {
+                    $( $fname: wire_record!(@dec $r_id, $fname, $kind ( $($args)* )), )+
+                };
+                $( let $out_id = &mut out; $dec_extra )?
+                Ok(out)
+            }
+        }
+    };
+}
+
+pub(crate) mod wire_helpers {
+    use std::collections::BTreeMap;
+    use std::fmt::Display;
+    use std::str::FromStr;
+
+    use crate::error::{PlayerError, Result};
+    use crate::json::JsonValue;
+
+    pub fn encode_u32_slice(items: &[u32]) -> JsonValue {
+        JsonValue::Array(items.iter().map(|&v| JsonValue::from(v)).collect())
+    }
+
+    pub fn decode_u32_vec(opt: Option<&[JsonValue]>) -> Vec<u32> {
+        opt.into_iter()
+            .flatten()
+            .filter_map(|v| v.as_u64().and_then(|n| u32::try_from(n).ok()))
+            .collect()
+    }
+
+    pub fn encode_map<K: Display, V: Copy + Into<JsonValue>>(m: &BTreeMap<K, V>) -> JsonValue {
+        JsonValue::Object(m.iter().map(|(k, v)| (k.to_string(), (*v).into())).collect())
+    }
+
+    pub fn decode_map_with<K: Ord + FromStr, V>(
+        opt: Option<&BTreeMap<String, JsonValue>>,
+        mut key_err: impl FnMut(&str) -> String,
+        mut parse_val: impl FnMut(&JsonValue) -> Result<V>,
+    ) -> Result<BTreeMap<K, V>> {
+        let mut out = BTreeMap::new();
+        if let Some(m) = opt {
+            for (k, v) in m {
+                let parsed_k = k.parse::<K>().map_err(|_| PlayerError::Json(key_err(k)))?;
+                out.insert(parsed_k, parse_val(v)?);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn decode_u64_map<K: Ord + FromStr>(
+        opt: Option<&BTreeMap<String, JsonValue>>,
+        key_err: &str,
+        val_err: &str,
+    ) -> Result<BTreeMap<K, u64>> {
+        decode_map_with(
+            opt,
+            |k| format!("{key_err} '{k}'"),
+            |v| v.as_u64().ok_or_else(|| PlayerError::Json(val_err.into())),
+        )
+    }
+
+    pub fn decode_u32_map<K: Ord + FromStr>(
+        opt: Option<&BTreeMap<String, JsonValue>>,
+        key_err: &str,
+        val_err: &str,
+    ) -> Result<BTreeMap<K, u32>> {
+        decode_map_with(
+            opt,
+            |k| format!("{key_err} '{k}'"),
+            |v| {
+                v.as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .ok_or_else(|| PlayerError::Json(val_err.into()))
+            },
+        )
+    }
+
+    pub fn decode_u32_map_lossy<K: Ord + FromStr>(
+        opt: Option<&BTreeMap<String, JsonValue>>,
+        key_err: &str,
+        default_val: u32,
+    ) -> Result<BTreeMap<K, u32>> {
+        decode_map_with(
+            opt,
+            |_| key_err.into(),
+            |v| Ok(v.as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(default_val)),
+        )
+    }
+
+    pub fn decode_u64_map_lossy<K: Ord + FromStr>(
+        opt: Option<&BTreeMap<String, JsonValue>>,
+        key_err: &str,
+        default_val: u64,
+    ) -> Result<BTreeMap<K, u64>> {
+        decode_map_with(opt, |_| key_err.into(), |v| Ok(v.as_u64().unwrap_or(default_val)))
+    }
+}
 
 pub mod bag;
 pub mod error;
@@ -39,28 +220,15 @@ pub mod store;
 pub mod wal;
 
 pub use bag::{
-    classify_template_id, default_va_item_text, BagDelta, BagItem, BagType, InventoryState,
-    ItemClass,
+    classify_template_id, default_va_item_text, BagItem, BagType, InventoryState, ItemClass,
 };
 pub use error::{PlayerError, Result};
-pub use formation::{
-    is_valid_battle_grid_cell, EquipSlotType, FormationBookState, FormationState,
-    DEFAULT_SQUAD_TO_GRID, VALID_BATTLE_GRID_CELLS,
-};
+pub use formation::{EquipSlotType, FormationBookState, FormationState, DEFAULT_SQUAD_TO_GRID};
 pub use json::{JsonObjReader, JsonValue};
 pub use models::{
-    to_vnsg2_other_position_info, vip_level_from_exp, Account, CurrencyType, EquippedItem, Gender,
-    HeroInstance, PlayerProfile, StarterHeroSeed, StarterItemSeed, StarterPackConfig,
-    MAX_LUA_SAFE_INT, VIP_RECHARGE_REQUIRE,
+    Account, CurrencyType, Gender, HeroInstance, PlayerProfile, StarterHeroSeed, StarterItemSeed,
+    StarterPackConfig,
 };
-pub use mutations::{
-    ArmReinforceOutcome, ArmReinforceStep, ArmUpgradeOutcome, AwakeUpgradeOutcome,
-    BagExpandOutcome, ComposeHeroOutcome, ComposeItemOutcome, ExploreSoulOutcome, GodArmAction,
-    HeroEvolveVnsg2Outcome, HeroLevelUpOutcome, HeroLevelUpVnsg2Outcome, OpenBoxOutcome,
-    RefineryDecomposeKind, RefineryOutcome, RefineryRebornKind, RefinerySellKind,
-    RefinerySellOutcome, SellBagEntry, SellBagOutcome, SpiritReinforceOutcome,
-    TreasureReinforceOutcome, TreasureUpgradeOutcome, UseBagItemOutcome, UseItemEffect,
-    UseItemOutcome,
-};
+pub use mutations::{HeroLevelUpOutcome, UseItemEffect, UseItemOutcome};
 pub use store::{atomic_write_bytes, PlayerStore, RecoveryReport};
 pub use wal::{crc32_ieee, WalOp, WalRecord, WalScanOutcome, WriteAheadLog};

@@ -1,9 +1,13 @@
 [package]
 name = "gserver-data"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "Pure-Rust GServer (vnsg2) 0xFEFEFEFE asset/DB decryptor (bt_decrypt) and authentic game template database loader."
-license = "MIT OR Apache-2.0"
+license.workspace = true
 
 [dependencies]
-# Zero external dependencies! Builds and tests 100% offline with rustc/cargo stdlib only.
+gserver-protocol = { workspace = true }
+
+[lints]
+workspace = true

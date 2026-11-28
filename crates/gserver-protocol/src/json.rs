@@ -752,3 +752,64 @@ impl<'a> Parser<'a> {
         }
     }
 }
+
+
+/// Compatibility type alias for callers naming the parse error `JsonError`.
+pub type JsonError = JsonParseError;
+
+impl JsonObject {
+    /// Converts this insertion-ordered `JsonObject` into a `std::collections::BTreeMap`.
+    pub fn to_btree_map(&self) -> std::collections::BTreeMap<String, JsonValue> {
+        let mut map = std::collections::BTreeMap::new();
+        for (k, v) in self.iter() {
+            map.insert(k.clone(), v.clone());
+        }
+        map
+    }
+
+    /// Builds a `JsonObject` from a `std::collections::BTreeMap`.
+    pub fn from_btree_map(map: std::collections::BTreeMap<String, JsonValue>) -> Self {
+        let mut obj = Self::with_capacity(map.len());
+        for (k, v) in map {
+            obj.insert(k, v);
+        }
+        obj
+    }
+
+    /// Mutable lookup of a key in `JsonObject`.
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut JsonValue> {
+        for (k, v) in &mut self.entries {
+            if k == key {
+                return Some(v);
+            }
+        }
+        None
+    }
+}
+
+impl JsonValue {
+    /// Alias for `JsonValue::object()` (`{}`).
+    #[inline]
+    pub fn empty_object() -> Self {
+        Self::object()
+    }
+
+    /// Alias for `JsonValue::array()` (`[]`).
+    #[inline]
+    pub fn empty_array() -> Self {
+        Self::array()
+    }
+
+    /// Convenience `u32` extractor used by template loaders and player persistence.
+    pub fn as_u32(&self) -> Option<u32> {
+        self.as_u64().and_then(|n| u32::try_from(n).ok())
+    }
+
+    /// Mutable object accessor.
+    pub fn as_object_mut(&mut self) -> Option<&mut JsonObject> {
+        match self {
+            JsonValue::Object(obj) => Some(obj),
+            _ => None,
+        }
+    }
+}

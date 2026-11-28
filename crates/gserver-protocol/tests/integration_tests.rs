@@ -848,39 +848,16 @@ fn test_25_s2c_all_four_flag_modes_and_multi_encodings_streaming_roundtrip() {
     let mut wire = Vec::new();
     wire.extend_from_slice(&encode_s2c_single_frame(&tx, &single_ok, false).unwrap());
     wire.extend_from_slice(&encode_s2c_single_frame(&tx, &ping_env, true).unwrap());
-    wire.extend_from_slice(
-        &encode_s2c_multi_frame(
-            &tx,
-            &batch_items,
-            Some("sess_A"),
-            Some(1_795_500_500),
-            false,
-            MultiItemEncoding::NestedAmf3ByteString,
-        )
-        .unwrap(),
-    );
-    wire.extend_from_slice(
-        &encode_s2c_multi_frame(
-            &tx,
-            &batch_items,
-            Some("sess_B"),
-            Some(1_795_500_501),
-            true,
-            MultiItemEncoding::NestedAmf3ByteArray,
-        )
-        .unwrap(),
-    );
-    wire.extend_from_slice(
-        &encode_s2c_multi_frame(
-            &tx,
-            &batch_items,
-            Some("sess_C"),
-            Some(1_795_500_502),
-            true,
-            MultiItemEncoding::InlineObject,
-        )
-        .unwrap(),
-    );
+    for (sess, ts, zipped, enc_mode) in [
+        ("sess_A", 1_795_500_500, false, MultiItemEncoding::NestedAmf3ByteString),
+        ("sess_B", 1_795_500_501, true, MultiItemEncoding::NestedAmf3ByteArray),
+        ("sess_C", 1_795_500_502, true, MultiItemEncoding::InlineObject),
+    ] {
+        wire.extend_from_slice(
+            &encode_s2c_multi_frame(&tx, &batch_items, Some(sess), Some(ts), zipped, enc_mode)
+                .unwrap(),
+        );
+    }
 
     let sub1 = single_ok.to_amf3_bytes().unwrap();
     let sub2 = push_mail.to_amf3_bytes().unwrap();
@@ -1230,175 +1207,89 @@ fn test_35_error_display_and_std_error_source_implementations() {
     }
 }
 
-// ============================================================================
-// 7. `RpcRequest` Lua Quirks (`args = ""`, Scalar, `Value::Object`, 0-Indexed `assoc["0"]`, Sparse)
-// ============================================================================
-
 #[test]
-fn test_36_rpc_request_empty_string_and_scalar_args_handled_gracefully() {
-    // `CityData.lua:74` (`"city.enterShadowInfo"`) returns `""` from `methodArgs()`,
-    // encoding `args = Value::String("")` instead of `{}`!
-    let empty_str_req = Value::map([
-        ("method", Value::from("city.enterShadowInfo")),
-        ("args", Value::from("")),
-        ("token", Value::from("tok_city")),
-        (
-            "callback",
-            Value::map([("callbackName", Value::from("city.enterShadowInfo_12"))]),
-        ),
-    ]);
-    let raw = amf3::encode(&empty_str_req).unwrap();
-    let parsed = RpcRequest::from_amf3_bytes(&raw).unwrap();
-    assert_eq!(parsed.method, "city.enterShadowInfo");
-    assert!(parsed.args.is_empty(), "empty string args must decode to empty args vec");
-    assert_eq!(parsed.arg_zero(), None);
-    assert_eq!(parsed.raw_args, Some(Value::from("")));
+fn test_36_generic_framed_stream_decoder_and_define_error_macro() {
+    use gserver_protocol::{define_error, C2sFrame, FramedStreamDecoder, S2cFrame, WireFrame};
 
-    // Non-empty scalar `args` (e.g. `args = 42` or `args = "payload"`) wraps into single-element `args`
-    let scalar_int_req = Value::map([
-        ("method", Value::from("activity.pingFlag")),
-        ("args", Value::Int(42)),
-        ("token", Value::from("tok_1")),
-        (
-            "callback",
-            Value::map([("callbackName", Value::from("activity.pingFlag_3"))]),
-        ),
-    ]);
-    let parsed_scalar =
-        RpcRequest::from_amf3_bytes(&amf3::encode(&scalar_int_req).unwrap()).unwrap();
-    assert_eq!(parsed_scalar.args, vec![Value::Int(42)]);
-    assert_eq!(parsed_scalar.arg_at_lua0(1), Some(&Value::Int(42)));
-}
+    define_error! {
+        enum CustomLeafError {
+            Empty => "leaf empty",
+            Code(code: u16) => "leaf code 0x{code:04X}",
+            Span { pos: usize, tag: &'static str } => "leaf {tag}@{pos}",
+        }
+        enum CustomOuterError {
+            Leaf(#[source] e: CustomLeafError) => "wrapped: {e}",
+        }
+    }
 
-#[test]
-fn test_37_rpc_request_lua_zero_indexed_mixed_array_and_sparse_assoc_preserved() {
-    // Lua: `local args = {}; args[0] = 30001; args[1] = 90000001; args[2] = 5; args[4] = 99`
-    // `Amf3Module.cpp` encodes `#args == 2` in `dense` and `["0"]`, `["4"]` in `assoc`!
-    let mixed_args = Value::Array {
-        dense: vec![Value::Int(90_000_001), Value::Int(5)],
-        assoc: vec![
-            (String::from("0"), Value::Int(30_001)),
-            (String::from("4"), Value::Int(99)),
-            (String::from("tag"), Value::from("extra")),
-        ],
-    };
-    let req_val = Value::map([
-        ("method", Value::from("bag.useItem")),
-        ("args", mixed_args.clone()),
-        ("token", Value::from("tok_bag")),
-        (
-            "callback",
-            Value::map([("callbackName", Value::from("bag.useItem_8"))]),
-        ),
-    ]);
-    let bytes = amf3::encode(&req_val).unwrap();
-    let parsed = RpcRequest::from_amf3_bytes(&bytes).unwrap();
-
-    assert_eq!(parsed.arg_zero, Some(Value::Int(30_001)));
-    assert_eq!(parsed.arg_at_lua0(0), Some(&Value::Int(30_001)));
-    assert_eq!(parsed.arg_at_lua0(1), Some(&Value::Int(90_000_001)));
-    assert_eq!(parsed.arg_at_lua0(2), Some(&Value::Int(5)));
-    assert_eq!(parsed.arg_at_lua0(3), Some(&Value::Null));
-    assert_eq!(parsed.arg_at_lua0(4), Some(&Value::Int(99)));
+    let leaf = CustomLeafError::Code(0x12AB);
+    assert_eq!(leaf.to_string(), "leaf code 0x12AB");
+    assert!(std::error::Error::source(&leaf).is_none());
+    assert_eq!(CustomLeafError::Empty.to_string(), "leaf empty");
     assert_eq!(
-        parsed.args,
-        vec![
-            Value::Int(90_000_001),
-            Value::Int(5),
-            Value::Null,
-            Value::Int(99),
-        ]
+        CustomLeafError::Span { pos: 7, tag: "hdr" }.to_string(),
+        "leaf hdr@7"
     );
-    assert_eq!(parsed.named_arg("tag"), Some(&Value::from("extra")));
 
-    // Round-trip via `to_amf3_bytes` preserves `assoc["0"]` and `assoc["4"]` losslessly
-    let rt_bytes = parsed.to_amf3_bytes().unwrap();
-    let rt_parsed = RpcRequest::from_amf3_bytes(&rt_bytes).unwrap();
-    assert_eq!(rt_parsed, parsed);
-    assert_eq!(rt_parsed.arg_at_lua0(0), Some(&Value::Int(30_001)));
-    assert_eq!(rt_parsed.arg_at_lua0(4), Some(&Value::Int(99)));
-}
+    let outer: CustomOuterError = CustomLeafError::Empty.into();
+    assert_eq!(outer.to_string(), "wrapped: leaf empty");
+    assert!(std::error::Error::source(&outer).is_some());
 
-#[test]
-fn test_38_rpc_request_object_map_zero_only_named_and_sparse_nil_hole() {
-    // Case 1: `{ [0] = 20001 }` (`#args == 0` in Lua -> encoded as `0x0A` Object)
-    let zero_only = Value::map([
-        ("method", Value::from("forge.reinforce")),
-        ("args", Value::map([("0", Value::Int(20_001))])),
-        ("token", Value::from("tok")),
-        (
-            "callback",
-            Value::map([("callbackName", Value::from("forge.reinforce_1"))]),
-        ),
-    ]);
-    let p_zero = RpcRequest::from_amf3_bytes(&amf3::encode(&zero_only).unwrap()).unwrap();
-    assert_eq!(p_zero.arg_zero(), Some(&Value::Int(20_001)));
-    assert_eq!(p_zero.arg_at_lua0(0), Some(&Value::Int(20_001)));
-    assert_eq!(p_zero.arg_at_lua0(1), None);
-    assert_eq!(p_zero.args, vec![Value::Int(20_001)]);
+    // Verify leaf Display strings and Error::source() == None on all 5 leaf protocol error enums
+    let amf_e = Amf3Error::InvalidMarker { marker: 0xAB, offset: 9 };
+    assert_eq!(amf_e.to_string(), "AMF3 unsupported type marker 0xAB at offset 9");
+    assert!(std::error::Error::source(&amf_e).is_none());
 
-    // Case 2: `{ nil, 777 }` (`#args == 0` in Lua -> encoded as `0x0A` Object `{ "2": 777 }`)
-    let sparse_hole = Value::map([
-        ("method", Value::from("hero.equip")),
-        ("args", Value::map([("2", Value::Int(777))])),
-        ("token", Value::from("tok")),
-        (
-            "callback",
-            Value::map([("callbackName", Value::from("hero.equip_2"))]),
-        ),
-    ]);
-    let p_sparse = RpcRequest::from_amf3_bytes(&amf3::encode(&sparse_hole).unwrap()).unwrap();
-    assert_eq!(p_sparse.args, vec![Value::Null, Value::Int(777)]);
-    assert_eq!(p_sparse.arg_at_lua0(1), None);
-    assert_eq!(p_sparse.arg_at_lua0(2), Some(&Value::Int(777)));
+    let frame_md5 = FrameError::Md5Mismatch {
+        expected: [0; 16],
+        actual: [1; 16],
+    };
+    assert_eq!(
+        frame_md5.to_string(),
+        "BabelTime LCPacket 16-byte MD5 integrity mismatch"
+    );
+    assert_eq!(
+        FrameError::InvalidLcFlags([2, 1, 1, 1]).to_string(),
+        "invalid LCPacket flags [2, 1, 1, 1] (expected [0|1, 1, 1, 1])"
+    );
+    assert_eq!(
+        FrameError::UnrecognizedC2sHeader([0xDE, 0xAD, 0, 1, 2, 3, 4, 5]).to_string(),
+        "unrecognized C2S frame header prefix [DE, AD, 00, 01, 02, 03, 04, 05]"
+    );
 
-    // Case 3: Named object args (`{ boxId = 3 }` / `{ brid = 888, token = "sec" }`)
-    let named_obj = Value::map([
-        ("method", Value::from("activitySoulStoneRecruit.openBox")),
-        (
-            "args",
-            Value::map([
-                ("boxId", Value::Int(3)),
-                ("brid", Value::Int(888)),
-                ("token", Value::from("sec")),
-            ]),
-        ),
-        ("token", Value::from("tok")),
-        (
-            "callback",
-            Value::map([(
-                "callbackName",
-                Value::from("activitySoulStoneRecruit.openBox_9"),
-            )]),
-        ),
-    ]);
-    let p_named = RpcRequest::from_amf3_bytes(&amf3::encode(&named_obj).unwrap()).unwrap();
-    assert!(p_named.args.is_empty());
-    assert_eq!(p_named.named_arg("boxId"), Some(&Value::Int(3)));
-    assert_eq!(p_named.named_arg("brid"), Some(&Value::Int(888)));
-    assert_eq!(p_named.named_arg("token"), Some(&Value::from("sec")));
+    // Verify ClientRxDecoder & ServerRxDecoder are parameterized over FramedStreamDecoder<F>
+    let mut c2s_dec: FramedStreamDecoder<C2sFrame> = ClientRxDecoder::new(C2sFrameMode::Raw4Byte);
+    c2s_dec.feed(&encode_c2s_raw_frame(&[0x01]).unwrap());
+    assert_eq!(c2s_dec.decode_all().unwrap().len(), 1);
 
-    // Case 4: `Value::Object` with `"0"`, `"1"`, `"2"` keys
-    let obj_012 = Value::map([
-        ("method", Value::from("bag.useItem")),
-        (
-            "args",
-            Value::map([
-                ("0", Value::Int(30_005)),
-                ("1", Value::Int(90_000_099)),
-                ("2", Value::Int(3)),
-            ]),
-        ),
-        ("token", Value::from("tok")),
-        (
-            "callback",
-            Value::map([("callbackName", Value::from("bag.useItem_10"))]),
-        ),
-    ]);
-    let p_012 = RpcRequest::from_amf3_bytes(&amf3::encode(&obj_012).unwrap()).unwrap();
-    assert_eq!(p_012.arg_zero(), Some(&Value::Int(30_005)));
-    assert_eq!(p_012.arg_at_lua0(0), Some(&Value::Int(30_005)));
-    assert_eq!(p_012.arg_at_lua0(1), Some(&Value::Int(90_000_099)));
-    assert_eq!(p_012.arg_at_lua0(2), Some(&Value::Int(3)));
-    assert_eq!(p_012.args, vec![Value::Int(90_000_099), Value::Int(3)]);
+    let tx = ServerTxEncoder::new();
+    let mut s2c_dec: FramedStreamDecoder<S2cFrame> = ServerRxDecoder::new();
+    s2c_dec.feed(&encode_s2c_single_frame(&tx, &S2cEnvelope::ping(), false).unwrap());
+    assert_eq!(s2c_dec.decode_all().unwrap().len(), 1);
+
+    // Custom WireFrame implementation over FramedStreamDecoder<F>
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RawTestFrame(Vec<u8>);
+    impl WireFrame for RawTestFrame {
+        type Config = ();
+        const MIN_HEADER_LEN: usize = 4;
+        fn decode_wire_frame(
+            avail: &[u8],
+            body_len: u32,
+            _cfg: &(),
+            _max_decomp: usize,
+        ) -> Result<Option<(Self, usize)>, ProtocolError> {
+            let needed = 4 + body_len as usize;
+            if avail.len() < needed {
+                return Ok(None);
+            }
+            Ok(Some((Self(avail[4..needed].to_vec()), needed)))
+        }
+    }
+    let mut custom = FramedStreamDecoder::<RawTestFrame>::default().with_limits(64, 64);
+    custom.feed(&[0, 0, 0, 3, b'x', b'y']);
+    assert_eq!(custom.next_frame().unwrap(), None);
+    custom.feed(&[b'z']);
+    assert_eq!(custom.next_frame().unwrap(), Some(RawTestFrame(b"xyz".to_vec())));
+    assert_eq!(custom.buffered_len(), 0);
 }

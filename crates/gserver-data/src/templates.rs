@@ -1,13 +1,11 @@
-//! Typed GServer (`vnsg2`) game configuration templates, lookup helpers, and
+//! Typed GServer (`vnsg2`) game configuration templates, macro-unified lookup helpers, and
 //! `LevelUpExpReader.lua`-compatible XP curve calculations.
+
+use gserver_protocol::json::{parse_json, JsonError, JsonValue};
 
 use crate::generated_consts::{
     BAG_LIMITS, GEAR_SUITS, HEROES, ITEMS, LEVEL_EXP_CURVES, PROTAGONISTS, TOWNS,
 };
-use crate::hero_skills::{
-    hero_skill_entry_by_htid, resolve_hero_battle_skills, ResolvedHeroBattleSkills,
-};
-use crate::json::{parse_json, JsonError, JsonValue};
 
 /// Raw embedded `data/curated_templates.json` extracted from real GServer `.db` tables.
 pub const EMBEDDED_CURATED_JSON: &str = include_str!("../data/curated_templates.json");
@@ -77,18 +75,13 @@ pub enum ItemCategory {
 /// Male & Female Protagonist creation template (`CreateUserScene.lua` + `current_config.db` + `hero.db`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProtagonistTemplate {
-    /// Character creation `utid` sent by `CreateUserProxy:createUser(utid, uname)` (`1` = Male, `2` = Female).
     pub utid: u32,
-    /// Starter hero template ID (`htid`) placed in formation slot 1 (`1` = Male, `2` = Female).
     pub starter_htid: u32,
     pub name_vi: &'static str,
     pub name_en: &'static str,
-    /// `1` = Male, `2` = Female.
     pub sex: u8,
     pub career: u8,
-    /// `CreateUserScene.lua` `heroIndex` (`1` = Male, `0` = Female).
     pub hero_index_create_ui: u8,
-    /// Spine model ID `1000000 + utid` (`1000001` Male, `1000002` Female).
     pub spine_res_id: u32,
     pub motion_id: &'static str,
     pub head_icon: &'static str,
@@ -97,24 +90,7 @@ pub struct ProtagonistTemplate {
     pub qualification: u16,
     pub exp_curve_id: u32,
     pub destiny_treasure_id: u32,
-    /// All quality/destiny evolution `htid`s for this protagonist gender.
     pub quality_htids: &'static [u32],
-    /// Starter normal attack skill ID (`com_atk` in `timeMachine_hero`).
-    pub com_atk: u32,
-    /// Starter rage attack skill ID (`angry_atk` in `timeMachine_hero`).
-    pub angry_atk: u32,
-}
-
-impl ProtagonistTemplate {
-    /// Resolves authentic `(normal_skill_id, rage_skill_id)` for a specific quality `htid` on this protagonist chain.
-    pub fn battle_skills_for_htid(&self, htid: u32) -> ResolvedHeroBattleSkills {
-        let target = if self.quality_htids.contains(&htid) {
-            htid
-        } else {
-            self.starter_htid
-        };
-        resolve_hero_battle_skills(target)
-    }
 }
 
 /// Authentic Three Kingdoms Hero template (`hero.db` / `timeMachine_hero.db`).
@@ -138,33 +114,22 @@ pub struct HeroTemplate {
     pub dark_gold_htid: u32,
     pub purple_gold_htid: u32,
     pub color_gold_htid: u32,
-    /// Base normal attack skill ID (`com_atk` in `timeMachine_hero`).
-    pub com_atk: u32,
-    /// Base rage attack skill ID (`angry_atk` in `timeMachine_hero`).
-    pub angry_atk: u32,
 }
 
 impl HeroTemplate {
     /// Returns `true` if `candidate_htid` matches this hero's base or any promoted tier ID.
     pub fn matches_any_tier(&self, candidate_htid: u32) -> bool {
         candidate_htid != 0
-            && (self.htid == candidate_htid
-                || self.awakened_htid == candidate_htid
-                || self.red_evolved_htid == candidate_htid
-                || self.gold_htid == candidate_htid
-                || self.dark_gold_htid == candidate_htid
-                || self.purple_gold_htid == candidate_htid
-                || self.color_gold_htid == candidate_htid)
-    }
-
-    /// Resolves authentic `(normal_skill_id, rage_skill_id)` for any tier `htid` of this hero.
-    pub fn battle_skills_for_tier(&self, tier_htid: u32) -> ResolvedHeroBattleSkills {
-        let target = if self.matches_any_tier(tier_htid) {
-            tier_htid
-        } else {
-            self.htid
-        };
-        resolve_hero_battle_skills(target)
+            && [
+                self.htid,
+                self.awakened_htid,
+                self.red_evolved_htid,
+                self.gold_htid,
+                self.dark_gold_htid,
+                self.purple_gold_htid,
+                self.color_gold_htid,
+            ]
+            .contains(&candidate_htid)
     }
 }
 
@@ -215,7 +180,6 @@ pub struct BagLimitTemplate {
     pub bag_id: u32,
     pub name_vi: &'static str,
     pub db_names: &'static [&'static str],
-    /// `1` = capped slot bag (expandable), `2` = uncapped stack/shard bag (`base_capacity == 0`).
     pub bag_type: u8,
     pub base_capacity: u32,
     pub buy_storage_limit: u32,
@@ -244,11 +208,11 @@ pub struct LevelExpCurveTemplate {
 
 impl LevelExpCurveTemplate {
     /// Exact port of `LevelUpExpReader:getNextLevelNeedExpById(id, level)`.
-    ///
-    /// `current_level` is the current character/hero level (e.g., `1` returns `exp_1 = 20` on curve `1`).
     pub fn next_level_need_exp(&self, current_level: u32) -> u64 {
-        let idx = usize::try_from(current_level).unwrap_or(usize::MAX);
-        self.exp_by_index.get(idx).copied().unwrap_or(0)
+        usize::try_from(current_level)
+            .ok()
+            .and_then(|idx| self.exp_by_index.get(idx).copied())
+            .unwrap_or(0)
     }
 
     /// Exact port of `LevelUpExpReader:checkLevelCanUp(id, level)`.
@@ -256,8 +220,7 @@ impl LevelExpCurveTemplate {
         current_level >= 1 && current_level < self.max_level && self.next_level_need_exp(current_level) > 0
     }
 
-    /// Exact port of `LevelUpExpReader:getTotalExpByIdAndLevel(id, level)`:
-    /// cumulative XP required from level 1 to reach `target_level`.
+    /// Exact port of `LevelUpExpReader:getTotalExpByIdAndLevel(id, level)`.
     pub fn total_exp_for_level(&self, target_level: u32) -> u64 {
         if target_level <= 1 {
             return 0;
@@ -265,41 +228,65 @@ impl LevelExpCurveTemplate {
         let end_idx = usize::try_from(target_level - 1)
             .unwrap_or(self.exp_by_index.len() - 1)
             .min(self.exp_by_index.len() - 1);
-        let mut total = 0u64;
-        for &exp_val in self.exp_by_index.iter().take(end_idx + 1) {
-            total = total.saturating_add(exp_val);
-        }
-        total
+        self.exp_by_index
+            .iter()
+            .take(end_idx + 1)
+            .fold(0u64, |acc, &v| acc.saturating_add(v))
     }
 
     /// Exact port of `LevelUpExpReader:getLevelByTotalExp(totalExp, oldLevel, id)`.
     pub fn level_from_total_exp(&self, total_exp: u64, old_level: u32) -> u32 {
         let mut new_level = old_level.max(1);
-        let mut target_level = new_level + 1;
-        while total_exp >= self.total_exp_for_level(target_level) {
-            if !self.can_level_up(new_level) {
-                break;
-            }
+        while total_exp >= self.total_exp_for_level(new_level + 1) && self.can_level_up(new_level) {
             new_level += 1;
-            target_level += 1;
         }
         new_level
     }
 }
 
-/// Looks up a protagonist template by character-creation `utid` (`1` = Male, `2` = Female).
-pub fn protagonist_by_utid(utid: u32) -> Option<&'static ProtagonistTemplate> {
-    PROTAGONISTS.iter().find(|p| p.utid == utid)
+macro_rules! define_template_lookups {
+    ($(
+        $(#[$meta:meta])*
+        $fn_name:ident($id:ident: u32) -> $ty:ty => $slice:ident where |$row:ident| $pred:expr
+        $(, $(#[$vmeta:meta])* valid $valid_fn:ident)?;
+    )*) => {
+        $(
+            $(#[$meta])*
+            pub fn $fn_name($id: u32) -> Option<&'static $ty> {
+                $slice.iter().find(|$row| $pred)
+            }
+            $(
+                $(#[$vmeta])*
+                pub fn $valid_fn($id: u32) -> bool {
+                    $fn_name($id).is_some()
+                }
+            )?
+        )*
+    };
+}
+
+define_template_lookups! {
+    /// Looks up a protagonist template by character-creation `utid` (`1` = Male, `2` = Female).
+    protagonist_by_utid(utid: u32) -> ProtagonistTemplate => PROTAGONISTS where |p| p.utid == utid;
+    /// Looks up a curated hero template by base or promoted `htid`.
+    hero_by_htid(htid: u32) -> HeroTemplate => HEROES where |h| h.matches_any_tier(htid);
+    /// Looks up a curated item template by `item_tid`.
+    item_by_tid(item_tid: u32) -> ItemTemplate => ITEMS where |i| i.item_tid == item_tid;
+    /// Looks up an equipment suit by `suit_id`.
+    gear_suit_by_id(suit_id: u32) -> GearSuitTemplate => GEAR_SUITS where |s| s.suit_id == suit_id;
+    /// Looks up a town template by `town_id`.
+    town_by_id(town_id: u32) -> TownTemplate => TOWNS where |t| t.town_id == town_id
+        , /// Returns `true` if `town_id` exists in `town.db`.
+          valid is_valid_town_id;
+    /// Looks up a bag capacity template by `bag_id`.
+    bag_by_id(bag_id: u32) -> BagLimitTemplate => BAG_LIMITS where |b| b.bag_id == bag_id;
+    /// Looks up a level-up XP curve by `curve_id`.
+    exp_curve_by_id(curve_id: u32) -> LevelExpCurveTemplate => LEVEL_EXP_CURVES where |c| c.curve_id == curve_id;
 }
 
 /// Returns `true` if `htid` belongs to either the Male or Female protagonist evolution chain.
 pub fn is_protagonist_htid(htid: u32) -> bool {
     PROTAGONISTS.iter().any(|p| p.quality_htids.contains(&htid))
-}
-
-/// Looks up a curated hero template by base or promoted `htid`.
-pub fn hero_by_htid(htid: u32) -> Option<&'static HeroTemplate> {
-    HEROES.iter().find(|h| h.matches_any_tier(htid))
 }
 
 /// Case-insensitive lookup by English or Vietnamese hero name (e.g. `"Zhao Yun"` or `"Triệu Vân"`).
@@ -310,17 +297,9 @@ pub fn hero_by_name(query: &str) -> Option<&'static HeroTemplate> {
         .find(|h| h.name_en.to_lowercase() == q || h.name_vi.to_lowercase() == q)
 }
 
-/// Returns `true` if `htid` exists in the protagonist chains, curated hero tiers, or the full
-/// 801-row `timeMachine_hero` table.
+/// Returns `true` if `htid` is a valid protagonist `htid` or curated hero `htid` (base or promoted).
 pub fn is_valid_hero_htid(htid: u32) -> bool {
-    is_protagonist_htid(htid)
-        || hero_by_htid(htid).is_some()
-        || hero_skill_entry_by_htid(htid).is_some()
-}
-
-/// Looks up a curated item template by `item_tid`.
-pub fn item_by_tid(item_tid: u32) -> Option<&'static ItemTemplate> {
-    ITEMS.iter().find(|i| i.item_tid == item_tid)
+    is_protagonist_htid(htid) || hero_by_htid(htid).is_some()
 }
 
 /// Returns all curated items matching `category`.
@@ -332,29 +311,4 @@ pub fn items_by_category(category: ItemCategory) -> Vec<&'static ItemTemplate> {
 pub fn is_valid_item_tid(item_tid: u32) -> bool {
     item_by_tid(item_tid).is_some()
         || GEAR_SUITS.iter().any(|s| s.suit_items.contains(&item_tid))
-}
-
-/// Looks up an equipment suit by `suit_id`.
-pub fn gear_suit_by_id(suit_id: u32) -> Option<&'static GearSuitTemplate> {
-    GEAR_SUITS.iter().find(|s| s.suit_id == suit_id)
-}
-
-/// Looks up a town template by `town_id`.
-pub fn town_by_id(town_id: u32) -> Option<&'static TownTemplate> {
-    TOWNS.iter().find(|t| t.town_id == town_id)
-}
-
-/// Returns `true` if `town_id` exists in `town.db`.
-pub fn is_valid_town_id(town_id: u32) -> bool {
-    town_by_id(town_id).is_some()
-}
-
-/// Looks up a bag capacity template by `bag_id`.
-pub fn bag_by_id(bag_id: u32) -> Option<&'static BagLimitTemplate> {
-    BAG_LIMITS.iter().find(|b| b.bag_id == bag_id)
-}
-
-/// Looks up a level-up XP curve by `curve_id` (`1` = Protagonist/Player, `2..=7` = Hero rarities, `8` = Counsellor).
-pub fn exp_curve_by_id(curve_id: u32) -> Option<&'static LevelExpCurveTemplate> {
-    LEVEL_EXP_CURVES.iter().find(|c| c.curve_id == curve_id)
 }

@@ -12,6 +12,24 @@ members = [
 ]
 default-members = ["crates/gserver"]
 
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.dependencies]
+gserver-protocol = { path = "crates/gserver-protocol" }
+gserver-http = { path = "crates/gserver-http" }
+gserver-rpc-catalog = { path = "crates/gserver-rpc-catalog" }
+gserver-data = { path = "crates/gserver-data" }
+gserver-player = { path = "crates/gserver-player" }
+gserver-gameplay = { path = "crates/gserver-gameplay" }
+gserver-qa-harness = { path = "crates/gserver-qa-harness" }
+
 [profile.release]
 opt-level = 3
 lto = true

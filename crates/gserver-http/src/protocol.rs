@@ -6,7 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::json::{JsonObject, JsonValue};
 use crate::md5::{
-    md5_hex, DEFAULT_FALLBACK_SIGN_KEY, DEFAULT_GTSDK_GAME_ID, DEFAULT_AUTH_SECRET, VNSG2_MAPI_APP_KEY,
+    md5_hex, DEFAULT_AUTH_SECRET, DEFAULT_FALLBACK_SIGN_KEY, DEFAULT_GTSDK_GAME_ID,
+    VNSG2_MAPI_APP_KEY,
 };
 
 /// Cookie names used for HTTP session binding between `/phone/login` and `/phone/gethash/`.
@@ -50,57 +51,78 @@ pub struct GameServerEntry {
 }
 
 impl GameServerEntry {
-    /// Creates a standard online `vnsg2` server entry modeled after `S161.Võ Xương` (`2900161`)
-    /// from `live_capture_filtered.log`.
-    pub fn default_s161(host: impl Into<String>, port: u16) -> Self {
+    /// Constructs a standard online `vnsg2` server entry from preset parameters.
+    #[allow(clippy::too_many_arguments)]
+    pub fn preset(
+        server_index: u32,
+        name: impl Into<String>,
+        host: impl Into<String>,
+        port: u16,
+        new_flag: u8,
+        open_timestamp: i64,
+        open_date_time_str: impl Into<String>,
+        merge_server_time: i64,
+        open_prize: u8,
+        maintenance_notice: impl Into<String>,
+    ) -> Self {
+        let numeric_id = 2_900_000 + server_index;
         Self {
-            groupid: "2900161".to_string(),
-            group: "game2900161".to_string(),
-            name: "S161.Võ Xương".to_string(),
+            groupid: numeric_id.to_string(),
+            group: format!("game{}", numeric_id),
+            name: name.into(),
             host: host.into(),
             port,
             status: ServerStatus::Open as u8,
             hot: 1,
-            new_flag: 0,
+            new_flag,
             tj: 1,
             show: 1,
             is_recall: 0,
-            server_index: 161,
-            open_timestamp: 1541469600,
-            open_date_time_str: "2018-11-06-09-00-00".to_string(),
-            merge_server_time: 1667530800,
-            open_prize: 0,
+            server_index,
+            open_timestamp,
+            open_date_time_str: open_date_time_str.into(),
+            merge_server_time,
+            open_prize,
             offset: "-420".to_string(),
-            maintenance_notice: "Máy chủ đang bảo trì định kỳ, vui lòng quay lại sau.".to_string(),
+            maintenance_notice: maintenance_notice.into(),
         }
+    }
+
+    /// Creates a standard online `vnsg2` server entry modeled after `S161.Võ Xương` (`2900161`)
+    /// from `live_capture_filtered.log`.
+    pub fn default_s161(host: impl Into<String>, port: u16) -> Self {
+        Self::preset(
+            161,
+            "S161.Võ Xương",
+            host,
+            port,
+            0,
+            1541469600,
+            "2018-11-06-09-00-00",
+            1667530800,
+            0,
+            "Máy chủ đang bảo trì định kỳ, vui lòng quay lại sau.",
+        )
     }
 
     /// Creates a second `vnsg2` fresh server entry (`S162.Tương Dương`) for multi-server lists.
     pub fn default_s162(host: impl Into<String>, port: u16) -> Self {
-        Self {
-            groupid: "2900162".to_string(),
-            group: "game2900162".to_string(),
-            name: "S162.Tương Dương".to_string(),
-            host: host.into(),
+        Self::preset(
+            162,
+            "S162.Tương Dương",
+            host,
             port,
-            status: ServerStatus::Open as u8,
-            hot: 1,
-            new_flag: 1,
-            tj: 1,
-            show: 1,
-            is_recall: 0,
-            server_index: 162,
-            open_timestamp: 1795400000,
-            open_date_time_str: "2026-11-23-09-00-00".to_string(),
-            merge_server_time: 0,
-            open_prize: 1,
-            offset: "-420".to_string(),
-            maintenance_notice: "Máy chủ đang bảo trì.".to_string(),
-        }
+            1,
+            1795400000,
+            "2026-11-23-09-00-00",
+            0,
+            1,
+            "Máy chủ đang bảo trì.",
+        )
     }
 
     pub fn to_json(&self) -> JsonValue {
-        let mut obj = JsonObject::with_capacity(14);
+        let mut obj = JsonObject::with_capacity(15);
         obj.insert("groupid", self.groupid.as_str());
         obj.insert("group", self.group.as_str());
         obj.insert("name", self.name.as_str());
@@ -403,6 +425,13 @@ pub fn build_version_response(
     obj.insert("errornu", "0");
     obj.insert("errordesc", "OK");
 
+    let base_ok = || {
+        let mut base = JsonObject::new();
+        base.insert("error_id", 500);
+        base.insert("isForce", 0);
+        JsonValue::Object(base)
+    };
+
     match policy {
         VersionPolicy::UpToDate {
             package_version,
@@ -410,27 +439,19 @@ pub fn build_version_response(
             svn,
             csv_svn,
         } => {
+            obj.insert("code", 0);
+            obj.insert("update_code", "Code_Update_None");
             obj.insert("error_id", 500);
             obj.insert("ret", 0);
             obj.insert("status", 0);
             obj.insert("isForce", 0);
-            obj.insert(
-                "packageVersion",
-                req_pkg_ver.unwrap_or(package_version.as_str()),
-            );
-            obj.insert(
-                "scriptVersion",
-                req_scr_ver.unwrap_or(script_version.as_str()),
-            );
+            obj.insert("packageVersion", req_pkg_ver.unwrap_or(package_version.as_str()));
+            obj.insert("scriptVersion", req_scr_ver.unwrap_or(script_version.as_str()));
             obj.insert("svn", *svn);
             obj.insert("csvSvn", *csv_svn);
             obj.insert("static_url", "");
             obj.insert("spare_static_url", "");
-
-            let mut base = JsonObject::new();
-            base.insert("error_id", 500);
-            base.insert("isForce", 0);
-            obj.insert("base", JsonValue::Object(base));
+            obj.insert("base", base_ok());
             obj.insert("script", Vec::<JsonValue>::new());
         }
         VersionPolicy::ScriptUpdate {
@@ -438,16 +459,14 @@ pub fn build_version_response(
             spare_static_url,
             patches,
         } => {
+            obj.insert("code", 1);
+            obj.insert("update_code", "Code_Update_Script");
             obj.insert("error_id", 200);
             obj.insert("ret", 0);
             obj.insert("status", 1);
             obj.insert("static_url", static_url.as_str());
             obj.insert("spare_static_url", spare_static_url.as_str());
-
-            let mut base = JsonObject::new();
-            base.insert("error_id", 500);
-            base.insert("isForce", 0);
-            obj.insert("base", JsonValue::Object(base));
+            obj.insert("base", base_ok());
             obj.insert(
                 "script",
                 patches.iter().map(ScriptPatchEntry::to_json).collect::<Vec<_>>(),
@@ -457,6 +476,8 @@ pub fn build_version_response(
             package_url,
             update_desc,
         } => {
+            obj.insert("code", 2);
+            obj.insert("update_code", "Code_Update_Base");
             obj.insert("error_id", 200);
             obj.insert("ret", 0);
             obj.insert("status", 2);
@@ -480,30 +501,23 @@ pub fn build_version_response(
 
 /// Builds the Lua table string for `/version.lua` matching `downloads/version.lua`.
 pub fn build_version_lua(policy: &VersionPolicy) -> String {
-    match policy {
+    let (pkg, scr, svn, csv_svn) = match policy {
         VersionPolicy::UpToDate {
             package_version,
             script_version,
             svn,
             csv_svn,
-        } => format!(
-            "local version = {{package = \"{}\", script = \"{}\", svn = {}, csvSvn = {}}}\nreturn version\n",
-            package_version, script_version, svn, csv_svn
-        ),
-        VersionPolicy::ScriptUpdate { patches, .. } => {
-            if let Some(last) = patches.last() {
-                format!(
-                    "local version = {{package = \"1.0.34\", script = \"{}\", svn = {}, csvSvn = {}}}\nreturn version\n",
-                    last.tar_version, last.svn, last.csv_svn
-                )
-            } else {
-                "local version = {package = \"1.0.34\", script = \"1.0.1194\", svn = 452448, csvSvn = 449111}\nreturn version\n".to_string()
-            }
-        }
-        VersionPolicy::BaseUpdate { .. } => {
-            "local version = {package = \"1.0.38\", script = \"1.0.1194\", svn = 452448, csvSvn = 449111}\nreturn version\n".to_string()
-        }
-    }
+        } => (package_version.as_str(), script_version.as_str(), *svn, *csv_svn),
+        VersionPolicy::ScriptUpdate { patches, .. } => match patches.last() {
+            Some(last) => ("1.0.34", last.tar_version.as_str(), last.svn, last.csv_svn),
+            None => ("1.0.34", "1.0.1194", 452448, 449111),
+        },
+        VersionPolicy::BaseUpdate { .. } => ("1.0.38", "1.0.1194", 452448, 449111),
+    };
+    format!(
+        "local version = {{package = \"{}\", script = \"{}\", svn = {}, csvSvn = {}}}\nreturn version\n",
+        pkg, scr, svn, csv_svn
+    )
 }
 
 /// Mutable in-memory state store managed behind an `RwLock` inside [`crate::router::MapiService`].
@@ -533,6 +547,10 @@ pub struct MapiStore {
     pub token_counter: u64,
     /// Optional clock override (Unix seconds) for deterministic unit/integration tests.
     pub mock_now_secs: Option<i64>,
+    /// Coordinated TCP game-server listener readiness state (`None` = standalone HTTP-only mode).
+    pub tcp_ready: Option<bool>,
+    /// Bound socket address (`ip:port`) of the coordinated TCP game-server listener when attached.
+    pub tcp_bound_addr: Option<String>,
 }
 
 impl MapiStore {
@@ -550,12 +568,14 @@ impl MapiStore {
             version_policy: config.version_policy.clone(),
             token_counter: 1,
             mock_now_secs: None,
+            tcp_ready: None,
+            tcp_bound_addr: None,
         };
 
         // Seed the exact reference account & role from `live_capture_filtered.log`
         // (`congvipxz123`, `userid = 1243831974477471744`, `pid = 636df6782106606d`,
         // role `Kaiaoaoa.s161.s161` Lv.121 VIP 3 on `2900161`).
-        let seeded_acct = AccountRecord {
+        store.insert_account(AccountRecord {
             user_id: "1243831974477471744".to_string(),
             pid: "636df6782106606d".to_string(),
             username: "congvipxz123".to_string(),
@@ -567,8 +587,7 @@ impl MapiStore {
             last_login_time: 1795455112,
             login_count: 5,
             reg_plosgn: 2,
-        };
-        store.insert_account(seeded_acct);
+        });
         store.roles_by_pid.insert(
             "636df6782106606d".to_string(),
             vec![RoleSummary {

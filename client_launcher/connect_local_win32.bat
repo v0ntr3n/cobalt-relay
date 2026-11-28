@@ -71,29 +71,24 @@ echo }
 
 REM Optional --restore or --swap-in-place mode for builds without CLI path flags
 if /I "%~1"=="--restore" (
-    if exist "%GCLIENT_GAME_ASSETS%\platform\game_config.json.orig.bak" (
-        move /Y "%GCLIENT_GAME_ASSETS%\platform\game_config.json.orig.bak" "%GCLIENT_GAME_ASSETS%\platform\game_config.json" >nul
-    )
-    if exist "%GCLIENT_GAME_ASSETS%\platform\config.json.orig.bak" (
-        move /Y "%GCLIENT_GAME_ASSETS%\platform\config.json.orig.bak" "%GCLIENT_GAME_ASSETS%\platform\config.json" >nul
+    for %%J in (game_config.json config.json) do (
+        if exist "%GCLIENT_GAME_ASSETS%\platform\%%J.orig.bak" (
+            move /Y "%GCLIENT_GAME_ASSETS%\platform\%%J.orig.bak" "%GCLIENT_GAME_ASSETS%\platform\%%J" >nul
+        )
     )
     echo [connect_local_win32] Restored original Platform platform config files.
     exit /b 0
 )
 
 if /I "%~1"=="--swap-in-place" (
-    if exist "%GCLIENT_GAME_ASSETS%\platform\game_config.json" (
-        if not exist "%GCLIENT_GAME_ASSETS%\platform\game_config.json.orig.bak" (
-            copy /Y "%GCLIENT_GAME_ASSETS%\platform\game_config.json" "%GCLIENT_GAME_ASSETS%\platform\game_config.json.orig.bak" >nul
+    for %%J in (game_config.json config.json) do (
+        if exist "%GCLIENT_GAME_ASSETS%\platform\%%J" (
+            if not exist "%GCLIENT_GAME_ASSETS%\platform\%%J.orig.bak" (
+                copy /Y "%GCLIENT_GAME_ASSETS%\platform\%%J" "%GCLIENT_GAME_ASSETS%\platform\%%J.orig.bak" >nul
+            )
         )
+        copy /Y "%OVERRIDE_ROOT%\platform\%%J" "%GCLIENT_GAME_ASSETS%\platform\%%J" >nul
     )
-    if exist "%GCLIENT_GAME_ASSETS%\platform\config.json" (
-        if not exist "%GCLIENT_GAME_ASSETS%\platform\config.json.orig.bak" (
-            copy /Y "%GCLIENT_GAME_ASSETS%\platform\config.json" "%GCLIENT_GAME_ASSETS%\platform\config.json.orig.bak" >nul
-        )
-    )
-    copy /Y "%OVERRIDE_ROOT%\platform\game_config.json" "%GCLIENT_GAME_ASSETS%\platform\game_config.json" >nul
-    copy /Y "%OVERRIDE_ROOT%\platform\config.json" "%GCLIENT_GAME_ASSETS%\platform\config.json" >nul
     echo [connect_local_win32] Installed in-place plaintext overrides under "%GCLIENT_GAME_ASSETS%\platform\".
 )
 

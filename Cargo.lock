@@ -17,23 +17,31 @@ dependencies = [
 [[package]]
 name = "gserver-data"
 version = "0.1.0"
+dependencies = [
+ "gserver-protocol",
+]
 
 [[package]]
 name = "gserver-gameplay"
 version = "0.1.0"
 dependencies = [
- "gserver-data",
+ "gserver-player",
+ "gserver-protocol",
+ "gserver-rpc-catalog",
 ]
 
 [[package]]
 name = "gserver-http"
 version = "0.1.0"
+dependencies = [
+ "gserver-protocol",
+]
 
 [[package]]
 name = "gserver-player"
 version = "0.1.0"
 dependencies = [
- "gserver-data",
+ "gserver-protocol",
 ]
 
 [[package]]
@@ -43,7 +51,14 @@ version = "0.1.0"
 [[package]]
 name = "gserver-qa-harness"
 version = "0.1.0"
+dependencies = [
+ "gserver-http",
+ "gserver-protocol",
+]
 
 [[package]]
 name = "gserver-rpc-catalog"
 version = "0.1.0"
+dependencies = [
+ "gserver-protocol",
+]

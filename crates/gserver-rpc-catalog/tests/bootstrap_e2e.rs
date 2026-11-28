@@ -681,3 +681,45 @@ fn validator_catches_every_critical_lua_nil_and_type_trap() {
         validate_response_for_method(net_const::CS_USER_GET_VA_CONFIG, &[], &bad_va, true).is_ok()
     );
 }
+
+#[test]
+fn protocol_delegation_zlib_framing_and_u29_vs_double_wire_markers() {
+    // Exact U29 (0x04) vs IEEE-754 Double (0x05) marker boundary verification
+    assert_eq!(encode_amf3(&Amf3Value::Int(AMF3_INT_MIN))[0], 0x04);
+    assert_eq!(encode_amf3(&Amf3Value::Int(AMF3_INT_MAX))[0], 0x04);
+    assert_eq!(encode_amf3(&Amf3Value::Int(AMF3_INT_MIN - 1))[0], 0x05);
+    assert_eq!(encode_amf3(&Amf3Value::Int(AMF3_INT_MAX + 1))[0], 0x05);
+
+    // Zlib-compressed C2S 24-byte LCPacket & S2C 8-byte CConnection framing delegation
+    let req = RpcRequestEnvelope::new_sequenced(
+        net_const::CS_GET_BAG_DATA,
+        vec![Amf3Value::empty_map()],
+        "tok_zlib",
+        9,
+    );
+    let c2s_zip = ClientFrame::compressed(encode_amf3(&req.to_amf3())).encode();
+    assert_eq!(&c2s_zip[4..8], &[1, 1, 1, 1]);
+    let (decoded_req, c2s_used) =
+        RpcRequestEnvelope::from_client_frame_bytes(&c2s_zip).expect("compressed C2S frame");
+    assert_eq!(c2s_used, c2s_zip.len());
+    assert_eq!(decoded_req, req);
+
+    let resp = RpcResponseEnvelope::ok(
+        "bag.bagInfo_9",
+        BagSnapshot::default().to_amf3(),
+        1_795_496_852,
+        "tok_zlib",
+    );
+    let s2c_zip = ServerFrame::single_compressed(encode_amf3(&resp.to_amf3())).encode();
+    assert_eq!(s2c_zip[5], 1);
+    let (decoded_resp, s2c_used) =
+        RpcResponseEnvelope::from_server_frame_bytes(&s2c_zip).expect("compressed S2C frame");
+    assert_eq!(s2c_used, s2c_zip.len());
+    assert_eq!(decoded_resp.callback_name, resp.callback_name);
+    assert_eq!(decoded_resp.time, resp.time);
+    assert_eq!(decoded_resp.ret, resp.ret);
+
+    let zlib_body = resp.to_zlib_amf3_bytes();
+    let from_zlib = RpcResponseEnvelope::from_zlib_amf3_bytes(&zlib_body).expect("zlib envelope");
+    assert_eq!(from_zlib.ret, resp.ret);
+}

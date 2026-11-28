@@ -211,6 +211,7 @@ impl DeterministicPrng {
                 }
             }
             _ => {
+                let class_tag = self.s[0] ^ self.s[2];
                 let sealed_n = 1 + self.gen_range(3);
                 let mut sealed = Vec::with_capacity(sealed_n);
                 for idx in 0..sealed_n {
@@ -220,7 +221,7 @@ impl DeterministicPrng {
                     ));
                 }
                 Amf3Value::Object {
-                    class_name: b"bt.Model".to_vec(),
+                    class_name: format!("bt.Model.{class_tag:016x}").into_bytes(),
                     dynamic: false,
                     sealed,
                     dynamic_members: Vec::new(),

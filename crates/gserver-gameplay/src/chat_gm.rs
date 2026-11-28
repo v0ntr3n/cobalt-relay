@@ -1,12 +1,12 @@
 //! Chat subsystem (`chat.sendWorld`, `chat.sendPersonal`, `chat.sendGuild`, `*LastMsgs`,
-//! `chat.getLastMainPop`, `re.chat.getMsg`) and In-Game GM Slash-Command Processor (`/help`,
-//! `/gold`, `/silver`, `/vip`, `/level`, `/item`, `/hero`, `/mail`, `/heal`).
+//! `re.chat.getMsg`) and In-Game GM Slash-Command Processor (`/help`, `/gold`, `/silver`,
+//! `/vip`, `/level`, `/item`, `/hero`, `/mail`, `/heal`).
 
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::mail::{MailAndRewardCenter, RewardEntry};
 use crate::player::{BagState, PlayerState};
-use crate::protocol::{encode_amf3, push, DtoValue, PushPacket};
+use crate::protocol::{dto_arr, dto_map, encode_amf3, push, DtoValue, PushPacket};
 use crate::town::TownRoomManager;
 
 /// Chat channel IDs verified from `ChatConst.lua` / `ChatProxy.lua`.
@@ -60,7 +60,6 @@ pub enum ChatErrorCode {
 pub enum GmCommand {
     Help,
     Gold(i64),
-    Recharge(u64),
     Silver(i64),
     Vip(u32),
     Level(u32),
@@ -78,6 +77,18 @@ pub enum GmParseError {
     InvalidNumber(&'static str),
 }
 
+fn next_parsed<'a, T: core::str::FromStr>(
+    parts: &mut impl Iterator<Item = &'a str>,
+    missing_label: &'static str,
+    invalid_label: &'static str,
+) -> Result<T, GmParseError> {
+    parts
+        .next()
+        .ok_or(GmParseError::MissingArg(missing_label))?
+        .parse::<T>()
+        .map_err(|_| GmParseError::InvalidNumber(invalid_label))
+}
+
 /// Parses GM slash commands:
 /// `/help`, `/gold <amt>`, `/silver <amt>`, `/vip <lvl>`, `/level <lvl>`,
 /// `/item <tid> <qty>`, `/hero <htid>`, `/mail [tid] [qty]`, `/heal`.
@@ -93,95 +104,47 @@ pub fn parse_gm_command(input: &str) -> Result<GmCommand, GmParseError> {
     let cmd = cmd_raw.to_ascii_lowercase();
     match cmd.as_str() {
         "help" | "h" | "?" => Ok(GmCommand::Help),
-        "gold" => {
-            let s = parts.next().ok_or(GmParseError::MissingArg("/gold <amt>"))?;
-            let amt = s
-                .parse::<i64>()
-                .map_err(|_| GmParseError::InvalidNumber("gold amount"))?;
-            Ok(GmCommand::Gold(amt))
-        }
-        "recharge" => {
-            let s = parts
-                .next()
-                .ok_or(GmParseError::MissingArg("/recharge <nb>"))?;
-            let nb = s
-                .parse::<u64>()
-                .map_err(|_| GmParseError::InvalidNumber("recharge nb"))?;
-            if nb == 0 {
-                return Err(GmParseError::InvalidNumber("recharge nb must be >= 1"));
-            }
-            Ok(GmCommand::Recharge(nb))
-        }
-        "silver" | "copper" => {
-            let s = parts
-                .next()
-                .ok_or(GmParseError::MissingArg("/silver <amt>"))?;
-            let amt = s
-                .parse::<i64>()
-                .map_err(|_| GmParseError::InvalidNumber("silver amount"))?;
-            Ok(GmCommand::Silver(amt))
-        }
-        "vip" => {
-            let s = parts.next().ok_or(GmParseError::MissingArg("/vip <lvl>"))?;
-            let lvl = s
-                .parse::<u32>()
-                .map_err(|_| GmParseError::InvalidNumber("vip level"))?;
-            Ok(GmCommand::Vip(lvl.min(18)))
-        }
+        "gold" => Ok(GmCommand::Gold(next_parsed(&mut parts, "/gold <amt>", "gold amount")?)),
+        "silver" | "copper" => Ok(GmCommand::Silver(next_parsed(
+            &mut parts,
+            "/silver <amt>",
+            "silver amount",
+        )?)),
+        "vip" => Ok(GmCommand::Vip(
+            next_parsed::<u32>(&mut parts, "/vip <lvl>", "vip level")?.min(18),
+        )),
         "level" | "lv" => {
-            let s = parts
-                .next()
-                .ok_or(GmParseError::MissingArg("/level <lvl>"))?;
-            let lvl = s
-                .parse::<u32>()
-                .map_err(|_| GmParseError::InvalidNumber("player level"))?;
+            let lvl: u32 = next_parsed(&mut parts, "/level <lvl>", "player level")?;
             if lvl == 0 {
                 return Err(GmParseError::InvalidNumber("level must be >= 1"));
             }
             Ok(GmCommand::Level(lvl.min(200)))
         }
         "item" => {
-            let tid_s = parts
+            let tid: u32 = next_parsed(&mut parts, "/item <tid> <qty>", "item tid")?;
+            let qty: u32 = parts
                 .next()
-                .ok_or(GmParseError::MissingArg("/item <tid> <qty>"))?;
-            let qty_s = parts.next().unwrap_or("1");
-            let tid = tid_s
-                .parse::<u32>()
-                .map_err(|_| GmParseError::InvalidNumber("item tid"))?;
-            let qty = qty_s
-                .parse::<u32>()
+                .unwrap_or("1")
+                .parse()
                 .map_err(|_| GmParseError::InvalidNumber("item qty"))?;
             if qty == 0 {
                 return Err(GmParseError::InvalidNumber("item qty must be >= 1"));
             }
             Ok(GmCommand::Item { tid, qty })
         }
-        "hero" => {
-            let htid_s = parts
-                .next()
-                .ok_or(GmParseError::MissingArg("/hero <htid>"))?;
-            let htid = htid_s
-                .parse::<u32>()
-                .map_err(|_| GmParseError::InvalidNumber("hero htid"))?;
-            Ok(GmCommand::Hero { htid })
-        }
+        "hero" => Ok(GmCommand::Hero {
+            htid: next_parsed(&mut parts, "/hero <htid>", "hero htid")?,
+        }),
         "mail" => {
             let tid = match parts.next() {
-                Some(s) => s
-                    .parse::<u32>()
-                    .map_err(|_| GmParseError::InvalidNumber("mail item tid"))?,
-                None => 16012, // Default Divine Recruitment Token
+                Some(s) => s.parse().map_err(|_| GmParseError::InvalidNumber("mail item tid"))?,
+                None => 16012,
             };
-            let qty = match parts.next() {
-                Some(s) => s
-                    .parse::<u32>()
-                    .map_err(|_| GmParseError::InvalidNumber("mail item qty"))?,
+            let qty: u32 = match parts.next() {
+                Some(s) => s.parse().map_err(|_| GmParseError::InvalidNumber("mail item qty"))?,
                 None => 10,
             };
-            Ok(GmCommand::Mail {
-                tid,
-                qty: qty.max(1),
-            })
+            Ok(GmCommand::Mail { tid, qty: qty.max(1) })
         }
         "heal" => Ok(GmCommand::Heal),
         _ => Err(GmParseError::UnknownCommand(cmd)),
@@ -194,6 +157,28 @@ pub struct GmExecutionResult {
     pub summary: String,
     pub client_pushes: Vec<PushPacket>,
     pub town_broadcasts: Vec<(u64, PushPacket)>,
+}
+
+fn build_gm_feedback_push(text: &str, player: &PlayerState, now_ts: u64) -> PushPacket {
+    PushPacket::new(
+        push::CHAT_GET_MSG,
+        build_chat_push_dto(
+            ChatChannel::Private,
+            ChatMsgType::Normal,
+            text,
+            0,
+            "[GM]",
+            1,
+            99,
+            15,
+            6,
+            0,
+            &player.uname,
+            player.quality,
+            now_ts,
+        ),
+        now_ts,
+    )
 }
 
 /// Executes a parsed `GmCommand` and generates live `user.updateUser`, `bag.update`,
@@ -214,7 +199,7 @@ pub fn execute_gm_command(
 
     let summary = match cmd {
         GmCommand::Help => {
-            "GM Commands: /help | /gold <amt> | /recharge <nb> | /silver <amt> | /vip <0..16> | /level <1..200> | /item <tid> <qty> | /hero <htid> | /mail [tid] [qty] | /heal".to_owned()
+            "GM Commands: /help | /gold <amt> | /silver <amt> | /vip <0..18> | /level <1..200> | /item <tid> <qty> | /hero <htid> | /mail [tid] [qty] | /heal".to_owned()
         }
         GmCommand::Gold(delta) => {
             player.gold = (player.gold + delta).max(0);
@@ -223,30 +208,6 @@ pub fn execute_gm_command(
                 now_ts,
             ));
             format!("[GM] Gold updated -> {}", player.gold)
-        }
-        GmCommand::Recharge(nb) => {
-            let prev_vip = player.vip;
-            player.record_recharge_nb(nb);
-            client_pushes.push(PlayerState::build_user_update_push(
-                [
-                    ("gold", DtoValue::from(player.gold)),
-                    ("vip", DtoValue::from(player.vip)),
-                    ("vip_exp", DtoValue::from(player.vip_exp)),
-                    ("is_recharge", DtoValue::from(u32::from(player.is_recharge))),
-                    (
-                        "gold_recharge_accum_all",
-                        DtoValue::from(player.gold_recharge_accum_all),
-                    ),
-                ],
-                now_ts,
-            ));
-            if player.vip != prev_vip {
-                town_broadcasts.extend(town_mgr.sync_player_appearance(player, now_ts));
-            }
-            format!(
-                "[GM] Recharged +{nb} NB -> gold={}, vip={} (vip_exp={}, accum={})",
-                player.gold, player.vip, player.vip_exp, player.gold_recharge_accum_all
-            )
         }
         GmCommand::Silver(delta) => {
             let raw = (player.copper + delta).max(0);
@@ -287,11 +248,13 @@ pub fn execute_gm_command(
                 main_hero.recalculate_stats();
             }
             let ff = player.fight_force();
+            let pos_map = player.hero_position_map();
             client_pushes.push(PlayerState::build_user_update_push(
                 [
                     ("level", DtoValue::from(player.level)),
                     ("exp", DtoValue::from(player.exp)),
                     ("fight_force", DtoValue::from(ff)),
+                    ("hero_position_map", DtoValue::Map(pos_map)),
                 ],
                 now_ts,
             ));
@@ -307,9 +270,7 @@ pub fn execute_gm_command(
             format!("[GM] Added item tid={tid} x{qty} (bag total={total})")
         }
         GmCommand::Hero { htid } => {
-            let (hero, hero_push) = player
-                .roster
-                .recruit_hero(htid, player.level.max(1), now_ts);
+            let (hero, hero_push) = player.roster.recruit_hero(htid, player.level.max(1), now_ts);
             client_pushes.push(hero_push);
             let ff = player.fight_force();
             client_pushes.push(PlayerState::build_user_update_push(
@@ -325,7 +286,7 @@ pub fn execute_gm_command(
         GmCommand::Mail { tid, qty } => {
             let (mail, bundle, mail_pushes) = mail_center.send_system_mail(
                 player.uid,
-                1,
+                0,
                 "GM Gift Delivery",
                 format!("GM dispatched item {tid} x{qty} + 500 Gold to your Reward Center."),
                 vec![RewardEntry::Gold(500), RewardEntry::Item { tid, qty }],
@@ -357,23 +318,7 @@ pub fn execute_gm_command(
         }
     };
 
-    // Push GM feedback into the player's chat window via `re.chat.getMsg`
-    let feedback_dto = build_chat_push_dto(
-        ChatChannel::Private,
-        ChatMsgType::Normal,
-        &summary,
-        0,
-        "[GM]",
-        1,
-        99,
-        15,
-        6,
-        0,
-        &player.uname,
-        player.quality,
-        now_ts,
-    );
-    client_pushes.push(PushPacket::new(push::CHAT_GET_MSG, feedback_dto, now_ts));
+    client_pushes.push(build_gm_feedback_push(&summary, player, now_ts));
 
     Ok(GmExecutionResult {
         summary,
@@ -382,8 +327,7 @@ pub fn execute_gm_command(
     })
 }
 
-/// Builds the exact `re.chat.getMsg` DTO decoded by `ChatProxy:onMsgPush(ret)`:
-/// `{ message = { channel, message, type }, user_info = { uid, uname, utid, level, vip, quality, fight_force, dress_id, avatar_id, title_id, guild_name, time, toName, toQuality } }`.
+/// Builds the exact `re.chat.getMsg` DTO decoded by `ChatProxy:onMsgPush(ret)`.
 #[allow(clippy::too_many_arguments)]
 pub fn build_chat_push_dto(
     channel: ChatChannel,
@@ -400,40 +344,38 @@ pub fn build_chat_push_dto(
     to_quality: u32,
     now_ts: u64,
 ) -> DtoValue {
-    let message = DtoValue::map([
-        ("channel", DtoValue::from(channel as u32)),
-        ("message", DtoValue::from(text)),
-        ("type", DtoValue::from(msg_type as u32)),
-    ]);
-    let user_info = DtoValue::map([
-        ("uid", DtoValue::from(uid)),
-        ("uname", DtoValue::from(uname)),
-        ("utid", DtoValue::from(utid)),
-        ("level", DtoValue::from(level)),
-        ("vip", DtoValue::from(vip)),
-        ("quality", DtoValue::from(quality)),
-        ("fight_force", DtoValue::from(fight_force)),
-        ("dress_id", DtoValue::from(0u32)),
-        ("avatar_id", DtoValue::from(utid)),
-        ("title_id", DtoValue::from(0u32)),
-        ("guild_name", DtoValue::from("")),
-        ("time", DtoValue::from(now_ts)),
-        ("toName", DtoValue::from(to_name)),
-        ("toQuality", DtoValue::from(to_quality)),
-    ]);
-    DtoValue::map([("message", message), ("user_info", user_info)])
+    dto_map! {
+        "message" => dto_map! {
+            "channel" => channel as u32,
+            "message" => text,
+            "type" => msg_type as u32,
+        },
+        "user_info" => dto_map! {
+            "uid" => uid,
+            "uname" => uname,
+            "utid" => utid,
+            "level" => level,
+            "vip" => vip,
+            "quality" => quality,
+            "fight_force" => fight_force,
+            "dress_id" => 0u32,
+            "avatar_id" => utid,
+            "title_id" => 0u32,
+            "guild_name" => "",
+            "time" => now_ts,
+            "toName" => to_name,
+            "toQuality" => to_quality,
+        },
+    }
 }
 
-/// Manages channel history ring buffers (`*LastMsgs` AMF3 blobs), Tavern gacha marquee
-/// (`chat.getLastMainPop` / `tmChat.getLastMainPop`), and chat routing + GM interception.
+/// Manages channel history ring buffers (`*LastMsgs` AMF3 blobs) and chat routing + GM interception.
 #[derive(Debug, Clone)]
 pub struct ChatService {
     pub max_history_per_channel: usize,
     pub max_char_len: usize,
     history: BTreeMap<ChatChannel, VecDeque<DtoValue>>,
     personal_history: BTreeMap<u64, VecDeque<DtoValue>>,
-    main_pop_history: VecDeque<DtoValue>,
-    next_pop_id: u64,
 }
 
 impl Default for ChatService {
@@ -449,77 +391,38 @@ impl ChatService {
             max_char_len: 120,
             history: BTreeMap::new(),
             personal_history: BTreeMap::new(),
-            main_pop_history: VecDeque::new(),
-            next_pop_id: 1,
         }
     }
 
     pub fn send_response_dto(code: ChatErrorCode, filtered_msg: &str, ban_end: u64) -> DtoValue {
-        DtoValue::map([
-            ("error_code", DtoValue::from(code as u32)),
-            ("message", DtoValue::from(filtered_msg)),
-            ("ban_end_time", DtoValue::from(ban_end)),
-        ])
+        dto_map! {
+            "error_code" => code as u32,
+            "message" => filtered_msg,
+            "ban_end_time" => ban_end,
+        }
     }
 
-    /// Records a Tavern gacha announcement entry for `chat.getLastMainPop` (`RaffleMessageItem.lua:158-179`).
-    ///
-    /// Exact Lua schema:
-    /// `{ id, uname, time, raffle_type, va_item = { ["1"] = [htid, ...], ["2"] = [tid, ...] } }`.
-    pub fn record_main_pop(
-        &mut self,
-        uname: &str,
-        raffle_type: u32,
-        hero_htids: &[u32],
-        item_tids: &[u32],
-        now_ts: u64,
-    ) {
-        if hero_htids.is_empty() && item_tids.is_empty() {
-            return;
-        }
-        let id = self.next_pop_id;
-        self.next_pop_id += 1;
-        let mut va_item = BTreeMap::new();
-        if !hero_htids.is_empty() {
-            va_item.insert(
-                "1".to_owned(),
-                DtoValue::Array(hero_htids.iter().copied().map(DtoValue::from).collect()),
-            );
-        }
-        if !item_tids.is_empty() {
-            va_item.insert(
-                "2".to_owned(),
-                DtoValue::Array(item_tids.iter().copied().map(DtoValue::from).collect()),
-            );
-        }
-        let entry = DtoValue::map([
-            ("id", DtoValue::from(id)),
-            ("uname", DtoValue::from(uname)),
-            ("time", DtoValue::from(now_ts)),
-            ("raffle_type", DtoValue::from(raffle_type)),
-            ("va_item", DtoValue::Map(va_item)),
-        ]);
-        if self.main_pop_history.len() >= 100 {
-            self.main_pop_history.pop_back();
-        }
-        self.main_pop_history.push_front(entry);
+    fn err_reply(code: ChatErrorCode, ban_end: u64) -> (DtoValue, Vec<PushPacket>, Vec<(u64, PushPacket)>) {
+        (Self::send_response_dto(code, "", ban_end), Vec::new(), Vec::new())
     }
 
-    /// Returns Tavern gacha marquee entries (`chat.getLastMainPop` / `tmChat.getLastMainPop`, `args = [offset, limit]`).
-    ///
-    /// Verified against `RaffleMessageItem.lua:114-128`:
-    /// - Returns a 1-indexed `DtoValue::Array`
-    /// - When `offset >= len`, returns an empty `DtoValue::Array([])` so `#ret == 0` sets `self.isOver = true`!
-    pub fn get_last_main_pop(&self, offset: usize, limit: usize) -> DtoValue {
-        let cap = if limit == 0 { 20 } else { limit.min(50) };
-        let items: Vec<DtoValue> = self
-            .main_pop_history
-            .iter()
-            .skip(offset)
-            .take(cap)
-            .cloned()
-            .collect();
-        DtoValue::Array(items)
+    fn push_ring_buffer(q: &mut VecDeque<DtoValue>, cap: usize, dto: DtoValue) {
+        if q.len() >= cap {
+            q.pop_front();
+        }
+        q.push_back(dto);
+    }
+
+    fn encode_history_blobs(q: Option<&VecDeque<DtoValue>>) -> DtoValue {
+        let Some(q) = q else {
+            return dto_arr![];
+        };
+        DtoValue::Array(
+            q.iter()
+                .rev()
+                .map(|dto| DtoValue::Bytes(encode_amf3(dto)))
+                .collect(),
+        )
     }
 
     /// Sends a public/guild/cross-server chat message (or executes a GM `/command` if prefixed with `/`).
@@ -537,94 +440,51 @@ impl ChatService {
     ) -> (DtoValue, Vec<PushPacket>, Vec<(u64, PushPacket)>) {
         // 1. Intercept GM slash commands before level/VIP chat gates!
         if raw_text.trim_start().starts_with('/') && sender.gm_enabled {
-            match parse_gm_command(raw_text) {
-                Ok(gm_cmd) => {
-                    match execute_gm_command(gm_cmd, sender, mail_center, town_mgr, now_ts) {
-                        Ok(exec) => {
-                            let resp = Self::send_response_dto(ChatErrorCode::Succ, &exec.summary, 0);
-                            return (resp, exec.client_pushes, exec.town_broadcasts);
-                        }
-                        Err(err_msg) => {
-                            let err_push = PushPacket::new(
-                                push::CHAT_GET_MSG,
-                                build_chat_push_dto(
-                                    ChatChannel::Private,
-                                    ChatMsgType::Normal,
-                                    &format!("[GM Error] {err_msg}"),
-                                    0,
-                                    "[GM]",
-                                    1,
-                                    99,
-                                    15,
-                                    6,
-                                    0,
-                                    &sender.uname,
-                                    sender.quality,
-                                    now_ts,
-                                ),
-                                now_ts,
-                            );
-                            let resp = Self::send_response_dto(ChatErrorCode::Succ, err_msg, 0);
-                            return (resp, vec![err_push], Vec::new());
-                        }
+            return match parse_gm_command(raw_text) {
+                Ok(gm_cmd) => match execute_gm_command(gm_cmd, sender, mail_center, town_mgr, now_ts) {
+                    Ok(exec) => (
+                        Self::send_response_dto(ChatErrorCode::Succ, &exec.summary, 0),
+                        exec.client_pushes,
+                        exec.town_broadcasts,
+                    ),
+                    Err(err_msg) => {
+                        let err_push = build_gm_feedback_push(
+                            &format!("[GM Error] {err_msg}"),
+                            sender,
+                            now_ts,
+                        );
+                        (
+                            Self::send_response_dto(ChatErrorCode::Succ, err_msg, 0),
+                            vec![err_push],
+                            Vec::new(),
+                        )
                     }
-                }
+                },
                 Err(parse_err) => {
                     let msg = format!("[GM Syntax] {parse_err:?} (try /help)");
-                    let err_push = PushPacket::new(
-                        push::CHAT_GET_MSG,
-                        build_chat_push_dto(
-                            ChatChannel::Private,
-                            ChatMsgType::Normal,
-                            &msg,
-                            0,
-                            "[GM]",
-                            1,
-                            99,
-                            15,
-                            6,
-                            0,
-                            &sender.uname,
-                            sender.quality,
-                            now_ts,
-                        ),
-                        now_ts,
-                    );
-                    let resp = Self::send_response_dto(ChatErrorCode::Succ, &msg, 0);
-                    return (resp, vec![err_push], Vec::new());
+                    let err_push = build_gm_feedback_push(&msg, sender, now_ts);
+                    (
+                        Self::send_response_dto(ChatErrorCode::Succ, &msg, 0),
+                        vec![err_push],
+                        Vec::new(),
+                    )
                 }
-            }
+            };
         }
 
         // 2. Standard chat validation (`ChatProxy.lua`: mute check, length check, level>=40 or vip>=2 for non-guild)
         if sender.chat_ban_until > now_ts {
-            return (
-                Self::send_response_dto(ChatErrorCode::Ban, "", sender.chat_ban_until),
-                Vec::new(),
-                Vec::new(),
-            );
+            return Self::err_reply(ChatErrorCode::Ban, sender.chat_ban_until);
         }
         let text = raw_text.trim();
         if text.is_empty() || text.chars().count() > self.max_char_len {
-            return (
-                Self::send_response_dto(ChatErrorCode::Illegal, "", 0),
-                Vec::new(),
-                Vec::new(),
-            );
+            return Self::err_reply(ChatErrorCode::Illegal, 0);
         }
         if channel != ChatChannel::Guild && sender.level < 40 && sender.vip < 2 {
-            return (
-                Self::send_response_dto(ChatErrorCode::NotOpen, "", 0),
-                Vec::new(),
-                Vec::new(),
-            );
+            return Self::err_reply(ChatErrorCode::NotOpen, 0);
         }
         if channel == ChatChannel::Guild && sender.guild_name.is_empty() {
-            return (
-                Self::send_response_dto(ChatErrorCode::NoTeam, "", 0),
-                Vec::new(),
-                Vec::new(),
-            );
+            return Self::err_reply(ChatErrorCode::NoTeam, 0);
         }
 
         let push_dto = build_chat_push_dto(
@@ -643,11 +503,8 @@ impl ChatService {
             now_ts,
         );
 
-        let q = self.history.entry(channel).or_default();
-        if q.len() >= self.max_history_per_channel {
-            q.pop_front();
-        }
-        q.push_back(push_dto.clone());
+        let cap = self.max_history_per_channel;
+        Self::push_ring_buffer(self.history.entry(channel).or_default(), cap, push_dto.clone());
 
         let push_name = if channel == ChatChannel::TimeMachine {
             push::TM_CHAT_GET_MSG
@@ -655,18 +512,16 @@ impl ChatService {
             push::CHAT_GET_MSG
         };
         let pkt = PushPacket::new(push_name, push_dto, now_ts);
-
-        let self_pushes = vec![pkt.clone()];
-        let mut peer_broadcasts = Vec::new();
-        for &uid in all_online_uids {
-            if uid != sender.uid {
-                peer_broadcasts.push((uid, pkt.clone()));
-            }
-        }
+        let peer_broadcasts = all_online_uids
+            .iter()
+            .copied()
+            .filter(|&uid| uid != sender.uid)
+            .map(|uid| (uid, pkt.clone()))
+            .collect();
 
         (
             Self::send_response_dto(ChatErrorCode::Succ, text, 0),
-            self_pushes,
+            vec![pkt],
             peer_broadcasts,
         )
     }
@@ -681,33 +536,17 @@ impl ChatService {
         now_ts: u64,
     ) -> (DtoValue, Vec<PushPacket>, Vec<(u64, PushPacket)>) {
         if sender.chat_ban_until > now_ts {
-            return (
-                Self::send_response_dto(ChatErrorCode::Ban, "", sender.chat_ban_until),
-                Vec::new(),
-                Vec::new(),
-            );
+            return Self::err_reply(ChatErrorCode::Ban, sender.chat_ban_until);
         }
         if sender.level < 40 && sender.vip < 2 {
-            return (
-                Self::send_response_dto(ChatErrorCode::NotOpen, "", 0),
-                Vec::new(),
-                Vec::new(),
-            );
+            return Self::err_reply(ChatErrorCode::NotOpen, 0);
         }
         let text = raw_text.trim();
         if text.is_empty() || text.chars().count() > self.max_char_len {
-            return (
-                Self::send_response_dto(ChatErrorCode::Illegal, "", 0),
-                Vec::new(),
-                Vec::new(),
-            );
+            return Self::err_reply(ChatErrorCode::Illegal, 0);
         }
         let Some((&target_uid, target_uname, target_quality)) = target else {
-            return (
-                Self::send_response_dto(ChatErrorCode::Offline, "", 0),
-                Vec::new(),
-                Vec::new(),
-            );
+            return Self::err_reply(ChatErrorCode::Offline, 0);
         };
 
         let dto = build_chat_push_dto(
@@ -726,25 +565,21 @@ impl ChatService {
             now_ts,
         );
 
+        let cap = self.max_history_per_channel;
         for uid in [sender.uid, target_uid] {
-            let q = self.personal_history.entry(uid).or_default();
-            if q.len() >= self.max_history_per_channel {
-                q.pop_front();
-            }
-            q.push_back(dto.clone());
+            Self::push_ring_buffer(self.personal_history.entry(uid).or_default(), cap, dto.clone());
         }
 
         let pkt = PushPacket::new(push::CHAT_GET_MSG, dto, now_ts);
-        let self_pushes = vec![pkt.clone()];
         let peer_pushes = if target_uid != sender.uid {
-            vec![(target_uid, pkt)]
+            vec![(target_uid, pkt.clone())]
         } else {
             Vec::new()
         };
 
         (
             Self::send_response_dto(ChatErrorCode::Succ, text, 0),
-            self_pushes,
+            vec![pkt],
             peer_pushes,
         )
     }
@@ -752,55 +587,11 @@ impl ChatService {
     /// Returns channel history (`*LastMsgs`) in **reverse chronological order** (`tmp[len - k]`)
     /// with each entry encoded as an AMF3 `Bytes` blob, matching `ChatProxy:get*LastMsgs`!
     pub fn get_channel_last_msgs(&self, channel: ChatChannel) -> DtoValue {
-        let Some(q) = self.history.get(&channel) else {
-            return DtoValue::Array(Vec::new());
-        };
-        let blobs: Vec<DtoValue> = q
-            .iter()
-            .rev()
-            .map(|dto| DtoValue::Bytes(encode_amf3(dto)))
-            .collect();
-        DtoValue::Array(blobs)
+        Self::encode_history_blobs(self.history.get(&channel))
     }
 
     /// Returns personal chat history (`chat.getPersonalLastMsgs`) in reverse chronological AMF3 blobs.
     pub fn get_personal_last_msgs(&self, uid: u64) -> DtoValue {
-        let Some(q) = self.personal_history.get(&uid) else {
-            return DtoValue::Array(Vec::new());
-        };
-        let blobs: Vec<DtoValue> = q
-            .iter()
-            .rev()
-            .map(|dto| DtoValue::Bytes(encode_amf3(dto)))
-            .collect();
-        DtoValue::Array(blobs)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tavern_main_pop_marquee_matches_raffle_message_item_lua_schema() {
-        let mut chat = ChatService::new();
-        assert_eq!(chat.get_last_main_pop(0, 20).as_array().unwrap().len(), 0);
-
-        chat.record_main_pop("ChuaCongA", 2, &[401, 201], &[16012], 1_700_000_000);
-        let page1 = chat.get_last_main_pop(0, 20);
-        let arr = page1.as_array().expect("array for RaffleMessageItem:setLastMainPop");
-        assert_eq!(arr.len(), 1);
-        let row = &arr[0];
-        assert_eq!(row.get("uname").and_then(DtoValue::as_str), Some("ChuaCongA"));
-        assert_eq!(row.get("raffle_type").and_then(DtoValue::as_u32), Some(2));
-        let va_item = row.get("va_item").expect("va_item");
-        let heroes = va_item.get("1").and_then(DtoValue::as_array).unwrap();
-        assert_eq!(heroes[0].as_u32(), Some(401));
-        assert_eq!(heroes[1].as_u32(), Some(201));
-        let items = va_item.get("2").and_then(DtoValue::as_array).unwrap();
-        assert_eq!(items[0].as_u32(), Some(16012));
-
-        // Second page at offset 20 returns empty array so `#ret == 0` sets `self.isOver = true`
-        assert!(chat.get_last_main_pop(20, 20).as_array().unwrap().is_empty());
+        Self::encode_history_blobs(self.personal_history.get(&uid))
     }
 }

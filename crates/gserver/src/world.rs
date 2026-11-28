@@ -11,23 +11,19 @@ use gserver_data::{protagonist_by_utid, GameDataStore};
 use gserver_gameplay::engine::GameplayEngine;
 use gserver_gameplay::mail::RewardEntry;
 use gserver_http::{MapiService, RoleSummary};
-use gserver_player::{
-    is_valid_battle_grid_cell, JsonValue as PlayerJson, PlayerProfile, PlayerStore,
-};
+use gserver_player::{JsonValue as PlayerJson, PlayerProfile, PlayerStore};
 use gserver_protocol::{encode_s2c_single_frame, S2cEnvelope, ServerTxEncoder, Value};
 use gserver_rpc_catalog::bootstrap::{
     build_random_names_ret, BarrageState, EnterViewSnapshot, VaConfig,
 };
 
 use crate::bridge::{
-    catalog_amf3_to_protocol, dto_to_amf3, dto_to_player_json, export_raffle_state_to_profile,
-    import_raffle_state_from_profile, player_json_to_amf3, player_json_to_dto,
-    profile_to_gameplay_state_with_store, sync_gameplay_back_to_profile, to_gameplay_request,
-    u64_to_amf3,
+    amf3_to_player_json, catalog_amf3_to_protocol, dto_push_at, dto_to_amf3,
+    player_json_to_amf3, profile_to_gameplay_state, sync_gameplay_back_to_profile,
+    to_gameplay_request, u64_to_amf3,
 };
-use crate::bxh_snapshot::BxhSnapshot;
 use crate::config::DaemonConfig;
-use crate::player_rpcs::{normalize_player_method, try_handle_player_rpc};
+use crate::player_rpcs::try_handle_player_rpc;
 
 /// Per-TCP-connection session state tracked across RPCs.
 #[derive(Debug, Default, Clone)]
@@ -37,7 +33,6 @@ pub struct ConnectionSession {
     pub group_id: String,
     pub logged_in_uid: Option<u64>,
     pub session_token: String,
-    pub is_tm: bool,
 }
 
 /// Output envelopes produced by handling one client `RpcRequest`.
@@ -60,7 +55,6 @@ pub struct ServerWorld {
     config: DaemonConfig,
     mapi: Arc<MapiService>,
     data_store: GameDataStore,
-    bxh_snapshot: BxhSnapshot,
     tx_encoder: ServerTxEncoder,
     inner: Mutex<WorldInner>,
 }
@@ -77,30 +71,14 @@ impl ServerWorld {
             GameDataStore::new_embedded()
         };
 
-        let bxh_snapshot = if let Some(ref snap_path) = config.bxh_snapshot_path {
-            BxhSnapshot::load_optional(snap_path).unwrap_or_else(|e| {
-                eprintln!("[gserver] warning: ignoring BXH snapshot {:?}: {e}", snap_path);
-                BxhSnapshot::default()
-            })
-        } else {
-            BxhSnapshot::default()
-        };
-
         let mut gameplay = GameplayEngine::new(0x4F4D_4733_515F_564E);
-        let snap_arena = bxh_snapshot.extract_arena_players();
-        if !snap_arena.is_empty() {
-            gameplay.arena.seed_competitors_with_htid(
-                snap_arena
-                    .into_iter()
-                    .map(|p| (p.uid, p.uname, p.level, p.fight_force, p.position, p.htid))
-                    .collect(),
-            );
-        }
-
-        // Hydrate MapiService role summaries & GameplayEngine from persisted PlayerStore!
         let mut roles_by_pid: HashMap<String, Vec<RoleSummary>> = HashMap::new();
         for profile in Self::collect_all_persisted_profiles(&store) {
-            gp_register_and_role(&profile, &data_store, &mut gameplay, &mut roles_by_pid);
+            gameplay.register_player(profile_to_gameplay_state(&profile));
+            roles_by_pid
+                .entry(profile.pid.clone())
+                .or_default()
+                .push(role_summary_from_profile(&profile, profile.group_id.clone()));
         }
         for (pid, roles) in roles_by_pid {
             mapi.set_roles_for_pid(pid, roles);
@@ -110,7 +88,6 @@ impl ServerWorld {
             config,
             mapi,
             data_store,
-            bxh_snapshot,
             tx_encoder: ServerTxEncoder::new(),
             inner: Mutex::new(WorldInner {
                 store,
@@ -126,11 +103,14 @@ impl ServerWorld {
         let players_dir = store.data_dir().join("players");
         if let Ok(entries) = std::fs::read_dir(players_dir) {
             for entry in entries.flatten() {
-                if let Some(stem) = entry.path().file_stem().and_then(|s| s.to_str()) {
-                    if let Ok(uid) = stem.parse::<u64>() {
-                        if let Some(p) = store.get_player(uid) {
-                            out.push(p.clone());
-                        }
+                if let Some(uid) = entry
+                    .path()
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    if let Some(p) = store.get_player(uid) {
+                        out.push(p.clone());
                     }
                 }
             }
@@ -174,7 +154,7 @@ impl ServerWorld {
             return;
         };
         let now_ts = Self::now_unix_secs();
-        let deliveries: Vec<(Arc<Mutex<TcpStream>>, S2cEnvelope)> = {
+        let peer_envelopes: Vec<(u64, S2cEnvelope)> = {
             let Ok(mut guard) = self.inner.lock() else {
                 return;
             };
@@ -182,18 +162,13 @@ impl ServerWorld {
             let (_, bcasts) = guard.gameplay.town.leave_town(uid, now_ts);
             bcasts
                 .into_iter()
-                .filter_map(|(target_uid, pkt)| {
-                    let stream = guard.peers.get(&target_uid)?.clone();
-                    let env = S2cEnvelope::push(pkt.callback_name, dto_to_amf3(&pkt.ret, true))
-                        .with_time(pkt.time as i64);
-                    Some((stream, env))
+                .map(|(target_uid, pkt)| {
+                    let ts = pkt.time as i64;
+                    (target_uid, dto_push_at(pkt, ts))
                 })
                 .collect()
         };
-
-        for (stream_arc, env) in deliveries {
-            let _ = self.write_envelope(&stream_arc, &env);
-        }
+        self.broadcast_peer_pushes(peer_envelopes);
     }
 
     /// Writes a single S2C 8-byte framed envelope to a client socket, auto-compressing large payloads.
@@ -225,8 +200,7 @@ impl ServerWorld {
             peer_envelopes
                 .into_iter()
                 .filter_map(|(target_uid, env)| {
-                    let s = guard.peers.get(&target_uid)?.clone();
-                    Some((s, env))
+                    Some((guard.peers.get(&target_uid)?.clone(), env))
                 })
                 .collect()
         };
@@ -244,50 +218,26 @@ impl ServerWorld {
         let now_ts = Self::now_unix_secs();
         let now_i64 = now_ts as i64;
 
-        if matches!(req.method.as_str(), "ping" | "user.ping" | "tmUser.ping") {
+        if req.method == "ping" || req.method == "user.ping" {
             return HandledRpc {
                 caller_envelopes: vec![S2cEnvelope::ping().with_time(now_i64)],
                 peer_envelopes: Vec::new(),
             };
         }
 
-        let mut guard = match self.inner.lock() {
-            Ok(g) => g,
-            Err(_) => {
-                return Self::err_reply(req, "internal_lock_error", now_i64);
-            }
+        let Ok(mut guard) = self.inner.lock() else {
+            return Self::err_reply(req, "internal_lock_error", now_i64);
         };
 
-        // ------------------------------------------------------------------
         // Stage A: Pre-Login & Character Creation Handshake
-        // ------------------------------------------------------------------
         match req.method.as_str() {
             "user.login" => {
-                let login_tbl = req.args.first();
-                let pid = login_tbl
-                    .and_then(|v| v.get_field("pid"))
-                    .and_then(|v| {
-                        v.as_str()
-                            .map(ToOwned::to_owned)
-                            .or_else(|| v.as_i64().map(|n| n.to_string()))
-                    })
+                let tbl = req.args.first();
+                let pid = field_str_or_int(tbl, "pid")
                     .unwrap_or_else(|| "win32_guest_0001".to_string());
-                let qid = login_tbl
-                    .and_then(|v| v.get_field("qid"))
-                    .and_then(|v| {
-                        v.as_str()
-                            .map(ToOwned::to_owned)
-                            .or_else(|| v.as_i64().map(|n| n.to_string()))
-                    })
-                    .unwrap_or_else(|| pid.clone());
-                let hash = login_tbl
-                    .and_then(|v| v.get_field("hash"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let raw_server_id = login_tbl
-                    .and_then(|v| v.get_field("serverID"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("game2900161");
+                let qid = field_str_or_int(tbl, "qid").unwrap_or_else(|| pid.clone());
+                let hash = field_str(tbl, "hash", "");
+                let raw_server_id = field_str(tbl, "serverID", "game2900161");
                 let group_id = raw_server_id
                     .strip_prefix("game")
                     .unwrap_or(raw_server_id)
@@ -299,20 +249,17 @@ impl ServerWorld {
                     return Self::err_reply(req, "invalid_login_hash", now_i64);
                 }
 
-                // Ensure account exists in persistent store
                 if guard.store.get_account(&pid).is_none() {
-                    let uname = format!("acct_{pid}");
                     let _ = guard.store.register_account(
                         pid.clone(),
                         qid.clone(),
-                        uname,
+                        format!("acct_{pid}"),
                         hash.to_string(),
                         now_ts,
                     );
                 }
 
                 guard.token_seq += 1;
-                let tok = format!("tok_{}", guard.token_seq);
                 session.authenticated_pid = Some(pid);
                 session.qid = qid;
                 session.group_id = if group_id.is_empty() {
@@ -320,15 +267,8 @@ impl ServerWorld {
                 } else {
                     group_id
                 };
-                session.session_token = tok.clone();
-
-                let env = S2cEnvelope::ok_response(&req.callback_name, Value::String("ok".into()))
-                    .with_token(tok)
-                    .with_time(now_i64);
-                return HandledRpc {
-                    caller_envelopes: vec![env],
-                    peer_envelopes: Vec::new(),
-                };
+                session.session_token = format!("tok_{}", guard.token_seq);
+                return Self::ok_reply(req, session, Value::String("ok".into()), now_i64);
             }
 
             "user.getUserBeforLogin" => {
@@ -369,22 +309,16 @@ impl ServerWorld {
                     .unwrap_or("")
                     .trim()
                     .to_string();
-                if guard
-                    .gameplay
-                    .players
-                    .values()
-                    .any(|p| p.uname == uname)
-                {
+                if guard.gameplay.players.values().any(|p| p.uname == uname) {
                     return Self::err_reply(req, "uname_used", now_i64);
                 }
 
-                match guard
+                return match guard
                     .store
                     .create_character(&pid, &session.group_id, utid, &uname, now_ts)
                 {
                     Ok(profile) => {
                         let uid = profile.uid;
-                        // Persist default tutorial completion (`guide_id = 240`) so `MainLoading` reaches 100% cleanly!
                         let _ = guard.store.mutate_player(uid, now_ts, |p| {
                             p.set_user_config("guide_id", PlayerJson::Int(240))?;
                             p.set_user_config("is_first_fighten", PlayerJson::Bool(true))?;
@@ -393,15 +327,13 @@ impl ServerWorld {
                                 PlayerJson::Array(vec![PlayerJson::Int(1001)]),
                             )
                         });
-                        if let Some(updated) = guard.store.get_player(uid) {
-                            let gp = profile_to_gameplay_state_with_store(
-                                updated,
-                                Some(&self.data_store),
-                            );
-                            guard.gameplay.register_player(gp);
-                        }
-                        // Seed welcome starter gift in MailBox & Reward Center (`reward.getRewardList`)
-                        let _ = guard.gameplay.mail_center.send_system_mail(
+                        let WorldInner {
+                            ref store,
+                            ref mut gameplay,
+                            ..
+                        } = *guard;
+                        sync_player_into_gameplay(store, gameplay, uid);
+                        let _ = gameplay.mail_center.send_system_mail(
                             uid,
                             1,
                             "Quà Chào Mừng Chúa Công GServer",
@@ -413,17 +345,10 @@ impl ServerWorld {
                             now_ts,
                         );
                         self.refresh_mapi_roles(&guard.store, &pid);
-                        return Self::ok_reply(
-                            req,
-                            session,
-                            Value::String("ok".into()),
-                            now_i64,
-                        );
+                        Self::ok_reply(req, session, Value::String("ok".into()), now_i64)
                     }
-                    Err(e) => {
-                        return Self::err_reply(req, &format!("create_failed:{e}"), now_i64);
-                    }
-                }
+                    Err(e) => Self::err_reply(req, &format!("create_failed:{e}"), now_i64),
+                };
             }
 
             "user.userLogin" => {
@@ -441,40 +366,23 @@ impl ServerWorld {
                         .unwrap_or(0)
                 };
 
-                match guard.store.record_user_login(resolved_uid, now_ts) {
+                return match guard.store.record_user_login(resolved_uid, now_ts) {
                     Ok(status_str) => {
                         if status_str == "ok" {
                             session.logged_in_uid = Some(resolved_uid);
                             if !guard.gameplay.players.contains_key(&resolved_uid) {
-                                let prof_opt = guard.store.get_player(resolved_uid).cloned();
-                                if let Some(prof) = prof_opt {
-                                    guard.gameplay.register_player(
-                                        profile_to_gameplay_state_with_store(
-                                            &prof,
-                                            Some(&self.data_store),
-                                        ),
-                                    );
-                                    if let Some(raffle_st) = import_raffle_state_from_profile(&prof) {
-                                        guard.gameplay.raffle.import_state(resolved_uid, raffle_st);
-                                    }
-                                    if !prof.copy_progress.is_empty() {
-                                        let cp_dto = player_json_to_dto(&PlayerJson::Object(
-                                            prof.copy_progress,
-                                        ));
-                                        guard
-                                            .gameplay
-                                            .copy
-                                            .import_player_progress(resolved_uid, &cp_dto);
-                                    }
-                                }
+                                let WorldInner {
+                                    ref store,
+                                    ref mut gameplay,
+                                    ..
+                                } = *guard;
+                                sync_player_into_gameplay(store, gameplay, resolved_uid);
                             }
                         }
-                        return Self::ok_reply(req, session, Value::String(status_str), now_i64);
+                        Self::ok_reply(req, session, Value::String(status_str), now_i64)
                     }
-                    Err(_) => {
-                        return Self::ok_reply(req, session, Value::String("fail".into()), now_i64);
-                    }
-                }
+                    Err(_) => Self::ok_reply(req, session, Value::String("fail".into()), now_i64),
+                };
             }
 
             "user.stat" | "user.guideEvent" => {
@@ -484,58 +392,30 @@ impl ServerWorld {
             _ => {}
         }
 
-        // ------------------------------------------------------------------
         // Stage B/C/D/E: Logged-In Bootstrap + Full Gameplay RPCs
-        // ------------------------------------------------------------------
         let Some(uid) = session.logged_in_uid else {
             return Self::err_reply(req, "user_not_logged_in", now_i64);
         };
 
-        let (norm_world_method, req_is_tm) = normalize_player_method(&req.method);
-        if req_is_tm || req.method.starts_with("timeMachine") {
-            session.is_tm = true;
-        } else if req.method == "user.getUser" {
-            session.is_tm = false;
-        }
-
-        // Check `PlayerStore`-backed progression, bag, hero, squad, arming, forge & extended RPCs
         let WorldInner {
             ref mut store,
             ref mut gameplay,
             ..
         } = *guard;
-        if let Some(player_res) =
-            try_handle_player_rpc(store, gameplay, &self.data_store, uid, req, now_ts)
-        {
-            if matches!(
-                norm_world_method.as_str(),
-                "formation.getOtherPositionInfo" | "formation.getOtherServerPositionInfo"
-            ) {
-                if let Err(ref code) = player_res {
-                    if code == "target_player_not_found" {
-                        if let Some(target_uid) = req.args.first().and_then(Value::as_i64) {
-                            if target_uid > 0 {
-                                if let Some(snap_form) =
-                                    self.bxh_snapshot.get_other_formation(target_uid as u64)
-                                {
-                                    return Self::ok_reply(req, session, snap_form, now_i64);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        if let Some(player_res) = try_handle_player_rpc(store, gameplay, uid, req, now_ts) {
             return match player_res {
                 Ok(ok) => {
                     if let Some(ref pid) = ok.refresh_roles_pid {
                         self.refresh_mapi_roles(store, pid);
                     }
-                    let mut main_env =
-                        S2cEnvelope::ok_response(&req.callback_name, ok.ret).with_time(now_i64);
-                    if !session.session_token.is_empty() {
-                        main_env = main_env.with_token(session.session_token.clone());
-                    }
-                    let caller_envelopes = assemble_ordered_caller_envelopes(main_env, ok.caller_pushes);
+                    let main_env = Self::stamp_session(
+                        S2cEnvelope::ok_response(&req.callback_name, ok.ret),
+                        session,
+                        now_i64,
+                    );
+                    let mut caller_envelopes = Vec::with_capacity(1 + ok.caller_pushes.len());
+                    caller_envelopes.push(main_env);
+                    caller_envelopes.extend(ok.caller_pushes);
                     HandledRpc {
                         caller_envelopes,
                         peer_envelopes: ok.peer_pushes,
@@ -545,41 +425,36 @@ impl ServerWorld {
             };
         }
 
-        match norm_world_method.as_str() {
-            "user.enter" => Self::ok_reply(req, session, Value::String("ok".into()), now_i64),
+        match req.method.as_str() {
             "user.getUser" => {
                 let Some(profile) = guard.store.get_player(uid) else {
                     return Self::err_reply(req, "player_missing", now_i64);
                 };
                 let mut user_json = profile.to_vnsg2_get_user();
                 if let PlayerJson::Object(ref mut map) = user_json {
-                    // Emit `fight_force_max` as numeric so both Lua arithmetic and `tonumber()` succeed!
                     map.insert(
                         "fight_force_max".to_string(),
                         PlayerJson::UInt(profile.fight_force_max),
                     );
-                    // `hero_position_map` and `hero_partner_map` are client-side config tables
-                    // built by `UserData:initConfig()` with integer keys `1..6` from
-                    // `current_config.db` and must not be sent/clobbered by the server.
-                    map.remove("hero_position_map");
-                    map.remove("hero_partner_map");
+                    let unlock_levels = [1u32, 1, 10, 18, 26, 32];
+                    let pos_map = unlock_levels
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &req_lv)| {
+                            ((i + 1).to_string(), PlayerJson::Bool(profile.level >= req_lv))
+                        })
+                        .collect();
+                    map.insert("hero_position_map".to_string(), PlayerJson::Object(pos_map));
                 }
-                let ret_val = player_json_to_amf3(&user_json);
-                Self::ok_reply(req, session, ret_val, now_i64)
+                Self::ok_reply(req, session, player_json_to_amf3(&user_json), now_i64)
             }
 
             "switchfunc.getSwitch" => {
-                // All function_node IDs with require_lv <= 10 plus starter activity/UI switches
                 let unlocked = Value::dense_array(
-                    [
-                        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 18, 20, 24, 25, 30, 31,
-                        32, 35, 36, 44, 48, 49, 51, 56, 57, 58, 62, 67, 122, 129, 163, 168, 186,
-                        200, 203, 209, 220, 221, 237, 239, 242, 244, 246, 247, 249, 250, 251, 252,
-                        253, 254, 256, 262,
-                    ]
-                    .into_iter()
-                    .map(Value::Int)
-                    .collect(),
+                    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 18, 20]
+                        .into_iter()
+                        .map(Value::Int)
+                        .collect(),
                 );
                 Self::ok_reply(req, session, unlocked, now_i64)
             }
@@ -588,8 +463,6 @@ impl ServerWorld {
                 let Some(profile) = guard.store.get_player(uid) else {
                     return Self::err_reply(req, "player_missing", now_i64);
                 };
-                // Start from `VaConfig::default()` (`guide_id = 240`, `is_first_fighten = true`, etc.)
-                // and overlay any custom keys stored in `profile.va_config`!
                 let mut base = catalog_amf3_to_protocol(&VaConfig::default().to_amf3());
                 if let Value::Object(ref mut obj) = base {
                     for (k, v) in &profile.va_config {
@@ -621,52 +494,24 @@ impl ServerWorld {
                 let Some(profile) = guard.store.get_player(uid) else {
                     return Self::err_reply(req, "player_missing", now_i64);
                 };
-                // `FormationPanel.lua:20` ONLY renders the 6 visible cells `pos_list = {2, 3, 5, 6, 8, 9}`
-                // (`DEFAULT_CELLS = [3, 6, 9, 2, 5, 8]`), and every hid must exist in `allHeros`!
-                const DEFAULT_CELLS: [u8; 6] = [3, 6, 9, 2, 5, 8];
-                let mut used_cells: BTreeMap<u8, u64> = BTreeMap::new();
-                let mut unplaced_hids: Vec<u64> = Vec::new();
-                for (&cell, &hid) in &profile.formation.grid_formation {
-                    if hid > 0 && profile.heroes.contains_key(&hid) {
-                        if is_valid_battle_grid_cell(cell) && !used_cells.contains_key(&cell) {
-                            used_cells.insert(cell, hid);
-                        } else {
-                            unplaced_hids.push(hid);
-                        }
-                    }
-                }
-                for hid in unplaced_hids {
-                    if let Some(&free_cell) =
-                        DEFAULT_CELLS.iter().find(|c| !used_cells.contains_key(c))
-                    {
-                        used_cells.insert(free_cell, hid);
-                    }
-                }
-                if used_cells.is_empty() {
-                    for (idx, slot) in (1..=6u8).enumerate() {
-                        if let Some(&hid) = profile.formation.position.get(&slot) {
-                            if hid > 0 && profile.heroes.contains_key(&hid) {
-                                used_cells.insert(DEFAULT_CELLS[idx], hid);
-                            }
-                        }
-                    }
-                }
-                let grid_entries: Vec<(String, Value)> = used_cells
-                    .into_iter()
-                    .map(|(cell, hid)| (cell.to_string(), u64_to_amf3(hid)))
+                let slots: Vec<Value> = (1..=6u8)
+                    .map(|slot| {
+                        u64_to_amf3(profile.formation.position.get(&slot).copied().unwrap_or(0))
+                    })
                     .collect();
-                let formation_val = if grid_entries.is_empty() {
-                    Value::empty_array()
-                } else {
-                    Value::map(grid_entries.clone())
-                };
+                let grid_entries: Vec<(String, Value)> = profile
+                    .formation
+                    .grid_formation
+                    .iter()
+                    .map(|(cell, &hid)| (cell.to_string(), u64_to_amf3(hid)))
+                    .collect();
                 let grid_val = if grid_entries.is_empty() {
                     Value::empty_array()
                 } else {
                     Value::map(grid_entries)
                 };
                 let ret_val = Value::map([
-                    ("formation", formation_val),
+                    ("formation", Value::dense_array(slots)),
                     ("grid_formation", grid_val),
                 ]);
                 Self::ok_reply(req, session, ret_val, now_i64)
@@ -677,18 +522,26 @@ impl ServerWorld {
                     return Self::err_reply(req, "player_missing", now_i64);
                 };
                 let mut pos_json = profile.formation.to_vnsg2_position_info(&profile.heroes);
-                // Keep `position` occupied-only (no 0 entries, because HeroFormationData.lua:185-188
-                // iterates `pairs(self["position"])` without skipping hid == 0)
-                // AND ensure `allHeros` contains every hero in `profile.heroes`!
                 if let PlayerJson::Object(ref mut map) = pos_json {
-                    let mut heros_map = BTreeMap::new();
-                    for (&hid, hero) in &profile.heroes {
-                        heros_map.insert(hid.to_string(), hero.to_vnsg2_hero_info());
-                    }
+                    let slots: Vec<PlayerJson> = (1..=6u8)
+                        .map(|slot| {
+                            let hid = profile.formation.position.get(&slot).copied().unwrap_or(0);
+                            PlayerJson::UInt(if profile.heroes.contains_key(&hid) {
+                                hid
+                            } else {
+                                0
+                            })
+                        })
+                        .collect();
+                    map.insert("position".to_string(), PlayerJson::Array(slots));
+                    let heros_map: BTreeMap<String, PlayerJson> = profile
+                        .heroes
+                        .iter()
+                        .map(|(&hid, hero)| (hid.to_string(), hero.to_vnsg2_hero_info()))
+                        .collect();
                     map.insert("allHeros".to_string(), PlayerJson::Object(heros_map));
                 }
-                let ret_val = player_json_to_amf3(&pos_json);
-                Self::ok_reply(req, session, ret_val, now_i64)
+                Self::ok_reply(req, session, player_json_to_amf3(&pos_json), now_i64)
             }
 
             "bag.bagInfo" => {
@@ -699,7 +552,7 @@ impl ServerWorld {
                 Self::ok_reply(req, session, ret_val, now_i64)
             }
 
-            "copy.getCopy" | "timeMachineCopy.getCopy" => {
+            "copy.getCopy" => {
                 let chap_id = req
                     .args
                     .first()
@@ -708,46 +561,23 @@ impl ServerWorld {
                     .max(1) as u32;
                 let gp_dto = guard.gameplay.copy.get_chapter(uid, chap_id);
                 let mut ret_val = dto_to_amf3(&gp_dto, true);
-                // Populate `va_copy` required by `CopyInfoDataController` & `MainScene:isGuideFirstFight`!
                 let first_stage = format!("{chap_id}01");
-                let mut va_copy_entries: Vec<(String, Value)> = Vec::new();
-                if let Some(info_map) = gp_dto.get("va_copy_info").and_then(|v| v.as_map()) {
-                    for (stage_k, rec) in info_map {
-                        let raw_stars = rec.get("star").and_then(|s| s.as_i64()).unwrap_or(0);
-                        let stars = if stage_k == &first_stage && raw_stars == 0 {
-                            3
-                        } else {
-                            raw_stars
-                        };
-                        let reset_num = rec.get("reset_num").and_then(|r| r.as_i64()).unwrap_or(0);
-                        let box_status =
-                            rec.get("box_status").and_then(|b| b.as_i64()).unwrap_or(0);
-                        va_copy_entries.push((
-                            stage_k.clone(),
-                            Value::map([
-                                ("reset", Value::Int(reset_num as i32)),
-                                ("normal_star", Value::Int(stars as i32)),
-                                ("star_status", Value::Int(0)),
-                                ("pass", Value::Int(if stars > 0 { 1 } else { 0 })),
-                                (
-                                    "box_reward",
-                                    Value::Int(if box_status >= 2 { 1 } else { 0 }),
-                                ),
-                            ]),
-                        ));
-                    }
-                }
+                let mut va_copy_entries: Vec<(String, Value)> = gp_dto
+                    .get("va_copy_info")
+                    .and_then(|v| v.as_map())
+                    .map(|info_map| {
+                        info_map
+                            .iter()
+                            .map(|(stage_k, rec)| {
+                                let stars =
+                                    rec.get("star").and_then(|s| s.as_i64()).unwrap_or(3).max(1);
+                                (stage_k.clone(), build_va_copy_stage(stars as i32))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 if !va_copy_entries.iter().any(|(k, _)| k == &first_stage) {
-                    va_copy_entries.push((
-                        first_stage,
-                        Value::map([
-                            ("reset", Value::Int(0)),
-                            ("normal_star", Value::Int(3)),
-                            ("star_status", Value::Int(0)),
-                            ("pass", Value::Int(1)),
-                            ("box_reward", Value::Int(0)),
-                        ]),
-                    ));
+                    va_copy_entries.push((first_stage, build_va_copy_stage(3)));
                 }
                 if let Value::Object(ref mut obj) = ret_val {
                     obj.insert("va_copy", Value::map(va_copy_entries));
@@ -755,21 +585,14 @@ impl ServerWorld {
                 Self::ok_reply(req, session, ret_val, now_i64)
             }
 
-            "halidom.getInfo" => {
-                let ret_val = Value::map([
-                    ("current", Value::Int(1)),
-                    ("halidomInfo", Value::empty_array()),
-                ]);
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
-
-
-
-            "opencarnival.getOpenAchieve"
+            "allActivity.getActivityInfo"
+            | "halidom.getInfo"
+            | "opencarnival.getOpenAchieve"
             | "lordwar.getTempleInfo"
             | "crossClanBattle.getTempleInfo"
             | "crossClanBattle.getPromotionInfo"
-            | "activityAnswer.getInfo" => {
+            | "activityAnswer.getInfo"
+            | "barrage.getBarrageRecord" => {
                 Self::ok_reply(req, session, Value::empty_array(), now_i64)
             }
 
@@ -785,210 +608,7 @@ impl ServerWorld {
 
             "barrage.enterRoom" => Self::ok_reply(req, session, Value::Bool(true), now_i64),
 
-            "barrage.getBarrageRecord" => {
-                Self::ok_reply(req, session, Value::empty_array(), now_i64)
-            }
-
-
-
-
-
-
-
-            "praise.getPraiseInfo" => {
-                let ret_val = Value::map([
-                    ("praise_num", Value::Int(0)),
-                    ("va_praise", Value::empty_array()),
-                ]);
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
-
-            "lordwar.getPromotionInfo" => {
-                let ret_val = Value::map([
-                    ("round", Value::Int(0)),
-                    ("winSubround", Value::Int(0)),
-                    ("loseSubround", Value::Int(0)),
-                    ("status", Value::Int(0)),
-                    ("loseLord", Value::empty_array()),
-                    ("winLord", Value::empty_array()),
-                ]);
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
-
-
-
-            "activityRechargeRebate.getInfo" => Self::ok_reply(
-                req,
-                session,
-                Value::String("activity_close".to_string()),
-                now_i64,
-            ),
-
-            "brochureStrategy.getInfo" => {
-                let ret_val = Value::map([
-                    ("brochure_strategy_level", Value::Int(0)),
-                    ("va_brochure_strategy", Value::empty_array()),
-                    ("va_get_brochure_strategy", Value::empty_array()),
-                ]);
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
-
-            "collection.getInfo" => {
-                let score_reward_status = Value::map([
-                    ("page_1", Value::empty_array()),
-                    ("page_2", Value::empty_array()),
-                    ("page_3", Value::empty_array()),
-                    ("page_4", Value::empty_array()),
-                    ("page_5", Value::empty_array()),
-                ]);
-                let ret_val = Value::map([
-                    ("1", Value::empty_array()),
-                    ("2", Value::empty_array()),
-                    ("3", Value::empty_array()),
-                    ("4", Value::empty_array()),
-                    ("5", Value::empty_array()),
-                    ("6", Value::empty_array()),
-                    ("7", Value::empty_array()),
-                    ("8", Value::empty_array()),
-                    ("9", Value::empty_array()),
-                    ("10", Value::empty_array()),
-                    ("scoreRewardStatus", score_reward_status),
-                    ("likedRewardStatus", Value::empty_array()),
-                    ("likedNum", Value::Int(0)),
-                    ("todayLikeNum", Value::Int(0)),
-                ]);
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
-
-
-
-            "generalBook.getInfo" => {
-                let book_entry = || {
-                    Value::map([
-                        ("level", Value::Int(1)),
-                        ("total_exp", Value::Int(0)),
-                        ("star_exp", Value::empty_array()),
-                    ])
-                };
-                let ret_val = Value::map([
-                    ("1", book_entry()),
-                    ("2", book_entry()),
-                    ("3", book_entry()),
-                ]);
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
-
-
-
-            "friend.getFriendInfo" => {
-                let ret_val = Value::map([
-                    ("friendList", Value::empty_array()),
-                    ("blackList", Value::empty_array()),
-                    ("todayPresentUids", Value::empty_array()),
-                    ("todayReceiveTimes", Value::Int(0)),
-                ]);
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
-
-
-
-            "envelopRain.getInfo" => Self::ok_reply(req, session, Value::Bool(false), now_i64),
-
-            "job.getInfo" => {
-                let ret_val = Value::map([
-                    ("job", Value::Int(1)),
-                    ("level", Value::Int(1)),
-                    ("name", Value::Int(1)),
-                    ("va_skill", Value::empty_array()),
-                    ("va_equip", Value::empty_array()),
-                ]);
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
-
-
-
-
-
-            "dressBrightBook.getInfo" => {
-                let ret_val = Value::map([
-                    ("attr_list", Value::empty_array()),
-                    (
-                        "book_list",
-                        Value::map((1..=12).map(|id| (id.to_string(), Value::empty_array()))),
-                    ),
-                ]);
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
-
-
-
-            "top.get" => {
-                let tab = req
-                    .args
-                    .first()
-                    .and_then(Value::as_str)
-                    .unwrap_or("fight_force_max");
-                let self_profile = guard.store.get_player(uid).cloned();
-                let local_profiles = Self::collect_all_persisted_profiles(&guard.store);
-                let ret_val = self.bxh_snapshot.build_top_get_reply(
-                    tab,
-                    self_profile.as_ref(),
-                    &local_profiles,
-                );
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
-
-            "top.getWorldFightForceRank" => {
-                let self_profile = guard.store.get_player(uid).cloned();
-                let local_profiles = Self::collect_all_persisted_profiles(&guard.store);
-                let ret_val = self.bxh_snapshot.build_world_fight_force_reply(
-                    self_profile.as_ref(),
-                    &local_profiles,
-                );
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
-
-            "top.getUserInfo" => {
-                let target_uid = req.args.first().and_then(Value::as_i64).unwrap_or(0) as u64;
-                if let Some(info) = self.bxh_snapshot.get_user_info(target_uid) {
-                    return Self::ok_reply(req, session, info, now_i64);
-                }
-                if let Some(p) = guard.store.get_player(target_uid) {
-                    let ret_val = Value::map([
-                        ("uid", u64_to_amf3(p.uid)),
-                        ("uname", Value::String(p.uname.clone())),
-                        ("level", Value::Int(p.level as i32)),
-                        ("vip", Value::Int(p.vip as i32)),
-                        ("fight_force", u64_to_amf3(p.fc)),
-                        ("utid", Value::Int(p.utid as i32)),
-                    ]);
-                    return Self::ok_reply(req, session, ret_val, now_i64);
-                }
-                Self::ok_reply(req, session, Value::empty_array(), now_i64)
-            }
-
-            "top.getSelf" => {
-                let tab = req
-                    .args
-                    .first()
-                    .and_then(Value::as_str)
-                    .unwrap_or("fight_force_max");
-                let self_profile = guard.store.get_player(uid).cloned();
-                let local_profiles = Self::collect_all_persisted_profiles(&guard.store);
-                let full = self.bxh_snapshot.build_top_get_reply(
-                    tab,
-                    self_profile.as_ref(),
-                    &local_profiles,
-                );
-                let ret_val = full
-                    .get_field("self")
-                    .cloned()
-                    .unwrap_or_else(Value::empty_array);
-                Self::ok_reply(req, session, ret_val, now_i64)
-            }
-
             _ => {
-                // Route all Town, Chat/GM, Mail, Reward, Raffle, Shop, Copy/Battle, Arena, Sign & Online RPCs!
                 let gp_req = to_gameplay_request(req);
                 let outcome = guard.gameplay.dispatch(uid, &gp_req, now_ts);
 
@@ -999,21 +619,11 @@ impl ServerWorld {
                     return Self::ok_reply(req, session, Value::empty_array(), now_i64);
                 }
 
-                // Persist state changes back to `PlayerStore` (CRC32 WAL + atomic player JSON)
                 if outcome.response.err == "ok" {
                     if let Some(gp_state) = guard.gameplay.players.get(&uid).cloned() {
-                        let copy_prog =
-                            dto_to_player_json(&guard.gameplay.copy.export_player_progress(uid));
-                        let raffle_opt = guard.gameplay.raffle.export_state(uid);
                         let pid_opt = guard.store.get_player(uid).map(|p| p.pid.clone());
                         let _ = guard.store.mutate_player(uid, now_ts, |profile| {
                             sync_gameplay_back_to_profile(&gp_state, profile, now_ts);
-                            if let PlayerJson::Object(cp_map) = copy_prog {
-                                profile.copy_progress = cp_map;
-                            }
-                            if let Some(ref rst) = raffle_opt {
-                                export_raffle_state_to_profile(rst, profile);
-                            }
                             Ok(())
                         });
                         if let Some(ref pid) = pid_opt {
@@ -1022,36 +632,26 @@ impl ServerWorld {
                     }
                 }
 
-                let main_env = if outcome.response.err == "ok" {
+                let raw_main = if outcome.response.err == "ok" {
                     S2cEnvelope::ok_response(
                         &req.callback_name,
                         dto_to_amf3(&outcome.response.ret, true),
                     )
                 } else {
                     S2cEnvelope::error_response(&req.callback_name, outcome.response.err)
-                }
-                .with_token(session.session_token.clone())
-                .with_time(now_i64);
-
-                let converted_pushes: Vec<S2cEnvelope> = outcome
-                    .client_pushes
-                    .into_iter()
-                    .map(|cp| {
-                        S2cEnvelope::push(cp.callback_name, dto_to_amf3(&cp.ret, true))
-                            .with_time(cp.time as i64)
-                    })
-                    .collect();
-                let caller_envelopes = assemble_ordered_caller_envelopes(main_env, converted_pushes);
-
+                };
+                let mut caller_envelopes = Vec::with_capacity(1 + outcome.client_pushes.len());
+                caller_envelopes.push(Self::stamp_session(raw_main, session, now_i64));
+                caller_envelopes.extend(outcome.client_pushes.into_iter().map(|cp| {
+                    let ts = cp.time as i64;
+                    dto_push_at(cp, ts)
+                }));
                 let peer_envelopes = outcome
                     .peer_pushes
                     .into_iter()
                     .map(|(target_uid, pp)| {
-                        (
-                            target_uid,
-                            S2cEnvelope::push(pp.callback_name, dto_to_amf3(&pp.ret, true))
-                                .with_time(pp.time as i64),
-                        )
+                        let ts = pp.time as i64;
+                        (target_uid, dto_push_at(pp, ts))
                     })
                     .collect();
 
@@ -1065,23 +665,28 @@ impl ServerWorld {
 
     fn refresh_mapi_roles(&self, store: &PlayerStore, pid: &str) {
         if let Some(acc) = store.get_account(pid) {
-            let mut roles = Vec::new();
-            for (gid, &uid) in &acc.characters {
-                if let Some(p) = store.get_player(uid) {
-                    roles.push(RoleSummary {
-                        uid: p.uid,
-                        uname: p.uname.clone(),
-                        level: p.level,
-                        quality: 6,
-                        groupid: gid.clone(),
-                        groupname: format!("S161.Võ Xương ({gid})"),
-                        maintainflag: 0,
-                        vip: p.vip,
-                    });
-                }
-            }
+            let roles = acc
+                .characters
+                .iter()
+                .filter_map(|(gid, &uid)| {
+                    let p = store.get_player(uid)?;
+                    Some(role_summary_from_profile(p, gid.clone()))
+                })
+                .collect();
             self.mapi.set_roles_for_pid(pid.to_string(), roles);
         }
+    }
+
+    fn stamp_session(
+        mut env: S2cEnvelope,
+        session: &ConnectionSession,
+        now_i64: i64,
+    ) -> S2cEnvelope {
+        env = env.with_time(now_i64);
+        if !session.session_token.is_empty() {
+            env = env.with_token(session.session_token.clone());
+        }
+        env
     }
 
     fn ok_reply(
@@ -1090,12 +695,12 @@ impl ServerWorld {
         ret: Value,
         now_i64: i64,
     ) -> HandledRpc {
-        let mut env = S2cEnvelope::ok_response(&req.callback_name, ret).with_time(now_i64);
-        if !session.session_token.is_empty() {
-            env = env.with_token(session.session_token.clone());
-        }
         HandledRpc {
-            caller_envelopes: vec![env],
+            caller_envelopes: vec![Self::stamp_session(
+                S2cEnvelope::ok_response(&req.callback_name, ret),
+                session,
+                now_i64,
+            )],
             peer_envelopes: Vec::new(),
         }
     }
@@ -1103,408 +708,51 @@ impl ServerWorld {
     fn err_reply(req: &gserver_protocol::RpcRequest, code: &str, now_i64: i64) -> HandledRpc {
         HandledRpc {
             caller_envelopes: vec![
-                S2cEnvelope::error_response(&req.callback_name, code).with_time(now_i64)
+                S2cEnvelope::error_response(&req.callback_name, code).with_time(now_i64),
             ],
             peer_envelopes: Vec::new(),
         }
     }
 }
 
-/// Orders S2C caller envelopes per **B-09** & **B-12**:
-/// - Pre-response pushes (`re.[tm]Hero.new`, `[tm]Bag.update`, `sc.recruitment.addnum`, etc.) are sent **BEFORE** `main_env`
-///   so `HerosData` & `BagData` have newly created `hid`s/`item_id`s populated before Lua `callback(ret.ret, args)` runs!
-/// - Post-response pushes (`[tm]User.updateUser`) are sent **AFTER** `main_env` so `SpendManager` / callbacks never double-apply Gold/Copper!
-fn assemble_ordered_caller_envelopes(
-    main_env: S2cEnvelope,
-    pushes: Vec<S2cEnvelope>,
-) -> Vec<S2cEnvelope> {
-    let mut out = Vec::with_capacity(1 + pushes.len());
-    let mut post_pushes = Vec::new();
-    for p in pushes {
-        if matches!(
-            p.callback_name.as_deref(),
-            Some(
-                "user.updateUser"
-                    | "tmUser.updateUser"
-                    | "dailyDiscount.normalUpdate"
-                    | "tmDailyDiscount.normalUpdate"
-                    | "dailyDiscount.preBuyUpdate"
-                    | "tmDailyDiscount.preBuyUpdate"
-                    | "activityDailyRecharge2.update"
-                    | "tmActivityDailyRecharge2.update"
-                    | "activityQuarter.update"
-                    | "tmActivityQuarter.update"
-                    | "re.monthCard.updateCardInfo"
-                    | "tmRe.monthCard.updateCardInfo"
-                    | "activityWeekly.update"
-                    | "tmActivityWeekly.update"
-                    | "activityMonthly.update"
-                    | "tmActivityMonthly.update"
-                    | "activityBeauty.update"
-                    | "tmActivityBeauty.update"
-                    | "activityActiveTaskShop.pushNormalPay"
-                    | "tmActivityActiveTaskShop.pushNormalPay"
-                    | "activity8Years.pushNormalPay"
-                    | "tmActivity8Years.pushNormalPay"
-                    | "activityBattlePass.pushNormalPay"
-                    | "multipleFunds.buy"
-                    | "tmMultipleFunds.buy"
-                    | "voucher.recharge"
-                    | "re.crossGuildWar.buyUpdate"
-                    | "re.tmCrossGuildWar.buyUpdate"
-                    | "timeMachine.pushNormalPay"
-            )
-        ) {
-            post_pushes.push(p);
-        } else {
-            out.push(p);
-        }
-    }
-    out.push(main_env);
-    out.extend(post_pushes);
-    out
-}
-
-fn gp_register_and_role(
-    profile: &PlayerProfile,
-    data_store: &GameDataStore,
-    gameplay: &mut GameplayEngine,
-    roles_by_pid: &mut HashMap<String, Vec<RoleSummary>>,
-) {
-    gameplay.register_player(profile_to_gameplay_state_with_store(
-        profile,
-        Some(data_store),
-    ));
-    if let Some(raffle_st) = import_raffle_state_from_profile(profile) {
-        gameplay.raffle.import_state(profile.uid, raffle_st);
-    }
-    if !profile.copy_progress.is_empty() {
-        let cp_dto = player_json_to_dto(&PlayerJson::Object(profile.copy_progress.clone()));
-        gameplay.copy.import_player_progress(profile.uid, &cp_dto);
-    }
-    roles_by_pid
-        .entry(profile.pid.clone())
-        .or_default()
-        .push(RoleSummary {
-            uid: profile.uid,
-            uname: profile.uname.clone(),
-            level: profile.level,
-            quality: 6,
-            groupid: profile.group_id.clone(),
-            groupname: format!("S161.Võ Xương ({})", profile.group_id),
-            maintainflag: 0,
-            vip: profile.vip,
-        });
-}
-
-fn amf3_to_player_json(val: &Value) -> PlayerJson {
-    match val {
-        Value::Undefined | Value::Null => PlayerJson::Null,
-        Value::Bool(b) => PlayerJson::Bool(*b),
-        Value::Int(i) => PlayerJson::Int(i64::from(*i)),
-        Value::Double(d) => {
-            if d.fract() == 0.0 && *d >= 0.0 && *d <= (u64::MAX as f64) {
-                PlayerJson::UInt(*d as u64)
-            } else {
-                PlayerJson::Float(*d)
-            }
-        }
-        Value::String(s) => PlayerJson::Str(s.clone()),
-        Value::ByteString(b) | Value::ByteArray(b) | Value::Xml(b) | Value::XmlDoc(b) => {
-            PlayerJson::Str(String::from_utf8_lossy(b).into_owned())
-        }
-        Value::Date(ms) => PlayerJson::Float(*ms),
-        Value::Array { dense, assoc } => {
-            if assoc.is_empty() {
-                PlayerJson::Array(dense.iter().map(amf3_to_player_json).collect())
-            } else {
-                let mut m = BTreeMap::new();
-                for (i, v) in dense.iter().enumerate() {
-                    m.insert((i + 1).to_string(), amf3_to_player_json(v));
-                }
-                for (k, v) in assoc {
-                    m.insert(k.clone(), amf3_to_player_json(v));
-                }
-                PlayerJson::Object(m)
-            }
-        }
-        Value::Object(obj) => {
-            let mut m = BTreeMap::new();
-            for (k, v) in obj.iter() {
-                m.insert(k.to_string(), amf3_to_player_json(v));
-            }
-            PlayerJson::Object(m)
-        }
+fn role_summary_from_profile(p: &PlayerProfile, groupid: String) -> RoleSummary {
+    RoleSummary {
+        uid: p.uid,
+        uname: p.uname.clone(),
+        level: p.level,
+        quality: 6,
+        groupname: format!("S161.Võ Xương ({groupid})"),
+        groupid,
+        maintainflag: 0,
+        vip: p.vip,
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use gserver_http::ServerConfig as HttpMapiConfig;
-    use gserver_protocol::RpcRequest;
-
-    #[test]
-    fn user_get_user_excludes_hero_position_map_and_hero_partner_map() {
-        let tmp_dir = std::env::temp_dir().join(format!(
-            "gserver_world_get_user_test_{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        std::fs::create_dir_all(&tmp_dir).expect("create temp test dir");
-
-        let cfg = DaemonConfig {
-            data_dir: tmp_dir.clone(),
-            verify_tickets: false,
-            ..DaemonConfig::default()
-        };
-        let mapi = Arc::new(MapiService::new(HttpMapiConfig::default()));
-        let world = ServerWorld::open(cfg, mapi).expect("open ServerWorld");
-
-        let mut session = ConnectionSession::default();
-        let login = world.handle_rpc(
-            &mut session,
-            &RpcRequest::with_seq_id(
-                "user.login",
-                2,
-                vec![Value::map([
-                    ("pid", Value::String("pid_userdata_932".into())),
-                    ("serverID", Value::String("game2900161".into())),
-                ])],
-                "0",
-            ),
-        );
-        assert_eq!(login.caller_envelopes[0].err, "ok");
-
-        let tok = session.session_token.clone();
-        let create = world.handle_rpc(
-            &mut session,
-            &RpcRequest::with_seq_id(
-                "user.createUser",
-                3,
-                vec![Value::Int(1), Value::String("UserDataGuard".into())],
-                tok.as_str(),
-            ),
-        );
-        assert_eq!(create.caller_envelopes[0].err, "ok");
-
-        let before = world.handle_rpc(
-            &mut session,
-            &RpcRequest::with_seq_id("user.getUserBeforLogin", 4, vec![], tok.as_str()),
-        );
-        let uid = before.caller_envelopes[0]
-            .ret
-            .get_field("uid")
-            .and_then(Value::as_i64)
-            .expect("created uid");
-
-        let ulogin = world.handle_rpc(
-            &mut session,
-            &RpcRequest::with_seq_id(
-                "user.userLogin",
-                5,
-                vec![Value::Int(uid as i32)],
-                tok.as_str(),
-            ),
-        );
-        assert_eq!(ulogin.caller_envelopes[0].ret.as_str(), Some("ok"));
-
-        let get_user = world.handle_rpc(
-            &mut session,
-            &RpcRequest::with_seq_id("user.getUser", 6, vec![], tok.as_str()),
-        );
-        assert_eq!(get_user.caller_envelopes[0].err, "ok");
-        let ret = &get_user.caller_envelopes[0].ret;
-        assert_eq!(ret.get_field("uid").and_then(Value::as_i64), Some(uid));
-        assert!(
-            ret.get_field("hero_position_map").is_none(),
-            "user.getUser must not contain hero_position_map (clobbers UserData:initConfig integer keys at UserData.lua:931-932)"
-        );
-        assert!(
-            ret.get_field("hero_partner_map").is_none(),
-            "user.getUser must not contain hero_partner_map (client-side UserData:initConfig table)"
-        );
-
-        let gm_lv = world.handle_rpc(
-            &mut session,
-            &RpcRequest::with_seq_id(
-                "chat.sendWorld",
-                7,
-                vec![Value::Int(1), Value::String("/level 55".into())],
-                tok.as_str(),
-            ),
-        );
-        for env in &gm_lv.caller_envelopes {
-            assert!(
-                env.ret.get_field("hero_position_map").is_none(),
-                "push {:?} must not contain hero_position_map",
-                env.callback_name
-            );
-            assert!(
-                env.ret.get_field("hero_partner_map").is_none(),
-                "push {:?} must not contain hero_partner_map",
-                env.callback_name
-            );
-        }
-
-        drop(world);
-        let _ = std::fs::remove_dir_all(&tmp_dir);
+fn sync_player_into_gameplay(store: &PlayerStore, gameplay: &mut GameplayEngine, uid: u64) {
+    if let Some(profile) = store.get_player(uid) {
+        gameplay.register_player(profile_to_gameplay_state(profile));
     }
+}
 
-    #[test]
-    fn server_world_copy_arena_and_skill_level_up_use_authentic_hero_skills() {
-        let tmp_dir = std::env::temp_dir().join(format!(
-            "gserver_world_hero_skills_test_{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        std::fs::create_dir_all(&tmp_dir).expect("create temp test dir");
+fn field_str_or_int(tbl: Option<&Value>, key: &str) -> Option<String> {
+    let val = tbl?.get_field(key)?;
+    val.as_str()
+        .map(ToOwned::to_owned)
+        .or_else(|| val.as_i64().map(|n| n.to_string()))
+}
 
-        let cfg = DaemonConfig {
-            data_dir: tmp_dir.clone(),
-            verify_tickets: false,
-            ..DaemonConfig::default()
-        };
-        let mapi = Arc::new(MapiService::new(HttpMapiConfig::default()));
-        let world = ServerWorld::open(cfg, mapi).expect("open ServerWorld");
+fn field_str<'a>(tbl: Option<&'a Value>, key: &str, default: &'a str) -> &'a str {
+    tbl.and_then(|v| v.get_field(key))
+        .and_then(Value::as_str)
+        .unwrap_or(default)
+}
 
-        let mut session = ConnectionSession::default();
-        let _ = world.handle_rpc(
-            &mut session,
-            &RpcRequest::with_seq_id(
-                "user.login",
-                1,
-                vec![Value::map([
-                    ("pid", Value::String("pid_skill_e2e".into())),
-                    ("serverID", Value::String("game2900161".into())),
-                ])],
-                "0",
-            ),
-        );
-        let tok = session.session_token.clone();
-        let _ = world.handle_rpc(
-            &mut session,
-            &RpcRequest::with_seq_id(
-                "user.createUser",
-                2,
-                vec![Value::Int(2), Value::String("ChuaCongNu".into())],
-                tok.as_str(),
-            ),
-        );
-        let before = world.handle_rpc(
-            &mut session,
-            &RpcRequest::with_seq_id("user.getUserBeforLogin", 3, vec![], tok.as_str()),
-        );
-        let uid = before.caller_envelopes[0]
-            .ret
-            .get_field("uid")
-            .and_then(Value::as_i64)
-            .unwrap();
-        let _ = world.handle_rpc(
-            &mut session,
-            &RpcRequest::with_seq_id(
-                "user.userLogin",
-                4,
-                vec![Value::Int(uid as i32)],
-                tok.as_str(),
-            ),
-        );
-
-        // `hero.skillLevelUp` with omitted skill_id defaults to hero's authentic `com_atk` (not 1001!)
-        let heroes_ret = world
-            .handle_rpc(
-                &mut session,
-                &RpcRequest::with_seq_id("hero.getAllHeroes", 5, vec![], tok.as_str()),
-            )
-            .caller_envelopes[0]
-            .ret
-            .clone();
-        let mut zhaoyun_hid = 0i32;
-        if let Value::Object(ref map) = heroes_ret {
-            for (_k, v) in map.iter() {
-                if v.get_field("htid").and_then(Value::as_i64) == Some(201) {
-                    zhaoyun_hid = v.get_field("hid").and_then(Value::as_i64).unwrap() as i32;
-                }
-            }
-        }
-        assert!(
-            zhaoyun_hid > 0,
-            "DaemonConfig::default grants starter Triệu Vân (htid=201)"
-        );
-
-        let sk_up = world.handle_rpc(
-            &mut session,
-            &RpcRequest::with_seq_id(
-                "hero.skillLevelUp",
-                6,
-                vec![Value::Int(zhaoyun_hid)],
-                tok.as_str(),
-            ),
-        );
-        assert_eq!(sk_up.caller_envelopes[0].err, "ok");
-
-        let heroes_after = world
-            .handle_rpc(
-                &mut session,
-                &RpcRequest::with_seq_id("hero.getAllHeroes", 7, vec![], tok.as_str()),
-            )
-            .caller_envelopes[0]
-            .ret
-            .clone();
-        let zy_dto = heroes_after
-            .get_field(&zhaoyun_hid.to_string())
-            .expect("Triệu Vân DTO");
-        if let Some(Value::Array { dense, .. }) = zy_dto.get_field("talent") {
-            assert_eq!(dense, &vec![Value::Int(20102)]);
-        } else {
-            panic!("expected talent array with authentic com_atk 20102");
-        }
-
-        // `copy.attack` over ServerWorld emits authentic `arrSkill` for Nữ Chủ Tướng (104/103), Triệu Vân (20102/20101), Điêu Thuyền (40602/40601)
-        let atk = world.handle_rpc(
-            &mut session,
-            &RpcRequest::with_seq_id(
-                "copy.attack",
-                8,
-                vec![Value::Int(1001), Value::Int(100101)],
-                tok.as_str(),
-            ),
-        );
-        assert_eq!(atk.caller_envelopes[0].err, "ok");
-        let arr_hero = atk.caller_envelopes[0]
-            .ret
-            .get_field("battleInfo")
-            .and_then(|b| b.get_field("arrTeam1"))
-            .and_then(|t| match t {
-                Value::Array { dense, .. } => dense.first(),
-                other => other.get_field("1"),
-            })
-            .and_then(|t| t.get_field("arrHero"))
-            .expect("copy.attack arrTeam1[0].arrHero");
-        for (slot_key, exp_htid, exp_com, exp_angry) in [
-            ("1", 2, 104, 103),
-            ("2", 201, 20102, 20101),
-            ("3", 406, 40602, 40601),
-        ] {
-            let u = arr_hero.get_field(slot_key).expect("deployed hero unit");
-            assert_eq!(u.get_field("htid").and_then(Value::as_i64), Some(exp_htid));
-            if let Some(Value::Array { dense, .. }) = u.get_field("arrSkill") {
-                if let (
-                    Some(Value::Array { dense: s0, .. }),
-                    Some(Value::Array { dense: s1, .. }),
-                ) = (dense.first(), dense.get(1))
-                {
-                    assert_eq!(s0.first().and_then(Value::as_i64), Some(exp_com));
-                    assert_eq!(s1.first().and_then(Value::as_i64), Some(exp_angry));
-                } else {
-                    panic!("invalid nested arrSkill entries");
-                }
-            } else {
-                panic!("missing arrSkill array");
-            }
-        }
-
-        drop(world);
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-    }
+fn build_va_copy_stage(stars: i32) -> Value {
+    Value::map([
+        ("reset", Value::Int(0)),
+        ("normal_star", Value::Int(stars)),
+        ("star_status", Value::Int(0)),
+        ("pass", Value::Int(1)),
+        ("box_reward", Value::Int(0)),
+    ])
 }

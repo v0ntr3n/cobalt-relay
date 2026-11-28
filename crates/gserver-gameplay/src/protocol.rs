@@ -1,164 +1,131 @@
-//! Wire framing, AMF3-compatible DTO values, RPC envelopes, and exact `NetConst.lua` method constants.
+//! Wire framing, AMF3-compatible DTO values, declarative DTO macros, RPC envelopes,
+//! and `NetConst.lua` method constants delegated to `gserver-protocol` & `gserver-rpc-catalog`.
 
 use std::collections::BTreeMap;
 use std::fmt;
 
-/// Exact Client-to-Server RPC method names verified from `NetConst.lua` and module proxies.
-pub mod rpc {
-    // User & Bag
-    pub const USER_LOGIN: &str = "user.login";
-    pub const USER_USER_LOGIN: &str = "user.userLogin";
-    pub const USER_GET_USER: &str = "user.getUser";
-    pub const USER_CREATE_USER: &str = "user.createUser";
-    pub const USER_BEFORE_LOGIN_BATTLE: &str = "user.beforLoginBattle";
-    pub const BAG_INFO: &str = "bag.bagInfo";
-    pub const BAG_SELL_ITEMS: &str = "bag.sellItems";
-    pub const BAG_OPEN_GRID_BY_GOLD: &str = "bag.openGridByGold";
-    pub const HERO_GET_ALL: &str = "hero.getAllHeroes";
-    pub const FORMATION_GET_POSITION_INFO: &str = "formation.getPositionInfo";
+use gserver_protocol::amf3::{self, Value, AMF3_INT_MAX, AMF3_INT_MIN};
+use gserver_protocol::error::Amf3Error;
+use gserver_protocol::frame::{
+    encode_c2s_lcpacket, C2sFrameMode, ClientRxDecoder, C2S_LCPACKET_HEADER_SIZE,
+    DEFAULT_MAX_FRAME_BODY_LEN,
+};
+use gserver_protocol::md5::compute_babeltime_md5;
+use gserver_protocol::zlib::{zlib_compress, zlib_decompress};
 
-    // Town, City, RoyalCity & Castle
+/// Declaratively constructs a `DtoValue::Map` (`{}` when empty, or `"key" => value` entries).
+#[macro_export]
+macro_rules! dto_map {
+    () => { $crate::protocol::DtoValue::Map(::std::collections::BTreeMap::new()) };
+    ( $( $k:expr => $v:expr ),+ $(,)? ) => {{
+        let mut map = ::std::collections::BTreeMap::new();
+        $( map.insert(::std::convert::Into::<::std::string::String>::into($k), $crate::protocol::DtoValue::from($v)); )+
+        $crate::protocol::DtoValue::Map(map)
+    }};
+}
+
+/// Declaratively constructs a `DtoValue::Array` (`[]`, `[elem; count]`, or `[v1, v2, ...]`).
+#[macro_export]
+macro_rules! dto_arr {
+    () => { $crate::protocol::DtoValue::Array(::std::vec::Vec::new()) };
+    ( $elem:expr ; $n:expr ) => {
+        $crate::protocol::DtoValue::Array((0..$n).map(|_| $crate::protocol::DtoValue::from($elem)).collect())
+    };
+    ( $( $v:expr ),+ $(,)? ) => {
+        $crate::protocol::DtoValue::Array(::std::vec![ $( $crate::protocol::DtoValue::from($v) ),+ ])
+    };
+}
+
+/// Declaratively constructs an `"ok"` response map (`{ "ret": "ok", ... }`).
+#[macro_export]
+macro_rules! dto_ok {
+    () => { $crate::dto_map! { "ret" => "ok" } };
+    ( $( $k:expr => $v:expr ),+ $(,)? ) => { $crate::dto_map! { "ret" => "ok", $( $k => $v, )+ } };
+}
+
+pub use crate::{dto_arr, dto_map, dto_ok};
+
+/// Exact Client-to-Server RPC method names aliased from `gserver_rpc_catalog::net_const`.
+pub mod rpc {
+    pub use gserver_rpc_catalog::net_const::{
+        // User, Bag, Hero & Formation
+        CS_BAG_OPEN_GRID_BY_GOLD as BAG_OPEN_GRID_BY_GOLD, CS_BAG_SELL_ITEM as BAG_SELL_ITEMS,
+        CS_FORMATION_GET_POSITION_INFO as FORMATION_GET_POSITION_INFO, CS_GET_ALL_HERO as HERO_GET_ALL,
+        CS_GET_BAG_DATA as BAG_INFO, CS_GET_USER as USER_GET_USER,
+        CS_USER_BEFORE_LOGIN_FIGHT as USER_BEFORE_LOGIN_BATTLE, CS_USER_CREATEUSER as USER_CREATE_USER,
+        CS_USER_LOGIN as USER_LOGIN, CS_USER_USERLOGIN as USER_USER_LOGIN,
+        // Town, RoyalCity & Castle
+        CS_ROYALCITY_ENTER as ROYALCITY_ENTER, CS_ROYALCITY_LEAVE as ROYALCITY_LEAVE,
+        CS_ROYALCITY_MOVE as ROYALCITY_MOVE, CS_TOWN_BUILDING_MAINBASE_INFO as HALL_GET_INFO,
+        CS_TOWN_BUILDING_MARKET_GET_INFO as MARKET_GET_INFO, CS_TOWN_BUILDING_SMITHY_INFO as SMITHY_GET_INFO,
+        CS_TOWN_BUILDING_WORKSHOP_INFO as WORKSHOP_GET_INFO, CS_TOWN_LIST as CASTLE_GET_INFO,
+        SC_ROYALCITY_MOVE as TOWN_MOVE,
+        // Chat
+        CS_CHAT_CHAT_CROSS_SERVER_GET as CHAT_GET_CROSS_TEAM_LAST,
+        CS_CHAT_CHAT_CROSS_SERVER_SEND as CHAT_SEND_CROSS_TEAM,
+        CS_CHAT_COUNTRY_GET as CHAT_GET_COUNTRY_LAST, CS_CHAT_COUNTRY_SEND as CHAT_SEND_COUNTRY,
+        CS_CHAT_GUILD_CROSS_SERVER_GET as CHAT_GET_CROSS_GUILD_LAST,
+        CS_CHAT_GUILD_CROSS_SERVER_SEND as CHAT_SEND_CROSS_GUILD,
+        CS_CHAT_GUILD_GET as CHAT_GET_GUILD_LAST, CS_CHAT_GUILD_SEND as CHAT_SEND_GUILD,
+        CS_CHAT_PERSONAL_GET as CHAT_GET_PERSONAL_LAST, CS_CHAT_PERSONAL_SEND as CHAT_SEND_PERSONAL,
+        CS_CHAT_TIMEMACHINE_GET as TM_CHAT_GET_CROSS_GUILD_LAST,
+        CS_CHAT_TIMEMACHINE_SEND as TM_CHAT_SEND_CROSS_GUILD,
+        CS_CHAT_WORLD_GET as CHAT_GET_WORLD_LAST, CS_CHAT_WORLD_SEND as CHAT_SEND_WORLD,
+        // Mail & Reward Center
+        CS_ACTIVITY_CODE_GIFTBYCODE as REWARD_GIFT_BY_CODE, CS_GET_MAIL_DATA as MAIL_GET_LIST,
+        CS_MAIL_READALLMAIL as MAIL_READ_ALL, CS_REWARD_GETREWARDLIST as REWARD_GET_LIST,
+        CS_REWARD_RECEIVEBYRIDARR as REWARD_RECEIVE_BY_RID_ARR, CS_SEND_MAIL as MAIL_SEND,
+        // Shop & Tavern Raffle
+        CS_RAFFLE_BUY_TOKEN as RAFFLE_BUY_TOKEN, CS_RAFFLE_FREE_AUTO as RAFFLE_AUTO,
+        CS_RAFFLE_GET_INFO as RAFFLE_GET_INFO, CS_RAFFLE_LIMIT as RAFFLE_HOT,
+        CS_RAFFLE_LIMIT_REFRESH as RAFFLE_REFRESH_HOT, CS_RAFFLE_LIMIT_TEN as RAFFLE_MULTI_HOT,
+        CS_RAFFLE_MULTI as RAFFLE_MULTI, CS_RAFFLE_RECEIVE_LUCK_HERO as RAFFLE_RECEIVE_LUCK,
+        CS_RAFFLE_RECEIVE_LUCK_HERO_HOT as RAFFLE_RECEIVE_LUCK_HOT,
+        CS_RAFFLE_RECEIVE_LUCK_HERO_RED as RAFFLE_RECEIVE_LUCK_RED, CS_RAFFLE_RED as RAFFLE_RED,
+        CS_RAFFLE_SIGNAL as RAFFLE_SINGLE, CS_SHOP_BUY as SHOP_BUY, CS_SHOP_GETINFO as SHOP_GET_INFO,
+        CS_SHOP_REFRESH as SHOP_REFRESH,
+        // PvE Campaign Copy & Battle Record
+        CS_BATTLE_GETRECORD as BATTLE_GET_RECORD, CS_COPY_ATTACK as COPY_ATTACK,
+        CS_COPY_CHAPTERINFO as COPY_GET_COPY, CS_COPY_FAIL as COPY_FAIL,
+        CS_COPY_FETCH_FRESHER_REWARD as COPY_FETCH_FRESHER_REWARD,
+        CS_COPY_GET_FIGHT_RECORD as COPY_GET_STRONGH_RECORD,
+        CS_COPY_GET_POINT_BOX_REWARD as COPY_FETCH_BOX_REWARD,
+        CS_COPY_GET_REWARD as COPY_FETCH_PRIZE, CS_COPY_LIST as COPY_GET_LIST,
+        CS_COPY_ONE_KEY_RESET_ATK as COPY_ONE_KEY_RESET_ATK, CS_COPY_PASS as COPY_PASS,
+        CS_COPY_RESET_ATK_NUM as COPY_RESET_ATK, CS_COPY_SWEEP as COPY_SWEEP,
+        // Arena, Sign, Online & Activity
+        CS_ACTIVITY_GETACTIVITYCONF as ACTIVITY_GET_CONF, CS_ACTIVITY_ONLINE_FETCH as ONLINE_FETCH,
+        CS_ACTIVITY_ONLINE_GETINFO as ONLINE_GET_INFO,
+        CS_ACTIVITY_SIGN_GAIN_VIP_SIGN_REWARD as SIGN_GAIN_VIP, CS_ACTIVITY_SIGN_GETINFO as SIGN_GET_INFO,
+        CS_ACTIVITY_SIGN_SIGNTODAY as SIGN_TODAY, CS_ARENA_BUY_CHALLENGE_TIMES as ARENA_BUY_TIMES,
+        CS_ARENA_CHALLENGE as ARENA_CHALLENGE, CS_ARENA_ENTARN_ARENA as ARENA_ENTER,
+        CS_ARENA_FETCH_NUM_REWARD as ARENA_FETCH_NUM_REWARD, CS_ARENA_GET_BASE_DATA as ARENA_GET_BASE_DATA,
+        CS_ARENA_LEAVE_ARENA as ARENA_LEAVE, CS_ARENA_QUICK_CHALLENGE as ARENA_QUICK_CHALLENGE,
+        CS_ONLINE_OPEN_GETINFO as OPEN_ONLINE_GET_INFO, CS_ONLINE_OPEN_REVEIVE as OPEN_ONLINE_RECEIVE,
+    };
+
     pub const CITY_ENTER: &str = "city.enter";
     pub const CITY_LEAVE: &str = "city.leave";
     pub const CITY_GET_ENTER_LIST: &str = "city.getEnterList";
-    pub const CITY_ENTER_SHADOW_INFO: &str = "city.enterShadowInfo";
-    pub const TOWN_MOVE: &str = "town.move";
-    pub const ROYALCITY_ENTER: &str = "imperialcity.enter";
-    pub const ROYALCITY_LEAVE: &str = "imperialcity.leave";
-    pub const ROYALCITY_MOVE: &str = "imperialcity.move";
-    pub const IMPERIALCITY_HOST: &str = "imperialcity.getImperialCityHost";
-    pub const IMPERIALCITY_LOGIN: &str = "imperialcity.login";
-    pub const CASTLE_GET_INFO: &str = "castle.getInfo";
-    pub const HALL_GET_INFO: &str = "hall.getInfo";
-    pub const MARKET_GET_INFO: &str = "market.getInfo";
-    pub const WORKSHOP_GET_INFO: &str = "workshop.getInfo";
-    pub const SMITHY_GET_INFO: &str = "smithy.getInfo";
-
-    // Chat
-    pub const CHAT_SEND_WORLD: &str = "chat.sendWorld";
-    pub const CHAT_GET_WORLD_LAST: &str = "chat.getWorldLastMsgs";
-    pub const CHAT_SEND_PERSONAL: &str = "chat.sendPersonal";
-    pub const CHAT_GET_PERSONAL_LAST: &str = "chat.getPersonalLastMsgs";
-    pub const CHAT_SEND_GUILD: &str = "chat.sendGuild";
-    pub const CHAT_GET_GUILD_LAST: &str = "chat.getGuildLastMsgs";
-    pub const CHAT_SEND_CROSS_GUILD: &str = "chat.sendCrossGuild";
-    pub const CHAT_GET_CROSS_GUILD_LAST: &str = "chat.getCrossGuildLastMsgs";
-    pub const CHAT_SEND_CROSS_TEAM: &str = "chat.sendCrossGuildTeam";
-    pub const CHAT_GET_CROSS_TEAM_LAST: &str = "chat.getCrossGuildTeamLastMsgs";
-    pub const CHAT_SEND_COUNTRY: &str = "chat.sendCountry";
-    pub const CHAT_GET_COUNTRY_LAST: &str = "chat.getCountryLastMsgs";
-    pub const CHAT_GET_LAST_MAIN_POP: &str = "chat.getLastMainPop";
-    pub const TM_CHAT_SEND_CROSS_GUILD: &str = "tmChat.sendCrossGuild";
-    pub const TM_CHAT_GET_CROSS_GUILD_LAST: &str = "tmChat.getCrossGuildLastMsgs";
-
-    // Mail & Reward Center
-    pub const MAIL_GET_LIST: &str = "mail.getMailBoxList";
-    pub const MAIL_READ_ALL: &str = "mail.readAllMail";
-    pub const MAIL_SEND: &str = "mail.sendMail";
-    pub const MAIL_DRAW_ITEMS: &str = "mail.drawMailItems";
-    pub const MAIL_DRAW_ALL_ITEMS: &str = "mail.drawAllMailItems";
-    pub const REWARD_GET_LIST: &str = "reward.getRewardList";
-    pub const REWARD_RECEIVE: &str = "reward.receiveReward";
-    pub const REWARD_RECEIVE_BY_RID_ARR: &str = "reward.receiveByRidArr";
-    pub const REWARD_GIFT_BY_CODE: &str = "reward.giftByCode";
-
-    // Shop & Tavern Raffle
-    pub const SHOP_GET_INFO: &str = "shop.getInfo";
-    pub const SHOP_BUY: &str = "shop.buy";
-    pub const SHOP_REFRESH: &str = "shop.refresh";
     pub const SHOP_MULTI_REFRESH: &str = "shop.multiRefresh";
     pub const SHOP_QUICK_BUY: &str = "shop.quickBuy";
     pub const SHOP_AUTO_BUY: &str = "shop.normalShopAutoBuy";
-    pub const RAFFLE_GET_INFO: &str = "raffle.getInfo";
-    pub const RAFFLE_SINGLE: &str = "raffle.singleRaffle";
-    pub const RAFFLE_AUTO: &str = "raffle.autoRaffle";
-    pub const RAFFLE_MULTI: &str = "raffle.multiRaffle";
-    pub const RAFFLE_HOT: &str = "raffle.raffleHot";
-    pub const RAFFLE_MULTI_HOT: &str = "raffle.multiRaffleHot";
-    pub const RAFFLE_RED: &str = "raffle.raffleRed";
-    pub const RAFFLE_BUY_TOKEN: &str = "raffle.buyToken";
-    pub const RAFFLE_RECEIVE_LUCK: &str = "raffle.receiveLuckHeroGift";
-    pub const RAFFLE_RECEIVE_LUCK_HOT: &str = "raffle.receiveHotLuckHeroGift";
-    pub const RAFFLE_RECEIVE_LUCK_RED: &str = "raffle.receiveRedLuckHeroGift";
-    pub const RAFFLE_REFRESH_HOT: &str = "raffle.refreshHotByHand";
-    pub const RECRUITMENT_GET_INFO: &str = "recruitment.getInfo";
-    pub const RECRUITMENT_RECEIVE_REWARD: &str = "recruitment.receiveActiveReward";
-
-    // PvE Campaign Copy & Battle Record
-    pub const COPY_GET_LIST: &str = "copy.getList";
-    pub const COPY_GET_COPY: &str = "copy.getCopy";
-    pub const COPY_ATTACK: &str = "copy.attack";
-    pub const COPY_PASS: &str = "copy.pass";
-    pub const COPY_FAIL: &str = "copy.battleFail";
-    pub const COPY_SWEEP: &str = "copy.sweep";
-    pub const COPY_RESET_ATK: &str = "copy.resetAtk";
-    pub const COPY_ONE_KEY_RESET_ATK: &str = "copy.oneKeyResetAtk";
-    pub const COPY_FETCH_PRIZE: &str = "copy.fetchPrize";
-    pub const COPY_GET_PRIZE: &str = "copy.getPrize";
-    pub const COPY_FETCH_BOX_REWARD: &str = "copy.fetchBoxReward";
-    pub const COPY_FETCH_FRESHER_REWARD: &str = "copy.fetchFresherReward";
-    pub const COPY_GET_FAMOUS_PASS_TIMES: &str = "copy.getFamousPassTimes";
-    pub const COPY_GET_STRONGH_RECORD: &str = "copy.getStronghRecord";
-    pub const BATTLE_GET_RECORD: &str = "battle.getRecord";
-
-    // Arena
-    pub const ARENA_GET_BASE_DATA: &str = "arena.getBaseData";
-    pub const ARENA_GET_ARENA_INFO: &str = "arena.getArenaInfo";
-    pub const ARENA_ENTER: &str = "arena.enterArena";
-    pub const ARENA_LEAVE: &str = "arena.leaveArena";
-    pub const ARENA_GET_RANK_LIST: &str = "arena.getRankList";
-    pub const ARENA_CHALLENGE: &str = "arena.challenge";
-    pub const ARENA_QUICK_CHALLENGE: &str = "arena.quickChallenge";
-    pub const ARENA_SWEEP: &str = "arena.sweep";
-    pub const ARENA_BUY_TIMES: &str = "arena.buyChallengeTimes";
-    pub const ARENA_FETCH_REWARD: &str = "arena.fetchReward";
-    pub const ARENA_FETCH_NUM_REWARD: &str = "arena.fetchChallengeNumReward";
-
-    // Sign, Online & Activity
-    pub const SIGN_GET_INFO: &str = "sign.getInfo";
-    pub const SIGN_TODAY: &str = "sign.signToday";
-    pub const SIGN_GAIN_NORMAL: &str = "sign.gainNormalSignReward";
-    pub const SIGN_GAIN_ACC: &str = "sign.gainAccSignReward";
-    pub const SIGN_GAIN_VIP: &str = "sign.gainVipSignReward";
-    pub const SIGN_GAIN_RECHARGE: &str = "sign.gainRechargeSignReward";
-    pub const SUPER_CHECKIN_GET_INFO: &str = "superCheckin.getInfo";
-    pub const SUPER_CHECKIN_SIGN: &str = "superCheckin.sign";
-    pub const SUPER_CHECKIN_FETCH: &str = "superCheckin.fetchReward";
-    pub const ONLINE_GET_INFO: &str = "online.getInfo";
-    pub const ONLINE_FETCH: &str = "online.fetch";
-    pub const OPEN_ONLINE_GET_INFO: &str = "openOnline.getInfo";
-    pub const OPEN_ONLINE_RECEIVE: &str = "openOnline.receive";
-    pub const ACTIVITY_GET_CONF: &str = "activity.getActivityConf";
 }
 
-/// Exact Server-to-Client push callback names verified from `NetConst.lua` & `Network.lua`.
-///
-/// Note the critical `vnsg2` protocol nuance: `user.updateUser`, `bag.update`, `shop.open`,
-/// and `town.*` do NOT carry the `re.` prefix!
+/// Exact Server-to-Client push callback names aliased from `gserver_rpc_catalog::net_const`.
 pub mod push {
-    pub const USER_UPDATE: &str = "user.updateUser";
-    pub const TM_USER_UPDATE: &str = "tmUser.updateUser";
+    pub use gserver_rpc_catalog::net_const::{
+        CS_BAG_PUSH_UPDATE as BAG_UPDATE, CS_SHOP_PUSH_UPDATE as SHOP_OPEN,
+        RE_CHAT_MSG_PUSH as CHAT_GET_MSG, RE_TM_CHAT_MSG_PUSH as TM_CHAT_GET_MSG,
+        SC_ACTIVITY_NEWCONF as ACTIVITY_NEW_CONF, SC_ARENA_DATA_REFRESH as ARENA_DATA_REFRESH,
+        SC_HERO_NEW as HERO_NEW, SC_NEWMAIL as MAIL_NEW, SC_REWARD_NEW as REWARD_NEW,
+        SC_ROYALCITY_ADDPLAYER as TOWN_ADD_PLAYER, SC_ROYALCITY_DELPLAYER as TOWN_DEL_PLAYER,
+        SC_ROYALCITY_MOVE as TOWN_MOVE, SC_USER_UPDATEUSER as USER_UPDATE,
+    };
+
     pub const USER_COPPER_OVER_MAX: &str = "re.user.copperOverMax";
     pub const SERVER_NOTIFY: &str = "SERVER_NOTIFY";
-    pub const BAG_UPDATE: &str = "bag.update";
-    pub const TM_BAG_UPDATE: &str = "tmBag.update";
-    pub const HERO_NEW: &str = "re.hero.new";
-    pub const TM_HERO_NEW: &str = "re.tmHero.new";
-    pub const CHAT_GET_MSG: &str = "re.chat.getMsg";
-    pub const TM_CHAT_GET_MSG: &str = "re.tmChat.getMsg";
-    pub const MAIL_NEW: &str = "re.mail.newMail";
-    pub const TM_MAIL_NEW: &str = "tmRe.mail.newMail";
-    pub const REWARD_NEW: &str = "re.reward.new";
-    pub const TM_REWARD_NEW: &str = "re.tmReward.new";
-    pub const SHOP_OPEN: &str = "shop.open";
-    pub const TM_SHOP_OPEN: &str = "tmShop.open";
-    pub const TOWN_ADD_PLAYER: &str = "town.addPlayer";
-    pub const TOWN_DEL_PLAYER: &str = "town.delPlayer";
-    pub const TOWN_MOVE: &str = "town.move";
     pub const TOWN_UPDATE: &str = "town.update";
-    pub const ARENA_DATA_REFRESH: &str = "re.arena.dataRefresh";
-    pub const TM_ARENA_DATA_REFRESH: &str = "tmRe.arena.dataRefresh";
-    pub const ACTIVITY_NEW_CONF: &str = "re.activity.newConf";
 }
 
 /// AMF3-compatible value representation used across GServer RPC tables and binary blobs.
@@ -191,11 +158,7 @@ impl fmt::Debug for DtoValue {
 
 impl DtoValue {
     pub fn map(entries: impl IntoIterator<Item = (impl Into<String>, DtoValue)>) -> Self {
-        let mut m = BTreeMap::new();
-        for (k, v) in entries {
-            m.insert(k.into(), v);
-        }
-        Self::Map(m)
+        Self::Map(entries.into_iter().map(|(k, v)| (k.into(), v)).collect())
     }
 
     pub fn array(items: impl IntoIterator<Item = DtoValue>) -> Self {
@@ -215,13 +178,17 @@ impl DtoValue {
         }
     }
 
-    pub fn as_u32(&self) -> Option<u32> {
-        self.as_i64().and_then(|v| u32::try_from(v).ok())
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Self::Float(v) => Some(*v),
+            Self::Int(v) => Some(*v as f64),
+            Self::Str(s) => s.parse::<f64>().ok(),
+            _ => None,
+        }
     }
 
-    pub fn as_u64(&self) -> Option<u64> {
-        self.as_i64().and_then(|v| u64::try_from(v).ok())
-    }
+    pub fn as_u32(&self) -> Option<u32> { self.as_i64().and_then(|v| u32::try_from(v).ok()) }
+    pub fn as_u64(&self) -> Option<u64> { self.as_i64().and_then(|v| u64::try_from(v).ok()) }
 
     pub fn as_bool(&self) -> Option<bool> {
         match self {
@@ -232,180 +199,160 @@ impl DtoValue {
     }
 
     pub fn as_str(&self) -> Option<&str> {
-        match self {
-            Self::Str(s) => Some(s.as_str()),
-            _ => None,
-        }
+        if let Self::Str(s) = self { Some(s.as_str()) } else { None }
     }
 
     pub fn as_bytes(&self) -> Option<&[u8]> {
-        match self {
-            Self::Bytes(b) => Some(b.as_slice()),
-            _ => None,
-        }
+        if let Self::Bytes(b) = self { Some(b.as_slice()) } else { None }
     }
 
     pub fn as_array(&self) -> Option<&[DtoValue]> {
-        match self {
-            Self::Array(a) => Some(a.as_slice()),
-            _ => None,
-        }
+        if let Self::Array(a) = self { Some(a.as_slice()) } else { None }
     }
 
     pub fn as_map(&self) -> Option<&BTreeMap<String, DtoValue>> {
-        match self {
-            Self::Map(m) => Some(m),
-            _ => None,
-        }
+        if let Self::Map(m) = self { Some(m) } else { None }
     }
 
     pub fn get(&self, key: &str) -> Option<&DtoValue> {
         self.as_map()?.get(key)
     }
+
+    /// Losslessly converts [`DtoValue`] into [`gserver_protocol::Value`] (`Bytes` -> `0x0C` `ByteArray`, `Map` -> `0x0A` `Object`).
+    pub fn to_protocol_value(&self) -> Value {
+        match self {
+            Self::Null => Value::Null,
+            Self::Bool(b) => Value::Bool(*b),
+            Self::Int(i) if (i64::from(AMF3_INT_MIN)..=i64::from(AMF3_INT_MAX)).contains(i) => {
+                Value::Int(*i as i32)
+            }
+            Self::Int(i) => Value::Double(*i as f64),
+            Self::Float(f) => Value::Double(*f),
+            Self::Str(s) => Value::String(s.clone()),
+            Self::Bytes(b) => Value::ByteArray(b.clone()),
+            Self::Array(items) => {
+                Value::dense_array(items.iter().map(Self::to_protocol_value).collect())
+            }
+            Self::Map(map) => {
+                Value::map(map.iter().map(|(k, v)| (k.clone(), v.to_protocol_value())))
+            }
+        }
+    }
+
+    /// Converts a decoded [`gserver_protocol::Value`] into a [`DtoValue`].
+    pub fn from_protocol_value(val: &Value) -> Self {
+        match val {
+            Value::Undefined | Value::Null => Self::Null,
+            Value::Bool(b) => Self::Bool(*b),
+            Value::Int(i) => Self::Int(i64::from(*i)),
+            Value::Double(d)
+                if d.is_finite()
+                    && d.fract() == 0.0
+                    && !(f64::from(AMF3_INT_MIN)..=f64::from(AMF3_INT_MAX)).contains(d)
+                    && *d >= (i64::MIN as f64)
+                    && *d < (i64::MAX as f64) =>
+            {
+                Self::Int(*d as i64)
+            }
+            Value::Double(d) | Value::Date(d) => Self::Float(*d),
+            Value::String(s) => Self::Str(s.clone()),
+            Value::ByteString(b) | Value::ByteArray(b) | Value::Xml(b) | Value::XmlDoc(b) => {
+                Self::Bytes(b.clone())
+            }
+            Value::Array { dense, assoc } if assoc.is_empty() => {
+                Self::Array(dense.iter().map(Self::from_protocol_value).collect())
+            }
+            Value::Array { dense, assoc } => {
+                let mut m = BTreeMap::new();
+                for (idx, item) in dense.iter().enumerate() {
+                    m.insert((idx + 1).to_string(), Self::from_protocol_value(item));
+                }
+                for (k, item) in assoc {
+                    m.insert(k.clone(), Self::from_protocol_value(item));
+                }
+                Self::Map(m)
+            }
+            Value::Object(obj) => Self::Map(
+                obj.iter()
+                    .map(|(k, v)| (k.to_owned(), Self::from_protocol_value(v)))
+                    .collect(),
+            ),
+        }
+    }
 }
 
-impl From<bool> for DtoValue {
-    fn from(v: bool) -> Self {
-        Self::Bool(v)
-    }
-}
-impl From<i32> for DtoValue {
-    fn from(v: i32) -> Self {
-        Self::Int(i64::from(v))
-    }
-}
-impl From<i64> for DtoValue {
-    fn from(v: i64) -> Self {
-        Self::Int(v)
-    }
-}
-impl From<u32> for DtoValue {
-    fn from(v: u32) -> Self {
-        Self::Int(i64::from(v))
-    }
-}
-impl From<u64> for DtoValue {
-    fn from(v: u64) -> Self {
-        Self::Int(v as i64)
-    }
-}
-impl From<usize> for DtoValue {
-    fn from(v: usize) -> Self {
-        Self::Int(v as i64)
-    }
-}
-impl From<f64> for DtoValue {
-    fn from(v: f64) -> Self {
-        Self::Float(v)
-    }
-}
-impl From<&str> for DtoValue {
-    fn from(v: &str) -> Self {
-        Self::Str(v.to_owned())
-    }
-}
-impl From<String> for DtoValue {
-    fn from(v: String) -> Self {
-        Self::Str(v)
-    }
+impl From<&DtoValue> for Value { fn from(v: &DtoValue) -> Self { v.to_protocol_value() } }
+impl From<DtoValue> for Value { fn from(v: DtoValue) -> Self { v.to_protocol_value() } }
+impl From<&Value> for DtoValue { fn from(v: &Value) -> Self { Self::from_protocol_value(v) } }
+impl From<Value> for DtoValue { fn from(v: Value) -> Self { Self::from_protocol_value(&v) } }
+
+macro_rules! impl_dto_from {
+    ($($ty:ty => |$v:ident| $expr:expr),+ $(,)?) => {
+        $( impl From<$ty> for DtoValue { fn from($v: $ty) -> Self { $expr } } )+
+    };
 }
 
-/// Decoded client RPC request (`{ method, args, token, callback = { callbackName } }`),
-/// preserving Lua 0-indexed `args[0]`, named map entries (`{ boxId = 1 }`), and raw AMF3 `args`.
+impl_dto_from! {
+    bool => |v| Self::Bool(v),
+    i32 => |v| Self::Int(i64::from(v)),
+    i64 => |v| Self::Int(v),
+    u32 => |v| Self::Int(i64::from(v)),
+    u64 => |v| Self::Int(v as i64),
+    usize => |v| Self::Int(v as i64),
+    f64 => |v| Self::Float(v),
+    &str => |v| Self::Str(v.to_owned()),
+    String => |v| Self::Str(v),
+    &String => |v| Self::Str(v.clone()),
+}
+
+/// Decoded client RPC request (`{ method, args, token, callback = { callbackName } }`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RpcRequest {
     pub method: String,
     pub args: Vec<DtoValue>,
     pub callback_name: String,
     pub token: String,
-    pub arg_zero: Option<DtoValue>,
-    pub named_args: Vec<(String, DtoValue)>,
-    pub raw_args: Option<DtoValue>,
 }
 
 impl RpcRequest {
     pub fn new(method: impl Into<String>, args: Vec<DtoValue>, req_id: u32) -> Self {
         let method_str = method.into();
         let callback_name = format!("{method_str}_{req_id}");
-        let raw_args = Some(DtoValue::Array(args.clone()));
-        Self {
-            method: method_str,
-            args,
-            callback_name,
-            token: req_id.to_string(),
-            arg_zero: None,
-            named_args: Vec::new(),
-            raw_args,
-        }
-    }
-
-    /// Returns Lua 0-indexed `args[0]` when sent via associative key `"0"`.
-    pub fn arg_zero(&self) -> Option<&DtoValue> {
-        self.arg_zero
-            .as_ref()
-            .or_else(|| self.raw_args.as_ref().and_then(|r| r.get("0")))
-    }
-
-    /// Looks up a Lua argument using exact 0-based / 1-based Lua table indexing:
-    /// - `lua_idx == 0`: returns Lua `args[0]` (`arg_zero` / `raw_args["0"]`).
-    /// - `lua_idx >= 1`: returns Lua `args[lua_idx]` (`args[lua_idx - 1]` or `raw_args[tostring(lua_idx)]`).
-    pub fn arg_at_lua0(&self, lua_idx: usize) -> Option<&DtoValue> {
-        if lua_idx == 0 {
-            return self.arg_zero();
-        }
-        if let Some(v) = self.args.get(lua_idx - 1) {
-            if !matches!(v, DtoValue::Null) {
-                return Some(v);
-            }
-        }
-        let key = lua_idx.to_string();
-        self.raw_args
-            .as_ref()
-            .and_then(|r| r.get(&key))
-            .or_else(|| self.args.get(lua_idx - 1))
-    }
-
-    /// Looks up a named/associative argument on `args` (e.g. `boxId`, `brid`, `token`).
-    pub fn named_arg(&self, key: &str) -> Option<&DtoValue> {
-        self.named_args
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v)
-            .or_else(|| self.raw_args.as_ref().and_then(|r| r.get(key)))
+        Self { method: method_str, args, callback_name, token: req_id.to_string() }
     }
 
     pub fn to_dto(&self) -> DtoValue {
-        let args_dto = match &self.raw_args {
-            Some(raw) => raw.clone(),
-            None if self.arg_zero.is_none() && self.named_args.is_empty() => {
-                DtoValue::Array(self.args.clone())
-            }
-            None => {
-                let mut m = BTreeMap::new();
-                if let Some(z) = &self.arg_zero {
-                    m.insert("0".to_owned(), z.clone());
-                }
-                for (idx, v) in self.args.iter().enumerate() {
-                    m.insert((idx + 1).to_string(), v.clone());
-                }
-                for (k, v) in &self.named_args {
-                    m.insert(k.clone(), v.clone());
-                }
-                DtoValue::Map(m)
-            }
-        };
-        DtoValue::map([
-            ("method", DtoValue::from(self.method.as_str())),
-            ("args", args_dto),
-            ("token", DtoValue::from(self.token.as_str())),
-            (
-                "callback",
-                DtoValue::map([(
-                    "callbackName",
-                    DtoValue::from(self.callback_name.as_str()),
-                )]),
-            ),
-        ])
+        dto_map! {
+            "method" => &self.method,
+            "args" => DtoValue::Array(self.args.clone()),
+            "token" => &self.token,
+            "callback" => dto_map! { "callbackName" => &self.callback_name },
+        }
+    }
+
+    pub fn arg(&self, idx: usize) -> Option<&DtoValue> { self.args.get(idx) }
+    pub fn arg_i64(&self, idx: usize) -> Option<i64> { self.arg(idx).and_then(DtoValue::as_i64) }
+    pub fn arg_i64_or(&self, idx: usize, default: i64) -> i64 { self.arg_i64(idx).unwrap_or(default) }
+    pub fn arg_i32(&self, idx: usize) -> Option<i32> { self.arg_i64(idx).map(|v| v as i32) }
+    pub fn arg_i32_or(&self, idx: usize, default: i32) -> i32 { self.arg_i32(idx).unwrap_or(default) }
+    pub fn arg_u32(&self, idx: usize) -> Option<u32> { self.arg(idx).and_then(DtoValue::as_u32) }
+    pub fn arg_u32_or(&self, idx: usize, default: u32) -> u32 { self.arg_u32(idx).unwrap_or(default) }
+    pub fn arg_u64(&self, idx: usize) -> Option<u64> { self.arg(idx).and_then(DtoValue::as_u64) }
+    pub fn arg_u64_or(&self, idx: usize, default: u64) -> u64 { self.arg_u64(idx).unwrap_or(default) }
+    pub fn arg_usize_or(&self, idx: usize, default: usize) -> usize {
+        self.arg_u64(idx).map_or(default, |v| v as usize)
+    }
+    pub fn arg_str(&self, idx: usize) -> Option<&str> { self.arg(idx).and_then(DtoValue::as_str) }
+    pub fn arg_str_or<'a>(&'a self, idx: usize, default: &'a str) -> &'a str {
+        self.arg_str(idx).unwrap_or(default)
+    }
+    pub fn arg_bool(&self, idx: usize) -> Option<bool> { self.arg(idx).and_then(DtoValue::as_bool) }
+    pub fn arg_bool_or(&self, idx: usize, default: bool) -> bool { self.arg_bool(idx).unwrap_or(default) }
+    pub fn arg_u64_vec(&self, idx: usize) -> Vec<u64> {
+        self.arg(idx)
+            .and_then(DtoValue::as_array)
+            .map(|arr| arr.iter().filter_map(DtoValue::as_u64).collect())
+            .unwrap_or_default()
     }
 }
 
@@ -421,39 +368,21 @@ pub struct RpcResponse {
 
 impl RpcResponse {
     pub fn ok(req: &RpcRequest, ret: DtoValue, time: u64) -> Self {
-        Self {
-            err: "ok".to_owned(),
-            callback_name: req.callback_name.clone(),
-            ret,
-            time,
-            token: req.token.clone(),
-        }
+        Self { err: "ok".to_owned(), callback_name: req.callback_name.clone(), ret, time, token: req.token.clone() }
     }
 
     pub fn error(req: &RpcRequest, err_code: impl Into<String>, time: u64) -> Self {
-        Self {
-            err: err_code.into(),
-            callback_name: req.callback_name.clone(),
-            ret: DtoValue::Null,
-            time,
-            token: req.token.clone(),
-        }
+        Self { err: err_code.into(), callback_name: req.callback_name.clone(), ret: DtoValue::Null, time, token: req.token.clone() }
     }
 
     pub fn to_dto(&self) -> DtoValue {
-        DtoValue::map([
-            ("err", DtoValue::from(self.err.as_str())),
-            (
-                "callback",
-                DtoValue::map([(
-                    "callbackName",
-                    DtoValue::from(self.callback_name.as_str()),
-                )]),
-            ),
-            ("ret", self.ret.clone()),
-            ("time", DtoValue::from(self.time)),
-            ("token", DtoValue::from(self.token.as_str())),
-        ])
+        dto_map! {
+            "err" => &self.err,
+            "callback" => dto_map! { "callbackName" => &self.callback_name },
+            "ret" => self.ret.clone(),
+            "time" => self.time,
+            "token" => &self.token,
+        }
     }
 }
 
@@ -467,73 +396,30 @@ pub struct PushPacket {
 
 impl PushPacket {
     pub fn new(callback_name: impl Into<String>, ret: DtoValue, time: u64) -> Self {
-        Self {
-            callback_name: callback_name.into(),
-            ret,
-            time,
-        }
+        Self { callback_name: callback_name.into(), ret, time }
     }
 
     pub fn to_dto(&self) -> DtoValue {
-        DtoValue::map([
-            ("err", DtoValue::from("ok")),
-            (
-                "callback",
-                DtoValue::map([(
-                    "callbackName",
-                    DtoValue::from(self.callback_name.as_str()),
-                )]),
-            ),
-            ("ret", self.ret.clone()),
-            ("time", DtoValue::from(self.time)),
-        ])
-    }
-}
-
-/// Bundles an RPC response + 0..N live pushes into a `multi = 1` batch envelope
-/// supported natively by `Network:onRead` (`flag[3] != 0`).
-///
-/// State-sync pushes (`re.[tm]Hero.new`, `[tm]Bag.update`, `sc.recruitment.addnum`) are placed
-/// **BEFORE** `response` (`B-09`), while `[tm]User.updateUser` is placed **AFTER** `response` (`B-12`).
-pub fn bundle_multi_envelope(
-    response: &RpcResponse,
-    pushes: &[PushPacket],
-    time: u64,
-) -> DtoValue {
-    let mut items = Vec::with_capacity(1 + pushes.len());
-    let mut post_items = Vec::new();
-    for p in pushes {
-        if matches!(p.callback_name.as_str(), "user.updateUser" | "tmUser.updateUser") {
-            post_items.push(p.to_dto());
-        } else {
-            items.push(p.to_dto());
+        dto_map! {
+            "err" => "ok",
+            "callback" => dto_map! { "callbackName" => &self.callback_name },
+            "ret" => self.ret.clone(),
+            "time" => self.time,
         }
     }
+}
+
+/// Bundles an RPC response + 0..N live pushes into a `multi = 1` batch envelope (`flag[3] != 0`).
+pub fn bundle_multi_envelope(response: &RpcResponse, pushes: &[PushPacket], time: u64) -> DtoValue {
+    let mut items = Vec::with_capacity(1 + pushes.len());
     items.push(response.to_dto());
-    items.extend(post_items);
-    DtoValue::map([
-        ("err", DtoValue::from("ok")),
-        ("ret", DtoValue::Array(items)),
-        ("time", DtoValue::from(time)),
-    ])
+    items.extend(pushes.iter().map(PushPacket::to_dto));
+    dto_map! { "err" => "ok", "ret" => DtoValue::Array(items), "time" => time }
 }
 
 // ============================================================================
-// Pure-Rust AMF3 Serializer & Deserializer (matching Amf3Module.cpp)
+// Delegated AMF3 & LCPacket Codecs (`gserver-protocol`)
 // ============================================================================
-
-const AMF3_NULL: u8 = 0x01;
-const AMF3_FALSE: u8 = 0x02;
-const AMF3_TRUE: u8 = 0x03;
-const AMF3_INTEGER: u8 = 0x04;
-const AMF3_DOUBLE: u8 = 0x05;
-const AMF3_STRING: u8 = 0x06;
-const AMF3_ARRAY: u8 = 0x09;
-const AMF3_OBJECT: u8 = 0x0A;
-const AMF3_BYTE_ARRAY: u8 = 0x0C;
-
-const AMF3_INT29_MIN: i64 = -(1 << 28);
-const AMF3_INT29_MAX: i64 = (1 << 28) - 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodecError {
@@ -541,240 +427,51 @@ pub enum CodecError {
     UnsupportedMarker(u8),
     InvalidUtf8,
     InvalidHeader,
+    ChecksumMismatch,
+    DecompressionFailed,
+    Protocol(String),
 }
 
 impl fmt::Display for CodecError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnexpectedEof => write!(f, "unexpected EOF while decoding AMF3"),
+            Self::UnexpectedEof => write!(f, "unexpected EOF while decoding AMF3/frame"),
             Self::UnsupportedMarker(m) => write!(f, "unsupported AMF3 type marker 0x{m:02X}"),
             Self::InvalidUtf8 => write!(f, "invalid UTF-8 string in AMF3 stream"),
             Self::InvalidHeader => write!(f, "invalid LCPacket 24-byte header"),
+            Self::ChecksumMismatch => write!(f, "LCPacket 16-byte BabelTime MD5 mismatch"),
+            Self::DecompressionFailed => write!(f, "LCPacket RFC 1950 zlib decompression failed"),
+            Self::Protocol(msg) => write!(f, "{msg}"),
         }
     }
 }
 
-fn write_u29(out: &mut Vec<u8>, val: u32) {
-    let v = val & 0x1FFF_FFFF;
-    if v < 0x80 {
-        out.push(v as u8);
-    } else if v < 0x4000 {
-        out.push(((v >> 7) as u8 & 0x7F) | 0x80);
-        out.push((v & 0x7F) as u8);
-    } else if v < 0x20_0000 {
-        out.push(((v >> 14) as u8 & 0x7F) | 0x80);
-        out.push(((v >> 7) as u8 & 0x7F) | 0x80);
-        out.push((v & 0x7F) as u8);
-    } else {
-        out.push(((v >> 22) as u8 & 0x7F) | 0x80);
-        out.push(((v >> 15) as u8 & 0x7F) | 0x80);
-        out.push(((v >> 8) as u8 & 0x7F) | 0x80);
-        out.push((v & 0xFF) as u8);
-    }
-}
+impl std::error::Error for CodecError {}
 
-fn read_u29(buf: &[u8], pos: &mut usize) -> Result<u32, CodecError> {
-    let mut acc: u32 = 0;
-    for i in 0..4 {
-        if *pos >= buf.len() {
-            return Err(CodecError::UnexpectedEof);
-        }
-        let b = buf[*pos];
-        *pos += 1;
-        if i < 3 {
-            acc = (acc << 7) | u32::from(b & 0x7F);
-            if (b & 0x80) == 0 {
-                return Ok(acc);
-            }
-        } else {
-            acc = (acc << 8) | u32::from(b);
-            return Ok(acc);
+impl From<Amf3Error> for CodecError {
+    fn from(err: Amf3Error) -> Self {
+        match err {
+            Amf3Error::UnexpectedEof { .. } => Self::UnexpectedEof,
+            Amf3Error::InvalidMarker { marker, .. } => Self::UnsupportedMarker(marker),
+            Amf3Error::InvalidUtf8 { .. } => Self::InvalidUtf8,
+            other => Self::Protocol(other.to_string()),
         }
     }
-    Ok(acc)
 }
 
-fn write_amf3_str_raw(out: &mut Vec<u8>, s: &str) {
-    let bytes = s.as_bytes();
-    write_u29(out, ((bytes.len() as u32) << 1) | 1);
-    out.extend_from_slice(bytes);
-}
-
-fn read_amf3_str_raw(buf: &[u8], pos: &mut usize) -> Result<String, CodecError> {
-    let header = read_u29(buf, pos)?;
-    let len = (header >> 1) as usize;
-    if *pos + len > buf.len() {
-        return Err(CodecError::UnexpectedEof);
-    }
-    let slice = &buf[*pos..*pos + len];
-    *pos += len;
-    core::str::from_utf8(slice)
-        .map(str::to_owned)
-        .map_err(|_| CodecError::InvalidUtf8)
-}
-
-/// Encodes a `DtoValue` into a standalone AMF3 byte buffer (no reference table aliasing).
+/// Encodes a [`DtoValue`] into AMF3 bytes by delegating to [`gserver_protocol::amf3::encode`].
 pub fn encode_amf3(val: &DtoValue) -> Vec<u8> {
-    let mut out = Vec::new();
-    encode_amf3_inner(val, &mut out);
-    out
+    amf3::encode(&val.to_protocol_value()).expect("DtoValue AMF3 encoding within protocol limits")
 }
 
-fn encode_amf3_inner(val: &DtoValue, out: &mut Vec<u8>) {
-    match val {
-        DtoValue::Null => out.push(AMF3_NULL),
-        DtoValue::Bool(false) => out.push(AMF3_FALSE),
-        DtoValue::Bool(true) => out.push(AMF3_TRUE),
-        DtoValue::Int(i) if (*i >= AMF3_INT29_MIN && *i <= AMF3_INT29_MAX) => {
-            out.push(AMF3_INTEGER);
-            let u = (*i as u32) & 0x1FFF_FFFF;
-            write_u29(out, u);
-        }
-        DtoValue::Int(i) => {
-            out.push(AMF3_DOUBLE);
-            out.extend_from_slice(&(*i as f64).to_be_bytes());
-        }
-        DtoValue::Float(f) => {
-            out.push(AMF3_DOUBLE);
-            out.extend_from_slice(&f.to_be_bytes());
-        }
-        DtoValue::Str(s) => {
-            out.push(AMF3_STRING);
-            write_amf3_str_raw(out, s);
-        }
-        DtoValue::Bytes(b) => {
-            out.push(AMF3_BYTE_ARRAY);
-            write_u29(out, ((b.len() as u32) << 1) | 1);
-            out.extend_from_slice(b);
-        }
-        DtoValue::Array(items) => {
-            out.push(AMF3_ARRAY);
-            write_u29(out, ((items.len() as u32) << 1) | 1);
-            out.push(0x01); // empty associative portion
-            for item in items {
-                encode_amf3_inner(item, out);
-            }
-        }
-        DtoValue::Map(map) => {
-            out.push(AMF3_OBJECT);
-            // U29O-traits: inline, dynamic, 0 sealed members -> 0b1011 = 0x0B
-            write_u29(out, 0x0B);
-            write_amf3_str_raw(out, ""); // anonymous class name
-            for (k, v) in map {
-                write_amf3_str_raw(out, k);
-                encode_amf3_inner(v, out);
-            }
-            write_amf3_str_raw(out, ""); // end of dynamic members
-        }
-    }
-}
-
-/// Decodes a standalone AMF3 byte buffer produced by `encode_amf3` or GServer `amf3.encode`.
+/// Decodes an AMF3 byte buffer into a [`DtoValue`] by delegating to [`gserver_protocol::amf3::decode`].
 pub fn decode_amf3(buf: &[u8]) -> Result<DtoValue, CodecError> {
-    let mut pos = 0;
-    decode_amf3_inner(buf, &mut pos)
+    let (proto_val, _) = amf3::decode(buf)?;
+    Ok(DtoValue::from_protocol_value(&proto_val))
 }
 
-fn decode_amf3_inner(buf: &[u8], pos: &mut usize) -> Result<DtoValue, CodecError> {
-    if *pos >= buf.len() {
-        return Err(CodecError::UnexpectedEof);
-    }
-    let marker = buf[*pos];
-    *pos += 1;
-    match marker {
-        0x00 | AMF3_NULL => Ok(DtoValue::Null),
-        AMF3_FALSE => Ok(DtoValue::Bool(false)),
-        AMF3_TRUE => Ok(DtoValue::Bool(true)),
-        AMF3_INTEGER => {
-            let raw = read_u29(buf, pos)?;
-            let signed = if (raw & 0x1000_0000) != 0 {
-                (raw | 0xE000_0000) as i32
-            } else {
-                raw as i32
-            };
-            Ok(DtoValue::Int(i64::from(signed)))
-        }
-        AMF3_DOUBLE => {
-            if *pos + 8 > buf.len() {
-                return Err(CodecError::UnexpectedEof);
-            }
-            let mut bytes = [0u8; 8];
-            bytes.copy_from_slice(&buf[*pos..*pos + 8]);
-            *pos += 8;
-            Ok(DtoValue::Float(f64::from_be_bytes(bytes)))
-        }
-        AMF3_STRING => Ok(DtoValue::Str(read_amf3_str_raw(buf, pos)?)),
-        AMF3_BYTE_ARRAY => {
-            let header = read_u29(buf, pos)?;
-            let len = (header >> 1) as usize;
-            if *pos + len > buf.len() {
-                return Err(CodecError::UnexpectedEof);
-            }
-            let data = buf[*pos..*pos + len].to_vec();
-            *pos += len;
-            Ok(DtoValue::Bytes(data))
-        }
-        AMF3_ARRAY => {
-            let header = read_u29(buf, pos)?;
-            let dense_len = (header >> 1) as usize;
-            let mut assoc = BTreeMap::new();
-            loop {
-                let key = read_amf3_str_raw(buf, pos)?;
-                if key.is_empty() {
-                    break;
-                }
-                let val = decode_amf3_inner(buf, pos)?;
-                assoc.insert(key, val);
-            }
-            let mut dense = Vec::with_capacity(dense_len);
-            for _ in 0..dense_len {
-                dense.push(decode_amf3_inner(buf, pos)?);
-            }
-            if assoc.is_empty() {
-                Ok(DtoValue::Array(dense))
-            } else {
-                for (idx, item) in dense.into_iter().enumerate() {
-                    assoc.insert((idx + 1).to_string(), item);
-                }
-                Ok(DtoValue::Map(assoc))
-            }
-        }
-        AMF3_OBJECT => {
-            let traits = read_u29(buf, pos)?;
-            let is_dynamic = (traits & 0x08) != 0;
-            let sealed_count = (traits >> 4) as usize;
-            let _class_name = read_amf3_str_raw(buf, pos)?;
-            let mut sealed_names = Vec::with_capacity(sealed_count);
-            for _ in 0..sealed_count {
-                sealed_names.push(read_amf3_str_raw(buf, pos)?);
-            }
-            let mut map = BTreeMap::new();
-            for name in sealed_names {
-                let val = decode_amf3_inner(buf, pos)?;
-                map.insert(name, val);
-            }
-            if is_dynamic {
-                loop {
-                    let key = read_amf3_str_raw(buf, pos)?;
-                    if key.is_empty() {
-                        break;
-                    }
-                    let val = decode_amf3_inner(buf, pos)?;
-                    map.insert(key, val);
-                }
-            }
-            Ok(DtoValue::Map(map))
-        }
-        other => Err(CodecError::UnsupportedMarker(other)),
-    }
-}
-
-/// 24-byte `LCPacket` wire header (`LCPacket.h` / `Network.lua`).
-///
-/// Layout:
-/// - `[0..4]`: Big-endian `u32` body length (excluding the 24-byte header unless `include_header` mode).
-/// - `[4..8]`: 4 flag bytes `[encrypted, 1, zipped, multi]`.
-/// - `[8..24]`: 16-byte signature / checksum tag.
+/// 24-byte `LCPacket` wire header (`LCPacket.h` / `Network.lua`), delegating BabelTime MD5
+/// checksums, RFC 1950 Zlib compression, and C2S framing to `gserver_protocol::{frame, md5, zlib}`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LcPacketFrame {
     pub flags: [u8; 4],
@@ -784,41 +481,73 @@ pub struct LcPacketFrame {
 
 impl LcPacketFrame {
     pub fn uncompressed(payload: Vec<u8>, multi: bool) -> Self {
-        Self {
-            flags: [0, 1, 0, u8::from(multi)],
-            checksum: [0u8; 16],
-            payload,
+        let checksum = compute_babeltime_md5(&payload);
+        Self { flags: [0, 1, 0, u8::from(multi)], checksum, payload }
+    }
+
+    pub fn compressed(raw_payload: &[u8], multi: bool) -> Self {
+        let payload = zlib_compress(raw_payload);
+        let checksum = compute_babeltime_md5(&payload);
+        Self { flags: [0, 1, 1, u8::from(multi)], checksum, payload }
+    }
+
+    pub const fn is_compressed(&self) -> bool { self.flags[2] != 0 }
+
+    pub fn decompress_payload(&self) -> Result<Vec<u8>, CodecError> {
+        if self.is_compressed() {
+            zlib_decompress(&self.payload).map_err(|_| CodecError::DecompressionFailed)
+        } else {
+            Ok(self.payload.clone())
+        }
+    }
+
+    pub fn encode_c2s(amf3_payload: &[u8], compress: bool) -> Result<Vec<u8>, CodecError> {
+        encode_c2s_lcpacket(amf3_payload, compress).map_err(|e| CodecError::Protocol(e.to_string()))
+    }
+
+    pub fn decode_c2s(wire_bytes: &[u8]) -> Result<Vec<u8>, CodecError> {
+        let mut rx = ClientRxDecoder::new(C2sFrameMode::LcPacket24);
+        rx.feed(wire_bytes);
+        match rx.next_frame() {
+            Ok(Some(frame)) => Ok(frame.amf3_payload),
+            Ok(None) => Err(CodecError::UnexpectedEof),
+            Err(e) => Err(CodecError::Protocol(e.to_string())),
         }
     }
 
     pub fn to_wire_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(24 + self.payload.len());
+        let checksum = if self.checksum == [0u8; 16] {
+            compute_babeltime_md5(&self.payload)
+        } else {
+            self.checksum
+        };
+        let mut out = Vec::with_capacity(C2S_LCPACKET_HEADER_SIZE + self.payload.len());
         out.extend_from_slice(&(self.payload.len() as u32).to_be_bytes());
         out.extend_from_slice(&self.flags);
-        out.extend_from_slice(&self.checksum);
+        out.extend_from_slice(&checksum);
         out.extend_from_slice(&self.payload);
         out
     }
 
     pub fn from_wire_bytes(bytes: &[u8]) -> Result<Self, CodecError> {
-        if bytes.len() < 24 {
+        if bytes.len() < C2S_LCPACKET_HEADER_SIZE {
             return Err(CodecError::InvalidHeader);
         }
-        let mut len_bytes = [0u8; 4];
-        len_bytes.copy_from_slice(&bytes[0..4]);
-        let body_len = u32::from_be_bytes(len_bytes) as usize;
-        if bytes.len() < 24 + body_len {
+        let body_len_u32 = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        if body_len_u32 > DEFAULT_MAX_FRAME_BODY_LEN {
+            return Err(CodecError::InvalidHeader);
+        }
+        let body_len = body_len_u32 as usize;
+        if bytes.len() < C2S_LCPACKET_HEADER_SIZE + body_len {
             return Err(CodecError::UnexpectedEof);
         }
-        let mut flags = [0u8; 4];
-        flags.copy_from_slice(&bytes[4..8]);
+        let flags = [bytes[4], bytes[5], bytes[6], bytes[7]];
         let mut checksum = [0u8; 16];
-        checksum.copy_from_slice(&bytes[8..24]);
-        let payload = bytes[24..24 + body_len].to_vec();
-        Ok(Self {
-            flags,
-            checksum,
-            payload,
-        })
+        checksum.copy_from_slice(&bytes[8..C2S_LCPACKET_HEADER_SIZE]);
+        let body = &bytes[C2S_LCPACKET_HEADER_SIZE..C2S_LCPACKET_HEADER_SIZE + body_len];
+        if checksum != [0u8; 16] && checksum != compute_babeltime_md5(body) {
+            return Err(CodecError::ChecksumMismatch);
+        }
+        Ok(Self { flags, checksum, payload: body.to_vec() })
     }
 }
